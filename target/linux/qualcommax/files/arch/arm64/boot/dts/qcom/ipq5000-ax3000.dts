@@ -26,11 +26,9 @@
 	};
 
 	chosen {
-		bootargs-find-1 = "root=mtd:ubi_rootfs rootfstype=squashfs";
-		bootargs-replace-1 = "ubi.block=0,rootfs root=/dev/ubiblock0_1 rootfstype=squashfs rootwait";
-		bootargs-find-2 = "root=mtd:ubi_rootfs";
-		bootargs-replace-2 = "ubi.block=0,rootfs root=/dev/ubiblock0_1 rootfstype=squashfs rootwait";
-		bootargs-append = " coherent_pool=2M";
+		bootargs-find-1 = "ubi.mtd=rootfs_1";
+		bootargs-replace-1 = "ubi.mtd=rootfs";
+		bootargs-append = " root=/dev/ubiblock0_1 rootwait coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
 	};
 

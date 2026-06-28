@@ -13,18 +13,20 @@ identical to bootargs-find-X.
 
 Signed-off-by: Qiyuan Zhang <zhang.github@outlook.com>
 ---
- drivers/of/fdt.c |   71 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 71 insertions(+)
+ drivers/of/fdt.c |   67 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 67 insertions(+)
 
 --- a/drivers/of/fdt.c
 +++ b/drivers/of/fdt.c
-@@ -1021,6 +1021,14 @@ int __init early_init_dt_scan_chosen(cha
+@@ -1021,6 +1021,16 @@ int __init early_init_dt_scan_chosen(cha
  	const void *rng_seed;
  	const void *fdt = initial_boot_params;
  
-+	int i, cmd_len, f_len, r_len, offset, step;
-+	char *s_ptr, *l_end, *r_end, *cur_ptr, *end_ptr;
++	int i, cmd_len, f_len, r_len, offset;
++	char *s_ptr;
 +	const char *exact_match;
++	const char *find;
++	const char *replace;
 +	const int bootargs_replace_num = 2;
 +	const char *bootargs_replace_props[2][3] =
 +		{ {"bootargs-find-1", "bootargs-replace-1", "bootargs-exact-match-1"},
@@ -33,34 +35,42 @@ Signed-off-by: Qiyuan Zhang <zhang.github@outlook.com>
  	node = fdt_path_offset(fdt, "/chosen");
  	if (node < 0)
  		node = fdt_path_offset(fdt, "/chosen@0");
-@@ -1049,6 +1057,69 @@ int __init early_init_dt_scan_chosen(cha
+@@ -1049,6 +1059,63 @@ int __init early_init_dt_scan_chosen(cha
  	p = of_get_flat_dt_prop(node, "bootargs", &l);
  	if (p != NULL && l > 0)
  		strscpy(cmdline, p, min(l, COMMAND_LINE_SIZE));
 +
 +	for(i = 0; i < bootargs_replace_num; i++) {
-+		p = of_get_flat_dt_prop(node, bootargs_replace_props[i][0], &f_len);
++		find = of_get_flat_dt_prop(node, bootargs_replace_props[i][0], &f_len);
 +
-+		if (p == NULL || f_len == 0 )
++		if (find == NULL || f_len == 0)
++			continue;
++
++		f_len = strlen(find);
++		if (f_len == 0)
 +			continue;
 +
 +		exact_match = of_get_flat_dt_prop(node, bootargs_replace_props[i][2], &l);
 +
 +		if (exact_match != NULL && l > 0 && exact_match[0] == 'y') {
-+			if(strncmp(cmdline, p, r_len) == 0)
++			if (strcmp(cmdline, find) == 0)
 +				s_ptr = cmdline;
 +			else
 +				s_ptr = NULL;
 +		} else {
-+			s_ptr = strstr(cmdline, p);
++			s_ptr = strstr(cmdline, find);
 +		}
 +
 +		if(!s_ptr)
 +			continue;
 +
-+		p = of_get_flat_dt_prop(node, bootargs_replace_props[i][1], &r_len);
++		replace = of_get_flat_dt_prop(node, bootargs_replace_props[i][1], &r_len);
 +
-+		if (p == NULL || r_len == 0)
++		if (replace == NULL || r_len == 0)
++			continue;
++
++		r_len = strlen(replace);
++		if (r_len == 0)
 +			continue;
 +
 +		pr_info("Input kernel commad line: %s\n", cmdline);
@@ -73,25 +83,11 @@ Signed-off-by: Qiyuan Zhang <zhang.github@outlook.com>
 +
 +			offset = r_len - f_len;
 +
-+			if (offset != 0) {
-+				l_end = s_ptr + f_len -	1;
-+				r_end = cmdline + cmd_len;
++			if (offset != 0)
++				memmove(s_ptr + r_len, s_ptr + f_len,
++					strlen(s_ptr + f_len) + 1);
 +
-+				if (offset > 0) {
-+					step = -1;
-+					cur_ptr = r_end;
-+					end_ptr = l_end + step;
-+				} else {
-+					step = 1;
-+					cur_ptr = l_end;
-+					end_ptr = r_end + step;
-+				}
-+
-+				for (; cur_ptr != end_ptr; cur_ptr += step)
-+					*(cur_ptr + offset) = *cur_ptr;
-+			}
-+
-+			strncpy(s_ptr, p, r_len - 1);
++			memcpy(s_ptr, replace, r_len);
 +
 +			pr_info("Kernel command line after replacement: %s\n", cmdline);
 +		} else {
