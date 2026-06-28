@@ -1,9 +1,10 @@
 . /lib/functions/bootconfig.sh
+. /lib/upgrade/mi_dualboot.sh
 
 PART_NAME=firmware
 REQUIRE_IMAGE_METADATA=1
 
-RAMFS_COPY_BIN='dumpimage fw_printenv fw_setenv head seq'
+RAMFS_COPY_BIN='dumpimage fw_printenv fw_setenv head seq ubiformat ubiattach'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 
 xiaomi_initramfs_prepare() {
@@ -166,7 +167,14 @@ linksys_mx_pre_upgrade() {
 }
 
 platform_check_image() {
-	return 0;
+	case "$(board_name)" in
+	redmi,ax3000)
+		mi_dualboot_check_image "$1"
+		;;
+	*)
+		return 0
+		;;
+	esac
 }
 
 platform_pre_upgrade() {
@@ -210,6 +218,9 @@ platform_do_upgrade() {
 		linksys_bootconfig_pre_upgrade "$1"
 		remove_oem_ubi_volume ubi_rootfs
 		nand_do_upgrade "$1"
+		;;
+	redmi,ax3000)
+		mi_dualboot_do_upgrade "$1"
 		;;
 	xiaomi,ax6000)
 		# Make sure that UART is enabled

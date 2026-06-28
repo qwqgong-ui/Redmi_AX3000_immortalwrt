@@ -20,6 +20,7 @@ ipq50xx_setup_interfaces()
 	linksys,mx2000|\
 	linksys,mx5500|\
 	linksys,spnmx56|\
+	redmi,ax3000|\
 	xiaomi,ax6000)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
 		;;
@@ -34,6 +35,16 @@ ipq50xx_setup_interfaces()
 board_config_update
 board=$(board_name)
 ipq50xx_setup_interfaces $board
+
+case "$board" in
+redmi,ax3000)
+	ucidef_set_network_device_conduit "lan1" "eth1"
+	ucidef_set_network_device_conduit "lan2" "eth1"
+	ucidef_set_network_device_conduit "lan3" "eth1"
+	ucidef_set_network_device_conduit "wan" "eth0"
+	;;
+esac
+
 board_config_flush
 
 exit 0

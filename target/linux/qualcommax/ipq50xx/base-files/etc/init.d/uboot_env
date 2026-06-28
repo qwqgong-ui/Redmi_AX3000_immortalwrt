@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+[ -r /lib/functions.sh ] && . /lib/functions.sh
+
+boot() {
+	command -v board_name >/dev/null 2>&1 || return 0
+
+	case "$(board_name)" in
+	redmi,ax3000)
+		fw_printenv >/dev/null || return 0
+
+		local flag_ota_reboot
+		local mtd
+
+		flag_ota_reboot="$(fw_printenv flag_ota_reboot | cut -d= -f2)"
+		[ "$flag_ota_reboot" = "1" ] || return 0
+
+		mtd="$(grep -oE 'ubi.mtd=[a-zA-Z0-9_-]*' /proc/cmdline | cut -d= -f2)"
+		case "$mtd" in
+		rootfs)
+			fw_setenv flag_last_success 0
+			;;
+		rootfs_1)
+			fw_setenv flag_last_success 1
+			;;
+		*)
+			echo "Unable to determine UBIPART: ubi.mtd=$mtd"
+			return 1
+			;;
+		esac
+
+		fw_setenv flag_ota_reboot 0
+		fw_setenv flag_boot_success 1
+		;;
+	esac
+}

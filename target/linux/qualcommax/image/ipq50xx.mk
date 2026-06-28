@@ -91,6 +91,31 @@ define Device/iodata_wn-dax3000gr
 endef
 TARGET_DEVICES += iodata_wn-dax3000gr
 
+define Device/redmi_ax3000
+	$(call Device/FitImage)
+	$(call Device/UbiFit)
+	DEVICE_VENDOR := Redmi
+	DEVICE_MODEL := AX3000
+	DEVICE_ALT0_VENDOR := Xiaomi
+	DEVICE_ALT0_MODEL := CR880X
+	DEVICE_ALT0_VARIANT := M81
+	DEVICE_ALT1_VENDOR := Xiaomi
+	DEVICE_ALT1_MODEL := CR880X
+	DEVICE_ALT1_VARIANT := M79
+	DEVICE_DTS_CONFIG := config@mp02.1
+	SOC := ipq5000
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	NAND_SIZE := 128m
+	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
+		ipq-wifi-redmi_ax3000
+ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
+	ARTIFACTS := initramfs-factory.ubi
+	ARTIFACT/initramfs-factory.ubi := append-image-stage initramfs-uImage.itb | ubinize-kernel
+endif
+endef
+TARGET_DEVICES += redmi_ax3000
+
 define Device/linksys_ipq50xx_mx_base
 	$(call Device/FitImageLzma)
 	DEVICE_VENDOR := Linksys
