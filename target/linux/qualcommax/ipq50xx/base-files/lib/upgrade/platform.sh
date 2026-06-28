@@ -2,7 +2,15 @@
 . /lib/upgrade/mi_dualboot.sh
 
 PART_NAME=firmware
-REQUIRE_IMAGE_METADATA=1
+
+case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+redmi,ax3000)
+	REQUIRE_IMAGE_METADATA=0
+	;;
+*)
+	REQUIRE_IMAGE_METADATA=1
+	;;
+esac
 
 RAMFS_COPY_BIN='dumpimage fw_printenv fw_setenv head seq ubiformat ubiattach'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
