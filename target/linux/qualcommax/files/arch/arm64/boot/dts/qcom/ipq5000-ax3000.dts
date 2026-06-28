@@ -26,8 +26,6 @@
 	};
 
 	chosen {
-		bootargs-find-1 = "ubi.mtd=rootfs_1";
-		bootargs-replace-1 = "ubi.mtd=rootfs";
 		bootargs-append = " root=/dev/ubiblock0_1 rootwait coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
 	};
