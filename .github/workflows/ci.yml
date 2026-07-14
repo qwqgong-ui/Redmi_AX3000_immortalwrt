@@ -1,14 +1,14 @@
-name: CI
+name: Build ath11k kmod
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - agent/ath11k-kmod-artifact
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      ci_version: ${{ steps.hook_core.outputs.ci_version }}
     steps:
       - name: Free disk space
         run: |
@@ -21,50 +21,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Hook the openwrt_core URL for opkg
-        id: hook_core
-        run: |
-          set -euo pipefail
-          OWNER="${GITHUB_REPOSITORY%%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-          RUN_META="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")" || {
-            echo "Failed to fetch workflow run metadata from GitHub API (repo=${GITHUB_REPOSITORY}, run=${GITHUB_RUN_ID})."
-            exit 1
-          }
-          TIME="$(jq -er .created_at <<<"${RUN_META}")" || {
-            echo "Invalid workflow run metadata: missing created_at."
-            exit 1
-          }
-          CI_VERSION="ci-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA:0:8}"
-
-          echo "ci_version=${CI_VERSION}" >>"$GITHUB_OUTPUT"
-          grep -Fq '%U/targets/%S/packages' include/feeds.mk || {
-            echo "Expected pattern '%U/targets/%S/packages' not found in include/feeds.mk."
-            exit 1
-          }
-          sed -i "s|%U/targets/%S/packages|https://${OWNER}.github.io/${REPO}/${GITHUB_REF_NAME}/%R|" include/feeds.mk
-
       - name: Update and install feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure
+      - name: Configure target and ath11k only
         run: |
           cat <<EOF | sed -E 's/^  //' >.config
             CONFIG_TARGET_qualcommax=y
             CONFIG_TARGET_qualcommax_ipq50xx=y
             CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
-
-            CONFIG_IB=y
-            # CONFIG_IB_STANDALONE is not set
-            CONFIG_SDK=y
-            CONFIG_MAKE_TOOLCHAIN=y
-
-            CONFIG_ALL_NONSHARED=y
-            CONFIG_REPRODUCIBLE_DEBUG_INFO=y
-
-            CONFIG_PACKAGE_luci=y
+            CONFIG_PACKAGE_kmod-ath11k=y
+            CONFIG_PACKAGE_kmod-ath11k-ahb=y
           EOF
           make defconfig
 
@@ -80,127 +49,28 @@ jobs:
         run: |
           make -j$(nproc) toolchain/install V=sc
 
-      - name: Build all
+      - name: Build target kernel
         run: |
-          make -j$(nproc) V=sc
+          make -j$(nproc) target/linux/compile V=sc
 
-      - name: Upload bin to artifacts
+      - name: Build mac80211 package
+        run: |
+          make -j$(nproc) package/kernel/mac80211/compile V=sc
+
+      - name: Verify kmod package exists
+        run: |
+          shopt -s nullglob
+          packages=(bin/targets/qualcommax/ipq50xx/packages/kmod-ath11k_*.ipk)
+          ((${#packages[@]} == 1)) || {
+            printf 'Expected one kmod-ath11k package, found %d\n' "${#packages[@]}"
+            find bin -type f -name 'kmod-ath11k*' -print || true
+            exit 1
+          }
+          printf '%s\n' "${packages[@]}"
+
+      - name: Upload kmod-ath11k
         uses: actions/upload-artifact@v7
         with:
-          name: bin-qualcommax-ipq50xx
-          path: bin/targets/qualcommax/ipq50xx/*
-
-      - name: Upload dl to artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: dl
-          path: dl/*
-
-  gh-pages:
-    needs: [ build ]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout gh-pages
-        uses: actions/checkout@v6
-        with:
-          path: 'gh-pages'
-          ref: 'gh-pages'
-          fetch-depth: 0
-
-      - name: Configure the git user
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-      - name: Drop old versions
-        run: |
-          cd gh-pages
-          readarray -t old_version < <(git log --format='%h' -- "${GITHUB_REF_NAME}" | tail -n +10)
-          GIT_SEQUENCE_EDITOR="sed -i '1 i break'" git rebase --interactive --committer-date-is-author-date --root
-          for commit in "${old_version[@]}"; do
-            sed -i "/${commit}/d" .git/rebase-merge/git-rebase-todo
-          done
-          git rebase --continue
-
-      - name: Download core packages from artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: bin-qualcommax-ipq50xx
-          path: bin/
-
-      - name: Copy contents
-        run: |
-          version="$(cat "bin/version.buildinfo")"
-          mkdir -p "gh-pages/${GITHUB_REF_NAME}/${version}/"
-          cp -avr bin/packages/* "gh-pages/${GITHUB_REF_NAME}/${version}/"
-
-      - name: Commit
-        run: |
-          cd gh-pages
-          git add .
-          git commit -m "Add: ${GITHUB_REF_NAME}: $(cat ../bin/version.buildinfo)"
-
-      - name: Publish
-        run: |
-          cd gh-pages
-          git push origin gh-pages -f
-
-  release:
-    needs: [ build ]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Download dl from artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: dl
-          path: dl/
-
-      - name: Download bin from artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: bin-qualcommax-ipq50xx
-          path: bin/targets/qualcommax/ipq50xx/
-
-      - name: Generate release informations
-        run: |
-          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
-
-          TAG="ci-${GITHUB_REF_NAME}-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S-%Z')"
-          echo "TAG=$TAG" >>$GITHUB_ENV
-
-          cat <<EOF | sed -E 's/^  //' >Release.md
-            CI ${GITHUB_REF_NAME} $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
-
-            # ${GITHUB_REF_NAME}
-
-            Build time: \`$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')\`
-            Release version: ${TAG}
-
-            ## Sources
-            $(cat bin/targets/qualcommax/ipq50xx/feeds.buildinfo | awk -F'[ ^]' '{printf "%s: `%s`\n", $2, $4}')
-
-            ## SHA256
-            $(cat bin/targets/qualcommax/ipq50xx/sha256sums | awk '{printf "%s: `%s`\n", $2, $1}' | sed -E 's/^\*//')
-          EOF
-
-          echo "NAME=$(head --line=1 Release.md)" >>$GITHUB_ENV
-          tail --line=+2 Release.md >Body.md
-
-      - name: Release
-        uses: softprops/action-gh-release@v3
-        with:
-          prerelease: true
-          tag_name: ${{ env.TAG }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ env.NAME }}
-          body_path: Body.md
-          files: |
-            bin/targets/qualcommax/ipq50xx/sha256sums
-            bin/targets/qualcommax/ipq50xx/*.*
+          name: kmod-ath11k-qualcommax-ipq50xx
+          path: bin/targets/qualcommax/ipq50xx/packages/kmod-ath11k_*.ipk
+          if-no-files-found: error
