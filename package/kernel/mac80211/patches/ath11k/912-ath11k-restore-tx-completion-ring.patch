@@ -1,0 +1,33 @@
+From 2c9e7e09fc4e40d4648a4de4f82c0e975aebd0e0 Mon Sep 17 00:00:00 2001
+From: qwqgong-ui <qwqgong-ui@users.noreply.github.com>
+Date: Tue, 14 Jul 2026 21:50:00 +0800
+Subject: [PATCH] wifi: ath11k: restore upstream TX completion ring size
+
+Patch 911 reduces both the TX completion ring and the coupled TX buffer IDR
+from 32768 to 2048 entries. On IPQ5018 and QCN6122, delayed or missing TX
+completions can exhaust this small IDR and make ath11k_dp_tx() return
+-ENOSPC continuously, logged as "failed to transmit frame -28".
+
+Restore the upstream 32768-entry TX completion ring and IDR. Keep the RX DMA
+buffer reductions from patch 911 because they do not participate in this
+failure and avoid unnecessary memory pressure on 256 MiB devices.
+
+---
+ drivers/net/wireless/ath/ath11k/dp.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath11k/dp.h
+index 7aa7892..d7982c8 100644
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -205,7 +205,7 @@ struct ath11k_pdev_dp {
+ #define DP_WBM_RELEASE_RING_SIZE	64
+ #define DP_TCL_DATA_RING_SIZE		512
+ #define DP_TCL_DATA_RING_SIZE_WCN6750	2048
+-#define DP_TX_COMP_RING_SIZE		2048
++#define DP_TX_COMP_RING_SIZE		32768
+ #define DP_TX_IDR_SIZE			DP_TX_COMP_RING_SIZE
+ #define DP_TCL_CMD_RING_SIZE		32
+ #define DP_TCL_STATUS_RING_SIZE		32
+--
+2.45.2
