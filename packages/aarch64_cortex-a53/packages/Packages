@@ -1,0 +1,12 @@
+Package: cgi-io
+Version: 2022.08.10~901b0f04-r21
+Depends: libc, libubox20240329, libubus20250102
+License: GPL-2.0-or-later
+Section: net
+Architecture: aarch64_cortex-a53
+Installed-Size: 81920
+Filename: cgi-io_2022.08.10~901b0f04-r21_aarch64_cortex-a53.ipk
+Size: 10268
+SHA256sum: f22a32e90228ce9d75d2cfa38d6605096f747d33d6d53e23184700230159c4fd
+Description:  This package contains an cgi utility that is useful for up/downloading files
+
