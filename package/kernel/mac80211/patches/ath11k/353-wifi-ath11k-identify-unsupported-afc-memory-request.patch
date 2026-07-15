@@ -1,0 +1,46 @@
+From 5e6748a55c0b22f525005e989fc957414f489b52 Mon Sep 17 00:00:00 2001
+From: qwqgong-ui <qwqgong-ui@users.noreply.github.com>
+Date: Wed, 15 Jul 2026 18:00:00 +0800
+Subject: [PATCH] wifi: ath11k: identify unsupported AFC memory requests
+
+QCN6122 firmware may request an AFC memory region even when the radio is
+used only on 5 GHz. AFC memory is a known QMI region type used by the 6 GHz
+AFC flow, but ath11k does not currently provision it.
+
+Identify the request explicitly and report it at QMI debug level instead of
+warning that it is an invalid memory type. Keep the existing behavior of not
+including the unsupported region in the target memory response.
+
+Signed-off-by: qwqgong-ui <qwqgong-ui@users.noreply.github.com>
+---
+ drivers/net/wireless/ath/ath11k/qmi.c | 5 +++++
+ drivers/net/wireless/ath/ath11k/qmi.h | 1 +
+ 2 files changed, 6 insertions(+)
+
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -39,6 +39,7 @@
+ #define BDF_MEM_REGION_TYPE				0x2
+ #define M3_DUMP_REGION_TYPE				0x3
+ #define CALDB_MEM_REGION_TYPE				0x4
++#define AFC_REGION_TYPE					0xA
+ 
+ struct qmi_wlanfw_host_cap_req_msg_v01 {
+ 	u8 num_clients_valid;
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -2116,6 +2116,11 @@ static int ath11k_qmi_assign_target_mem_chunk(struct ath11k_base *ab)
+ 			ab->qmi.target_mem[idx].type = ab->qmi.target_mem[i].type;
+ 			idx++;
+ 			break;
++		case AFC_REGION_TYPE:
++			ath11k_dbg(ab, ATH11K_DBG_QMI,
++				   "qmi ignore unsupported AFC mem req size %u\n",
++				   ab->qmi.target_mem[i].size);
++			break;
+ 		default:
+ 			ath11k_warn(ab, "qmi ignore invalid mem req type %d\n",
+ 				    ab->qmi.target_mem[i].type);
+-- 
+2.50.1
+
