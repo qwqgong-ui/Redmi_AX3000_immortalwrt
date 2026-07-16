@@ -3,13 +3,24 @@
 mi_dualboot_check_image() {
 	local ret=0
 	local file_type
+	local kernel_volume
 	local mtd
+	local rootfs_volume
 
 	file_type="$(head -c 3 "$1")"
 	if [ "$file_type" != "UBI" ]; then
 		v "Unsupported file type: $file_type"
 		v "Please use ubi file"
 		ret=1
+	else
+		# Redmi AX3000 UBI uses 2 KiB pages and 172-byte volume records.
+		kernel_volume="$(dd if="$1" bs=1 skip=4112 count=6 2>/dev/null)"
+		rootfs_volume="$(dd if="$1" bs=1 skip=4284 count=6 2>/dev/null)"
+		if [ "$kernel_volume" != "kernel" ] || [ "$rootfs_volume" != "rootfs" ]; then
+			v "Unsupported UBI volume layout: kernel=$kernel_volume rootfs=$rootfs_volume"
+			v "Please use the squashfs factory UBI, not the initramfs recovery UBI"
+			ret=1
+		fi
 	fi
 
 	mtd="$(grep -oE 'ubi.mtd=[a-zA-Z0-9_-]*' /proc/cmdline | cut -d= -f2)"
@@ -61,11 +72,20 @@ mi_dualboot_do_upgrade() {
 	ubiformat "/dev/mtd$mtdnum" -f "$1" -y || return 1
 	sync
 
-	ubiattach --mtdn "$mtdnum"
+	ubiattach --mtdn "$mtdnum" || return 1
 
 	ubidev="$(nand_find_ubi "$CI_UBIPART")"
+	[ -n "$ubidev" ] || {
+		v "Unable to find UBI device for $CI_UBIPART"
+		return 1
+	}
+
 	if [ -z "$(nand_find_volume "$ubidev" kernel)" ]; then
 		v "\"kernel\" volume does not exist; vendor U-Boot can fail to switch slots."
+		return 1
+	fi
+	if [ -z "$(nand_find_volume "$ubidev" rootfs)" ]; then
+		v "\"rootfs\" volume does not exist; refusing to switch slots."
 		return 1
 	fi
 
