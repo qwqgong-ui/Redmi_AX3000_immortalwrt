@@ -1,8 +1,9 @@
 # Redmi AX3000 ImmortalWrt 24.10 package repository
 
 This orphan branch contains the signed OPKG repositories produced from
-ImmortalWrt `24.10-SNAPSHOT` (`r33919-3afceffdef`) for
-`qualcommax/ipq50xx`, package architecture `aarch64_cortex-a53`.
+ImmortalWrt `24.10-SNAPSHOT` (`r33982-c0cdf3733a`) for
+`qualcommax/ipq50xx`, Linux `6.6.143`, package architecture
+`aarch64_cortex-a53`.
 
 ## Repository layout
 
@@ -27,4 +28,5 @@ opkg update
 All six `Packages` indexes were verified against the included public key
 before publication.
 
-Firmware releases are available from the repository's GitHub Releases page.
+The matching firmware release is
+`v24.10-snapshot-r33982-c0cdf3733a` on the repository's GitHub Releases page.

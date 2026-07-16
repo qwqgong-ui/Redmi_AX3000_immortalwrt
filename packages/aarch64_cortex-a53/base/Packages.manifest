@@ -150,13 +150,13 @@ Maintainer: Felix Fietkau <nbd@nbd.name>
 Architecture: aarch64_cortex-a53
 Installed-Size: 542720
 Filename: busybox_1.36.1-r2_aarch64_cortex-a53.ipk
-Size: 238290
-SHA256sum: e81cce463e8017775445171e76b3b0781dcd8b0309c067ef50e1de6c5b87011b
+Size: 238289
+SHA256sum: 66a8eb49752b8c5ed5084e29b0b08334e8950d6b0e0a1272310eb9299548bf29
 Description:  The Swiss Army Knife of embedded Linux.
  It slices, it dices, it makes Julian Fries.
 
 Package: ca-bundle
-Version: 20250419-r1
+Version: 20260223-r1
 Depends: libc
 Provides: ca-certs
 Source: feeds/base/system/ca-certificates
@@ -164,12 +164,12 @@ SourceName: ca-certificates
 License: GPL-2.0-or-later MPL-2.0
 LicenseFiles: debian/copyright
 Section: base
-SourceDateEpoch: 1756042257
+SourceDateEpoch: 1779010265
 Architecture: all
-Installed-Size: 235520
-Filename: ca-bundle_20250419-r1_all.ipk
-Size: 131152
-SHA256sum: 55a06a8bb02bf1267ff9c4ede247d8355580ec0674e691c06aaf055d9fad1d7c
+Installed-Size: 225280
+Filename: ca-bundle_20260223-r1_all.ipk
+Size: 127135
+SHA256sum: 0e92c4a6026eba39122555f506077410a8a5ba7aa01f5bbc36d29807af945d96
 Description:  System CA certificates as a bundle
 
 Package: carl9170-firmware
@@ -253,7 +253,7 @@ SHA256sum: 4c41001a6d5b845dc636e58894f6ecadbb27a1f70effb3808927cb35845b7ce9
 Description:  LuCI support for Default Settings
 
 Package: dnsmasq-full
-Version: 2.90-r5
+Version: 2.93-r1
 Depends: libc, libubus20250102, libnettle8, libnetfilter-conntrack3, nftables-json
 Provides: dnsmasq
 Source: feeds/base/network/services/dnsmasq
@@ -262,14 +262,14 @@ License: GPL-2.0
 LicenseFiles: COPYING
 Section: net
 Require-User: dnsmasq=453:dnsmasq=453
-SourceDateEpoch: 1746512941
+SourceDateEpoch: 1782713971
 URL: http://www.thekelleys.org.uk/dnsmasq/
 CPE-ID: cpe:/a:thekelleys:dnsmasq
 Architecture: aarch64_cortex-a53
 Installed-Size: 471040
-Filename: dnsmasq-full_2.90-r5_aarch64_cortex-a53.ipk
-Size: 205569
-SHA256sum: afd7566994ba2442dbf1420ae134d17b3f9f9db4a824df44a8c92b3898bec5b9
+Filename: dnsmasq-full_2.93-r1_aarch64_cortex-a53.ipk
+Size: 218398
+SHA256sum: 65d7406bd160f746da0054dda3d10376b1ec9da44386d6b06cc455f1b45a19b4
 Description:  It is intended to provide coupled DNS and DHCP service to a LAN.
  
  This is a fully configurable variant with DHCPv4, DHCPv6, DNSSEC, Authoritative DNS
@@ -584,8 +584,8 @@ Maintainer: Luiz Angelo Daros de Luca <luizluca@gmail.com>
 Architecture: aarch64_cortex-a53
 Installed-Size: 143360
 Filename: libelf1_0.192-r1_aarch64_cortex-a53.ipk
-Size: 43412
-SHA256sum: 710905c391f189d0bab5685e18996d06a376ea064eb9883a8659817b1672a1cf
+Size: 43421
+SHA256sum: a4b79a80f6d22f340832000ee9f1434b84191b0bc71a3da03a856a8936ef4afc
 Description:  ELF manipulation libraries (libelf)
 
 Package: libext2fs2
@@ -875,22 +875,22 @@ SHA256sum: 83b615395b2f18cb665ea80a93f2d19ca4ebfa8578ab67ebdae7e67b21a03136
 Description:  This package contains a stripped down version of libnl
 
 Package: libopenssl-conf
-Version: 3.0.19-r1
+Version: 3.0.21-r1
 Depends: libc, libopenssl3
 Source: feeds/base/libs/openssl
 SourceName: openssl
 License: Apache-2.0
 LicenseFiles: LICENSE.txt
 Section: libs
-SourceDateEpoch: 1770286332
+SourceDateEpoch: 1782713971
 URL: https://www.openssl.org/
 CPE-ID: cpe:/a:openssl:openssl
 Maintainer: Eneas U de Queiroz <cotequeiroz@gmail.com>
 Architecture: aarch64_cortex-a53
 Installed-Size: 20480
-Filename: libopenssl-conf_3.0.19-r1_aarch64_cortex-a53.ipk
-Size: 6493
-SHA256sum: 7fee7814cf4a1efb363671895cdabfbb3eb09a946b7e9c28ca4e14d2cfd05234
+Filename: libopenssl-conf_3.0.21-r1_aarch64_cortex-a53.ipk
+Size: 6490
+SHA256sum: 9b1092401cd922ee507d6e14d80f935245d785aff9b4e4bcd4bfb9f6759896a2
 Description:  The OpenSSL Project is a collaborative effort to develop a robust,
  commercial-grade, full-featured, and Open Source toolkit implementing the
  Transport Layer Security (TLS) protocol as well as a full-strength
@@ -898,29 +898,29 @@ Description:  The OpenSSL Project is a collaborative effort to develop a robust,
  This package installs the OpenSSL configuration file /etc/ssl/openssl.cnf.
 
 Package: libopenssl-legacy
-Version: 3.0.19-r1
+Version: 3.0.21-r1
 Depends: libc, libopenssl3, libopenssl-conf
 Source: feeds/base/libs/openssl
 SourceName: openssl
 License: Apache-2.0
 LicenseFiles: LICENSE.txt
 Section: libs
-SourceDateEpoch: 1770286332
+SourceDateEpoch: 1782713971
 URL: https://www.openssl.org/
 CPE-ID: cpe:/a:openssl:openssl
 Maintainer: Eneas U de Queiroz <cotequeiroz@gmail.com>
 Architecture: aarch64_cortex-a53
 Installed-Size: 143360
-Filename: libopenssl-legacy_3.0.19-r1_aarch64_cortex-a53.ipk
-Size: 37773
-SHA256sum: 65dab53f8cf8c11c332f2f937b47947d83d9ae1ef8e992dcd4df077f1cdea4a0
+Filename: libopenssl-legacy_3.0.21-r1_aarch64_cortex-a53.ipk
+Size: 37816
+SHA256sum: 05165ab2f560aced0781dac5090c2a913c20a40d5e7a27c0d096307256fd1950
 Description:  The OpenSSL legacy provider supplies OpenSSL implementations of algorithms that
  have been deemed legacy. Such algorithms have commonly fallen out of use, have
  been deemed insecure by the cryptography community, or something similar.  See
  https://www.openssl.org/docs/man3.0/man7/OSSL_PROVIDER-legacy.html
 
 Package: libopenssl3
-Version: 3.0.19-r1
+Version: 3.0.21-r1
 Depends: libc
 Provides: libopenssl
 Source: feeds/base/libs/openssl
@@ -928,16 +928,16 @@ SourceName: openssl
 License: Apache-2.0
 LicenseFiles: LICENSE.txt
 Section: libs
-SourceDateEpoch: 1770286332
+SourceDateEpoch: 1782713971
 URL: https://www.openssl.org/
 ABIVersion: 3
 CPE-ID: cpe:/a:openssl:openssl
 Maintainer: Eneas U de Queiroz <cotequeiroz@gmail.com>
 Architecture: aarch64_cortex-a53
 Installed-Size: 5345280
-Filename: libopenssl3_3.0.19-r1_aarch64_cortex-a53.ipk
-Size: 2020583
-SHA256sum: 1eae5fa8e0c3e334dcc01507a88fd2e63fee23b495b75ab2bd43dad9c51bbdb8
+Filename: libopenssl3_3.0.21-r1_aarch64_cortex-a53.ipk
+Size: 2023788
+SHA256sum: 854ec2f42a7e92f09d1ef47a14ce626e1c19e41946c40fc92aefbfe710184a41
 Description:  The OpenSSL Project is a collaborative effort to develop a robust,
  commercial-grade, full-featured, and Open Source toolkit implementing the
  Transport Layer Security (TLS) protocol as well as a full-strength
@@ -2342,21 +2342,21 @@ SHA256sum: 61b926776a446f7f1fe835cf135580fd25c801da37e33ade5b1162265b4f1cab
 Description:  wil6210 firmware
 
 Package: wireless-regdb
-Version: 2026.02.04-r1
+Version: 2026.03.18-r1
 Depends: libc
 Source: feeds/base/firmware/wireless-regdb
 SourceName: wireless-regdb
 License: ISC
 LicenseFiles: LICENSE
 Section: firmware
-SourceDateEpoch: 1773803211
+SourceDateEpoch: 1779423642
 URL: https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/
 Maintainer: Felix Fietkau <nbd@nbd.name>
 Architecture: all
 Installed-Size: 10240
-Filename: wireless-regdb_2026.02.04-r1_all.ipk
-Size: 3521
-SHA256sum: a99f8e3a255508c7529270064fad2433b09385100872de79883e9b938ecd3e86
+Filename: wireless-regdb_2026.03.18-r1_all.ipk
+Size: 3527
+SHA256sum: 6f56255954e2a8f8cde9a617b6587125b6a689b5392ded58f4e7aa0e8dcd5fe4
 Description:  Wireless Regulatory Database
 
 Package: wl12xx-firmware
@@ -2410,8 +2410,8 @@ Maintainer: Felix Fietkau <nbd@nbd.name>
 Architecture: aarch64_cortex-a53
 Installed-Size: 1761280
 Filename: wpad-openssl_2024.09.15~5ace39b0-r2_aarch64_cortex-a53.ipk
-Size: 840772
-SHA256sum: 9f04f49d11abe665816e0c0eed3d701d16938c0fe4341ac2723cd375958ea547
+Size: 840782
+SHA256sum: 7dd3efa94134155710c3877750388bfe62dcbd96d8748f9de2c784bf08e46877
 Description:  This package contains a full featured IEEE 802.1x/WPA/EAP/RADIUS
  Authenticator and Supplicant
 
