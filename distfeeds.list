@@ -1,0 +1,4 @@
+https://raw.githubusercontent.com/qwqgong-ui/Redmi_AX3000_immortalwrt/packages-25.12-filtered-port/targets/qualcommax/ipq50xx/packages/packages.adb
+https://raw.githubusercontent.com/qwqgong-ui/Redmi_AX3000_immortalwrt/packages-25.12-filtered-port/packages/aarch64_cortex-a53/base/packages.adb
+https://raw.githubusercontent.com/qwqgong-ui/Redmi_AX3000_immortalwrt/packages-25.12-filtered-port/packages/aarch64_cortex-a53/luci/packages.adb
+https://raw.githubusercontent.com/qwqgong-ui/Redmi_AX3000_immortalwrt/packages-25.12-filtered-port/packages/aarch64_cortex-a53/packages/packages.adb

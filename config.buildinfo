@@ -1,0 +1,38 @@
+CONFIG_TARGET_qualcommax=y
+CONFIG_TARGET_qualcommax_ipq50xx=y
+CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
+CONFIG_IB=y
+CONFIG_MAKE_TOOLCHAIN=y
+# CONFIG_PACKAGE_automount is not set
+# CONFIG_PACKAGE_block-mount is not set
+# CONFIG_PACKAGE_e2fsprogs is not set
+# CONFIG_PACKAGE_kmod-fs-exfat is not set
+# CONFIG_PACKAGE_kmod-fs-ext4 is not set
+# CONFIG_PACKAGE_kmod-fs-ntfs3 is not set
+# CONFIG_PACKAGE_kmod-fs-vfat is not set
+# CONFIG_PACKAGE_kmod-lib-crc16 is not set
+# CONFIG_PACKAGE_kmod-nls-base is not set
+# CONFIG_PACKAGE_kmod-nls-cp437 is not set
+# CONFIG_PACKAGE_kmod-nls-iso8859-1 is not set
+# CONFIG_PACKAGE_kmod-nls-utf8 is not set
+# CONFIG_PACKAGE_kmod-scsi-core is not set
+# CONFIG_PACKAGE_kmod-usb-core is not set
+# CONFIG_PACKAGE_kmod-usb-dwc3 is not set
+# CONFIG_PACKAGE_kmod-usb-dwc3-qcom is not set
+# CONFIG_PACKAGE_kmod-usb-storage is not set
+# CONFIG_PACKAGE_kmod-usb-storage-extras is not set
+# CONFIG_PACKAGE_kmod-usb-storage-uas is not set
+# CONFIG_PACKAGE_kmod-usb3 is not set
+# CONFIG_PACKAGE_libblkid is not set
+# CONFIG_PACKAGE_libcomerr is not set
+# CONFIG_PACKAGE_libe2p is not set
+# CONFIG_PACKAGE_libext2fs is not set
+# CONFIG_PACKAGE_librt is not set
+# CONFIG_PACKAGE_libsmartcols is not set
+# CONFIG_PACKAGE_libss is not set
+# CONFIG_PACKAGE_libuuid is not set
+# CONFIG_PACKAGE_losetup is not set
+# CONFIG_PACKAGE_ntfs3-mount is not set
+CONFIG_REPRODUCIBLE_DEBUG_INFO=y
+CONFIG_SDK=y
+# CONFIG_IB_STANDALONE is not set
