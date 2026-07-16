@@ -31,11 +31,10 @@
 	};
 
 	reserved-memory {
-		// Not sure why but without this, WiFi will crash
+		// Required for WiFi; bootloader and SBL reserve the next 3 MiB.
 		tz_apps@4a400000 {
 			no-map;
-			// The size is incorrent, but it works
-			reg = <0x0 0x4a400000 0x0 0x700000>;
+			reg = <0x0 0x4a400000 0x0 0x400000>;
 		};
 
 		q6_mem_regions: q6_mem_regions@4b000000 {
