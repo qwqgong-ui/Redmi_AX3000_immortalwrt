@@ -55,6 +55,9 @@ jobs:
             CONFIG_TARGET_qualcommax=y
             CONFIG_TARGET_qualcommax_ipq50xx=y
             CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
+            CONFIG_DEVEL=y
+            CONFIG_TARGET_OPTIONS=y
+            CONFIG_TARGET_OPTIMIZATION="-O2 -pipe -mcpu=cortex-a53+crc+crypto"
 
             CONFIG_IB=y
             # CONFIG_IB_STANDALONE is not set
