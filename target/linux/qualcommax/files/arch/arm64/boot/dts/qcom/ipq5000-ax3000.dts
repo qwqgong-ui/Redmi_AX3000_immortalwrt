@@ -131,28 +131,75 @@
 		nand-bus-width = <8>;
 
 		partitions {
-			compatible = "qcom,smem-part";
+			/* Match the map injected by Xiaomi U-Boot on the working 24.10 image. */
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
 
-			partition-0-art {
-				label = "0:ART";
+			partition@0 {
+				label = "0:SBL1";
+				reg = <0x0000000 0x0080000>;
 				read-only;
-
-				nvmem-layout {
-					compatible = "fixed-layout";
-					#address-cells = <1>;
-					#size-cells = <1>;
-
-					hw_mac_addr: mac-address@0 {
-						compatible = "mac-base";
-						reg = <0x0 0x6>;
-						#nvmem-cell-cells = <1>;
-					};
-				};
 			};
 
-			partition-0-appsblenv {
+			partition@80000 {
+				label = "0:MIBIB";
+				reg = <0x0080000 0x0080000>;
+				read-only;
+			};
+
+			partition@100000 {
+				label = "0:BOOTCONFIG";
+				reg = <0x0100000 0x0040000>;
+				read-only;
+			};
+
+			partition@140000 {
+				label = "0:BOOTCONFIG1";
+				reg = <0x0140000 0x0040000>;
+				read-only;
+			};
+
+			partition@180000 {
+				label = "0:QSEE";
+				reg = <0x0180000 0x0100000>;
+				read-only;
+			};
+
+			partition@280000 {
+				label = "0:QSEE_1";
+				reg = <0x0280000 0x0100000>;
+				read-only;
+			};
+
+			partition@380000 {
+				label = "0:DEVCFG";
+				reg = <0x0380000 0x0040000>;
+				read-only;
+			};
+
+			partition@3c0000 {
+				label = "0:DEVCFG_1";
+				reg = <0x03c0000 0x0040000>;
+				read-only;
+			};
+
+			partition@400000 {
+				label = "0:CDT";
+				reg = <0x0400000 0x0040000>;
+				read-only;
+			};
+
+			partition@440000 {
+				label = "0:CDT_1";
+				reg = <0x0440000 0x0040000>;
+				read-only;
+			};
+
+			partition@480000 {
 				compatible = "fixed-partitions";
 				label = "0:APPSBLENV";
+				reg = <0x0480000 0x0080000>;
 				#address-cells = <1>;
 				#size-cells = <1>;
 
@@ -169,6 +216,62 @@
 						};
 					};
 				};
+			};
+
+			partition@500000 {
+				label = "0:APPSBL";
+				reg = <0x0500000 0x0140000>;
+				read-only;
+			};
+
+			partition@640000 {
+				label = "0:APPSBL_1";
+				reg = <0x0640000 0x0140000>;
+				read-only;
+			};
+
+			partition@780000 {
+				label = "0:ART";
+				reg = <0x0780000 0x0100000>;
+				read-only;
+
+					nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					hw_mac_addr: mac-address@0 {
+						compatible = "mac-base";
+						reg = <0x0 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+
+			partition@880000 {
+				label = "0:TRAINING";
+				reg = <0x0880000 0x0080000>;
+				read-only;
+			};
+
+			partition@900000 {
+				label = "bdata";
+				reg = <0x0900000 0x0080000>;
+			};
+
+			partition@980000 {
+				label = "crash";
+				reg = <0x0980000 0x0080000>;
+			};
+
+			partition@a00000 {
+				label = "crash_log";
+				reg = <0x0a00000 0x0080000>;
+			};
+
+			partition@a80000 {
+				label = "rootfs";
+				reg = <0x0a80000 0x7480000>;
 			};
 		};
 	};
