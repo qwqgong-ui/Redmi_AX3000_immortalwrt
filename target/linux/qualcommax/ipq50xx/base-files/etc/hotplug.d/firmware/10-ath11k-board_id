@@ -1,0 +1,33 @@
+#!/bin/sh
+
+[ -e /lib/firmware/$FIRMWARE ] && exit 0
+
+. /lib/functions.sh
+
+set_board_id() {
+	echo "$1" > "/lib/firmware/$FIRMWARE"
+}
+
+board=$(board_name)
+
+case "$FIRMWARE" in
+"ath11k/IPQ5018/hw1.0/board_id-ahb-c000000.wifi")
+	case "$board" in
+	redmi,ax3000)
+		bdata_mtd=$(find_mtd_part bdata)
+		[ -n "$bdata_mtd" ] || exit 1
+
+		pa_type=$(strings "$bdata_mtd" 2>/dev/null |
+			sed -n 's/^wl_pa_type=//p' | head -n 1)
+		case "$pa_type" in
+		epa) set_board_id 0x24 ;;
+		xpa|ipa) set_board_id 0x10 ;;
+		*) exit 1 ;;
+		esac
+		;;
+	esac
+	;;
+*)
+	exit 1
+	;;
+esac
