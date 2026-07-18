@@ -496,5 +496,5 @@
 	qcom,m3-dump-addr = <0x4df00000>;
 	qcom,board_id = <0x60>;
 
-	ieee80211-freq-limit = <5150000 5730000>;
+	ieee80211-freq-limit = <5150000 5850000>;
 };
