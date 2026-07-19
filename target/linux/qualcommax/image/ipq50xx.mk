@@ -124,7 +124,7 @@ define Device/redmi_ax3000
 	PAGESIZE := 2048
 	NAND_SIZE := 128m
 	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
-		ipq-wifi-redmi_ax3000
+		ipq-wifi-redmi_ax3000 zram-swap
 ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
 	ARTIFACTS := initramfs-factory.ubi
 	ARTIFACT/initramfs-factory.ubi := append-image-stage initramfs-uImage.itb | ubinize-kernel

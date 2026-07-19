@@ -1,0 +1,8 @@
+#!/bin/sh
+
+[ "$(cat /tmp/sysinfo/board_name)" = "redmi,ax3000" ] || exit 0
+
+uci -q set system.@system[0].zram_comp_algo='lzo-rle'
+uci -q commit system
+
+exit 0
