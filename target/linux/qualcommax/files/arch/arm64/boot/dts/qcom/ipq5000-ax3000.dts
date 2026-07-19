@@ -475,12 +475,18 @@
 	boot-args = <0x2 4 2 27 0 0>;
 };
 
+&q6_region {
+	reg = <0x0 0x4b000000 0x0 0x3b00000>;
+};
+
 &wifi {
 	status = "okay";
 
 	qcom,rproc = <&q6_wcss_pd1>;
-	qcom,ath11k-fw-memory-mode = <2>;
+	qcom,ath11k-fw-memory-mode = <1>;
 	qcom,bdf-addr = <0x4c400000>;
+	qcom,caldb-addr = <0x4d200000>;
+	qcom,m3-dump-addr = <0x4d400000>;
 	qcom,board_id = <0x24>;
 
 	ieee80211-freq-limit = <2400000 2483000>;
@@ -491,9 +497,10 @@
 
 	qcom,rproc = <&q6_wcss_pd2>;
 	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
-	qcom,ath11k-fw-memory-mode = <2>;
-	qcom,bdf-addr = <0x4d100000>;
-	qcom,m3-dump-addr = <0x4df00000>;
+	qcom,ath11k-fw-memory-mode = <1>;
+	qcom,bdf-addr = <0x4d500000>;
+	qcom,caldb-addr = <0x4e500000>;
+	qcom,m3-dump-addr = <0x4ea00000>;
 	qcom,board_id = <0x60>;
 
 	ieee80211-freq-limit = <5150000 5850000>;
