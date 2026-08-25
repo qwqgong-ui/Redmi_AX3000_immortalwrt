@@ -1,0 +1,104 @@
+Subject: [PATCH] wifi: ath11k: budget the tx completion handler
+
+ath11k_dp_service_srng() passes the NAPI budget to every other handler it
+calls, but the tx completion handler has none: it drains the whole status
+FIFO in one call and reports no work done, so a sustained completion rate
+can hold the NAPI poll for an unbounded time. With a scheduling round now
+running from that handler, the work per call has grown.
+
+Bound the consumer of the status FIFO by the remaining budget and report
+the completions processed, like the rx handlers do.
+
+This is a backport of patch 9/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp.c b/drivers/net/wireless/ath/ath11k/dp.c
+index 56b1a65..69158f5 100644
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -784,8 +784,14 @@ int ath11k_dp_service_srng(struct ath11k_base *ab,
+ 
+ 	for (i = 0; i < ab->hw_params.max_tx_ring; i++) {
+ 		if (BIT(ab->hw_params.hal_params->tcl2wbm_rbm_map[i].wbm_ring_num) &
+-		    ab->hw_params.ring_mask->tx[grp_id])
+-			ath11k_dp_tx_completion_handler(ab, i);
++		    ab->hw_params.ring_mask->tx[grp_id]) {
++			work_done = ath11k_dp_tx_completion_handler(ab, i, budget);
++			budget -= work_done;
++			tot_work_done += work_done;
++
++			if (budget <= 0)
++				goto done;
++		}
+ 	}
+ 
+ 	if (ab->hw_params.ring_mask->rx_err[grp_id]) {
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 29e0bd8..5ba4c61 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -684,7 +684,8 @@ static inline void ath11k_dp_tx_status_parse(struct ath11k_base *ab,
+ 		ts->rate_stats = 0;
+ }
+ 
+-void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
++int ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id,
++				    int budget)
+ {
+ 	struct ath11k *ar;
+ 	struct ath11k_dp *dp = &ab->dp;
+@@ -698,6 +699,7 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ 	u32 msdu_id;
+ 	u8 mac_id;
+ 	u8 ac;
++	int work_done = 0;
+ 	int i;
+ 
+ 	spin_lock_bh(&status_ring->lock);
+@@ -724,10 +726,13 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ 
+ 	spin_unlock_bh(&status_ring->lock);
+ 
+-	while (ATH11K_TX_COMPL_NEXT(tx_ring->tx_status_tail) != tx_ring->tx_status_head) {
++	while (work_done < budget &&
++	       ATH11K_TX_COMPL_NEXT(tx_ring->tx_status_tail) != tx_ring->tx_status_head) {
+ 		struct hal_wbm_release_ring *tx_status;
+ 		u32 desc_id;
+ 
++		work_done++;
++
+ 		tx_ring->tx_status_tail =
+ 			ATH11K_TX_COMPL_NEXT(tx_ring->tx_status_tail);
+ 		tx_status = &tx_ring->tx_status[tx_ring->tx_status_tail];
+@@ -791,6 +796,8 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ 				ath11k_mac_tx_push_pending(ar, ac);
+ 		}
+ 	}
++
++	return work_done;
+ }
+ 
+ int ath11k_dp_tx_send_reo_cmd(struct ath11k_base *ab, struct dp_rx_tid *rx_tid,
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.h b/drivers/net/wireless/ath/ath11k/dp_tx.h
+index 795fe3b..ab82733 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.h
+@@ -21,7 +21,8 @@ void ath11k_dp_tx_update_txcompl(struct ath11k *ar, struct hal_tx_status *ts);
+ int ath11k_dp_tx_htt_h2t_ver_req_msg(struct ath11k_base *ab);
+ int ath11k_dp_tx(struct ath11k *ar, struct ath11k_vif *arvif,
+ 		 struct ath11k_sta *arsta, struct sk_buff *skb);
+-void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id);
++int ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id,
++				    int budget);
+ int ath11k_dp_tx_send_reo_cmd(struct ath11k_base *ab, struct dp_rx_tid *rx_tid,
+ 			      enum hal_reo_cmd_type type,
+ 			      struct ath11k_hal_reo_cmd *cmd,

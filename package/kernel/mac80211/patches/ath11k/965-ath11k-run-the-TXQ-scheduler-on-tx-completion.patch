@@ -1,0 +1,78 @@
+Subject: [PATCH] wifi: ath11k: run the TXQ scheduler on tx completion
+
+A tx completion is what frees both the tx descriptor and the airtime
+charged against the queue limit, so it is the moment at which the next
+frames become sendable. Nothing starts a round there, so with a binding
+limit the queue is only refilled when the next frame arrives from the
+network stack, and the throughput collapses: on the author's IPQ8074 bench
+33.7 Mbit/s without this round against 74.3 Mbit/s with it, at the same
+21 ms of latency.
+
+Start a round for the access categories that saw completions, on the radio
+they completed on.
+
+This is a backport of patch 6/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 4cba35e..29e0bd8 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -693,9 +693,12 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ 	struct sk_buff *msdu;
+ 	struct hal_tx_status ts = {};
+ 	struct dp_tx_ring *tx_ring = &dp->tx_ring[ring_id];
++	u8 sched_mask[MAX_RADIOS] = {};
+ 	u32 *desc;
+ 	u32 msdu_id;
+ 	u8 mac_id;
++	u8 ac;
++	int i;
+ 
+ 	spin_lock_bh(&status_ring->lock);
+ 
+@@ -759,8 +762,35 @@ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id)
+ 		if (atomic_dec_and_test(&ar->dp.num_tx_pending))
+ 			wake_up(&ar->dp.tx_empty_waitq);
+ 
++		ac = skb_get_queue_mapping(msdu);
++		if (ac < IEEE80211_NUM_ACS && mac_id < MAX_RADIOS)
++			sched_mask[mac_id] |= BIT(ac);
++
+ 		ath11k_dp_tx_complete_msdu(ar, msdu, &ts);
+ 	}
++
++	/* Completions are what frees both the descriptors and the airtime
++	 * charged against the queue limit, so this is the point where the
++	 * next frames become sendable. Without a round here the queue is
++	 * only refilled when the network stack hands down the next frame,
++	 * which is what costs the throughput at a binding limit.
++	 */
++	for (i = 0; i < MAX_RADIOS; i++) {
++		if (!sched_mask[i])
++			continue;
++
++		if (!rcu_access_pointer(ab->pdevs_active[i]))
++			continue;
++
++		ar = ab->pdevs[i].ar;
++		if (!ar)
++			continue;
++
++		for (ac = 0; ac < IEEE80211_NUM_ACS; ac++) {
++			if (sched_mask[i] & BIT(ac))
++				ath11k_mac_tx_push_pending(ar, ac);
++		}
++	}
+ }
+ 
+ int ath11k_dp_tx_send_reo_cmd(struct ath11k_base *ab, struct dp_rx_tid *rx_tid,

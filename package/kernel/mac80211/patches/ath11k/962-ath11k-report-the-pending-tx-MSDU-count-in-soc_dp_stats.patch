@@ -1,0 +1,50 @@
+Subject: [PATCH] wifi: ath11k: report the pending tx MSDU count in soc_dp_stats
+
+The number of MSDUs handed to the hardware and not yet completed is what
+the AQL charge in mac80211 is outstanding against, but nothing exports it,
+so the driver-side occupancy cannot be compared against what mac80211
+believes is pending.
+
+Report it per pdev in soc_dp_stats, along with the capacity of the tx
+descriptor idr, which holds one entry short of DP_TX_IDR_SIZE.
+
+This is a backport of patch 3/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/debugfs.c b/drivers/net/wireless/ath/ath11k/debugfs.c
+index 977f945..575aa9b 100644
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -715,6 +715,23 @@ static ssize_t ath11k_debugfs_dump_soc_dp_stats(struct file *file,
+ 			 "\nMisc Transmit Failures: %d\n",
+ 			 atomic_read(&soc_stats->tx_err.misc_fail));
+ 
++	/* MSDUs handed to the hardware and not yet completed. The tx
++	 * descriptor idr holds one entry short of DP_TX_IDR_SIZE, so this is
++	 * also what the AQL charge in mac80211 is outstanding against.
++	 */
++	len += scnprintf(buf + len, size - len,
++			 "\nPending TX MSDUs (max %d):\n", DP_TX_IDR_SIZE - 1);
++
++	for (i = 0; i < ab->num_radios; i++) {
++		struct ath11k *ar = ab->pdevs[i].ar;
++
++		if (!ar)
++			continue;
++
++		len += scnprintf(buf + len, size - len, "pdev%d: %d\n",
++				 i, atomic_read(&ar->dp.num_tx_pending));
++	}
++
+ 	len += ath11k_debugfs_dump_soc_ring_bp_stats(ab, buf + len, size - len);
+ 
+ 	if (len > size)

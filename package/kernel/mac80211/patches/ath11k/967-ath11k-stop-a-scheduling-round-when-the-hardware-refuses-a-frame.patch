@@ -1,0 +1,77 @@
+Subject: [PATCH] wifi: ath11k: stop a scheduling round when the hardware refuses a frame
+
+ath11k_dp_tx() returns -ENOSPC when the tx descriptor idr is full and
+-ENOMEM when the TCL ring has no descriptor left (or a DMA mapping fails).
+Both mean the hardware has no room for this frame, and no room for a frame
+from any other queue either, so continuing the round only burns CPU and
+drops frames that mac80211 has already dequeued.
+
+End the round on those two errors instead. The next tx completion starts a
+new one, so nothing has to poll the ring pointer per frame.
+
+This is a backport of patch 8/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 2f2ce10..0f40b11 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -6229,10 +6229,11 @@ static int ath11k_mac_tx(struct ath11k *ar, struct ieee80211_sta *sta,
+ 	return ret;
+ }
+ 
+-static void ath11k_mac_push_txq(struct ath11k *ar, struct ieee80211_txq *txq)
++static int ath11k_mac_push_txq(struct ath11k *ar, struct ieee80211_txq *txq)
+ {
+ 	struct ieee80211_hw *hw = ar->hw;
+ 	struct sk_buff *skb;
++	int ret;
+ 
+ 	/* The airtime queue limit is checked per frame rather than only at
+ 	 * selection time: a station whose limit binds mid-selection must stop
+@@ -6244,22 +6245,34 @@ static void ath11k_mac_push_txq(struct ath11k *ar, struct ieee80211_txq *txq)
+ 		if (!skb)
+ 			break;
+ 
+-		ath11k_mac_tx(ar, txq->sta, skb);
++		ret = ath11k_mac_tx(ar, txq->sta, skb);
++
++		/* Either the tx descriptor idr or the TCL ring is full. The
++		 * remaining queues have nowhere to put a frame either, so end
++		 * the round here; the next tx completion starts a new one.
++		 */
++		if (ret == -ENOSPC || ret == -ENOMEM)
++			return ret;
+ 	}
++
++	return 0;
+ }
+ 
+ void ath11k_mac_tx_push_pending(struct ath11k *ar, u8 ac)
+ {
+ 	struct ieee80211_hw *hw = ar->hw;
+ 	struct ieee80211_txq *txq;
++	int ret;
+ 
+ 	rcu_read_lock();
+ 	spin_lock_bh(&ar->txq_lock);
+ 
+ 	ieee80211_txq_schedule_start(hw, ac);
+ 	while ((txq = ieee80211_next_txq(hw, ac))) {
+-		ath11k_mac_push_txq(ar, txq);
++		ret = ath11k_mac_push_txq(ar, txq);
+ 		ieee80211_return_txq(hw, txq, false);
++		if (ret)
++			break;
+ 	}
+ 	ieee80211_txq_schedule_end(hw, ac);
+ 

@@ -1,0 +1,51 @@
+Subject: [PATCH] wifi: ath11k: enable airtime queue limits
+
+Every user of AQL inside mac80211 is gated on
+NL80211_EXT_FEATURE_AQL: the charge in ieee80211_tx_dequeue(), the check
+in ieee80211_txq_airtime_check() and the aql_txq_limit debugfs knob. ath11k
+sets none of them, and it keeps no queue of its own, so on a saturated
+download every queued byte sits in the hardware TX rings where there is
+neither AQM nor flow separation, and aql_txq_limit has the same effect at
+any setting, which is none.
+
+Set the bit. On its own this changes nothing at the default limit, because
+the queue only reaches the 12000 us high limit at peaks; it is what makes
+a lower limit reach the hardware at all.
+
+Note that the airtime mac80211 estimates per frame runs below what the
+radio reports for the same station (a ratio near 1.85 in the author's
+measurements), because ieee80211_rate_expected_tx_airtime() amortises the
+overhead over an assumed aggregate while the hardware counts the whole
+frame exchange sequence. The limit is therefore expressed in estimated,
+not measured, airtime.
+
+This is a backport of patch 2/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index c2b9b87..88b3478 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -10432,6 +10432,13 @@ static int __ath11k_mac_register(struct ath11k *ar)
+ 
+ 	wiphy_ext_feature_set(ar->hw->wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
+ 	wiphy_ext_feature_set(ar->hw->wiphy, NL80211_EXT_FEATURE_STA_TX_PWR);
++
++	/* Without this bit every AQL user inside mac80211 is a no-op: no
++	 * airtime is charged on dequeue, aql_txq_limit has no effect, and the
++	 * whole download backlog sits in the hardware TX rings where there is
++	 * no AQM and no flow separation.
++	 */
++	wiphy_ext_feature_set(ar->hw->wiphy, NL80211_EXT_FEATURE_AQL);
+ 	if (test_bit(WMI_TLV_SERVICE_BSS_COLOR_OFFLOAD,
+ 		     ar->ab->wmi_ab.svc_map)) {
+ 		wiphy_ext_feature_set(ar->hw->wiphy,

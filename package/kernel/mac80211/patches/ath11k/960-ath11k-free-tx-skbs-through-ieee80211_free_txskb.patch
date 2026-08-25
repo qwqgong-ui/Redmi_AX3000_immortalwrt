@@ -1,0 +1,47 @@
+Subject: [PATCH] wifi: ath11k: free tx skbs through ieee80211_free_txskb()
+
+ath11k_dp_tx_free_txbuf() drops a data frame with dev_kfree_skb_any(),
+which bypasses ieee80211_report_used_skb() and so never returns the
+airtime mac80211 charged for the frame on dequeue.
+
+That is harmless today only because ath11k does not advertise
+NL80211_EXT_FEATURE_AQL, so nothing is ever charged. With the feature bit
+set by the next patch, every frame released through this path would leak
+its charge: the pending airtime of the access category would rise without
+bound and, once it stays above the limit, no station on the radio is
+selected in that access category again.
+
+Release the frame through ieee80211_free_txskb() instead, which is what
+the other two completion paths in this file already do. The radio pointer
+is needed before the release, so look it up first.
+
+This is a backport of patch 1/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_tx.c b/drivers/net/wireless/ath/ath11k/dp_tx.c
+index 562aba6..4cba35e 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -303,11 +303,11 @@ static void ath11k_dp_tx_free_txbuf(struct ath11k_base *ab, u8 mac_id,
+ 	}
+ 
+ 	skb_cb = ATH11K_SKB_CB(msdu);
++	ar = ab->pdevs[mac_id].ar;
+ 
+ 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
+-	dev_kfree_skb_any(msdu);
++	ieee80211_free_txskb(ar->hw, msdu);
+ 
+-	ar = ab->pdevs[mac_id].ar;
+ 	if (atomic_dec_and_test(&ar->dp.num_tx_pending))
+ 		wake_up(&ar->dp.tx_empty_waitq);
+ }

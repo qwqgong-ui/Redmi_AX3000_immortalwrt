@@ -1,0 +1,41 @@
+Subject: [PATCH] wifi: ath11k: charge received airtime to the station deficit
+
+The airtime a station spends transmitting to us is medium time taken from
+everyone else, and the deficit scheduler expects both directions. The
+monitor status ring already reports a per PPDU receive duration, which the
+driver only accumulates for the station dump.
+
+Register it with mac80211 as receive airtime for the same station and
+TID.
+
+This is a backport of patch 7/9 of the series
+
+  [PATCH ath-next v3 0/9] wifi: ath11k: airtime queue limits, fairness and
+  a driver TXQ scheduler
+
+posted to linux-wireless by Julius Bairaktaris <julius@bairaktaris.de>
+(message-id 20260824142350.1757379-1-julius@bairaktaris.de). The series is
+not merged upstream yet and the original diffs were not reachable from the
+build host, so the change was reimplemented against backports 6.18.26 from
+the series description. It therefore carries no upstream Signed-off-by and
+may differ from the patch that eventually lands.
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index 4c6aa82..b1bc292 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -5317,6 +5317,14 @@ int ath11k_dp_rx_process_mon_status(struct ath11k_base *ab, int mac_id,
+ 		arsta = ath11k_sta_to_arsta(peer->sta);
+ 		ath11k_dp_rx_update_peer_stats(arsta, ppdu_info);
+ 
++		/* The airtime a station spends transmitting to us is medium
++		 * time it took from everyone else, so charge it to the same
++		 * deficit the transmit airtime is charged to.
++		 */
++		if (ppdu_info->rx_duration && ppdu_info->tid < IEEE80211_NUM_TIDS)
++			ieee80211_sta_register_airtime(peer->sta, ppdu_info->tid,
++						       0, ppdu_info->rx_duration);
++
+ 		if (ath11k_debugfs_is_pktlog_peer_valid(ar, peer->addr))
+ 			trace_ath11k_htt_rxdesc(ar, skb->data, log_type, rx_buf_sz);
+ 
