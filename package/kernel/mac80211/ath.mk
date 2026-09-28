@@ -339,7 +339,8 @@ define KernelPackage/ath11k
   URL:=https://wireless.wiki.kernel.org/en/users/drivers/ath11k
   DEPENDS+= +kmod-ath +@DRIVER_11AC_SUPPORT +@DRIVER_11AX_SUPPORT \
   +kmod-crypto-michael-mic +ATH11K_THERMAL:kmod-hwmon-core \
-  +ATH11K_THERMAL:kmod-thermal +kmod-qcom-qmi-helpers
+  +ATH11K_THERMAL:kmod-thermal +kmod-qcom-qmi-helpers \
+  +ATH11K_NSS_SUPPORT:kmod-qca-nss-drv
   FILES:=$(PKG_BUILD_DIR)/drivers/net/wireless/ath/ath11k/ath11k.ko
 endef
 
@@ -349,6 +350,31 @@ chipsets.
 endef
 
 define KernelPackage/ath11k/config
+
+	config ATH11K_NSS_SUPPORT
+		bool "Experimental IPQ50xx NSS Wi-Fi offload"
+		depends on TARGET_qualcommax_ipq50xx
+		select NSS_DRV_WIFIOFFLOAD_ENABLE
+		select NSS_DRV_WIFI_EXT_VDEV_ENABLE
+		select NSS_DRV_VIRT_IF_ENABLE
+		select NSS_FIRMWARE_VERSION_12_2
+		default n
+		help
+		  Build ath11k with the NSS Wi-Fi data path. Install nss-wifi to
+		  load the radios after the NSS firmware has initialized.
+
+	choice
+		prompt "NSS ath11k memory profile"
+		depends on ATH11K_NSS_SUPPORT
+		default ATH11K_MEM_PROFILE_256M if TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000
+		default ATH11K_MEM_PROFILE_512M
+		config ATH11K_MEM_PROFILE_256M
+			bool "256 MB"
+		config ATH11K_MEM_PROFILE_512M
+			bool "512 MB"
+		config ATH11K_MEM_PROFILE_1G
+			bool "1 GB"
+	endchoice
 
        config ATH11K_THERMAL
                bool "Enable thermal sensors and throttling support"
@@ -363,7 +389,9 @@ define KernelPackage/ath11k-ahb
   URL:=https://wireless.wiki.kernel.org/en/users/drivers/ath11k
   DEPENDS+= @TARGET_qualcommax +kmod-ath11k +kmod-qrtr-smd
   FILES:=$(PKG_BUILD_DIR)/drivers/net/wireless/ath/ath11k/ath11k_ahb.ko
+ifneq ($(CONFIG_PACKAGE_nss-wifi),y)
   AUTOLOAD:=$(call AutoProbe,ath11k_ahb)
+endif
 endef
 
 define KernelPackage/ath11k-ahb/description
@@ -377,7 +405,9 @@ define KernelPackage/ath11k-pci
   URL:=https://wireless.wiki.kernel.org/en/users/drivers/ath11k
   DEPENDS+= @PCI_SUPPORT +kmod-qrtr-mhi +kmod-ath11k
   FILES:=$(PKG_BUILD_DIR)/drivers/net/wireless/ath/ath11k/ath11k_pci.ko
+ifneq ($(CONFIG_PACKAGE_nss-wifi),y)
   AUTOLOAD:=$(call AutoProbe,ath11k_pci)
+endif
 endef
 
 define KernelPackage/ath11k-pci/description

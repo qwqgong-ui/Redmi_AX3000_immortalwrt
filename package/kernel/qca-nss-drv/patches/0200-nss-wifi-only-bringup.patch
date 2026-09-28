@@ -1,0 +1,54 @@
+From: qwqgong-ui
+Subject: [PATCH] nss: expose core readiness and keep Ethernet on the host path
+
+This branch brings up Wi-Fi first. Do not override the existing IPQ50xx
+Ethernet data plane. A read-only readiness parameter lets the boot service
+wait for the firmware handshake rather than race ath11k against it.
+
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -23,6 +23,11 @@
+  * nss_data_plane_param
+  */
+ struct nss_data_plane_param nss_data_plane_params[NSS_DP_MAX_INTERFACES];
++
++static bool wifi_only = true;
++module_param(wifi_only, bool, 0444);
++MODULE_PARM_DESC(wifi_only,
++		"Keep Ethernet on its host data plane for Wi-Fi NSS bring-up");
+ 
+ /*
+  * __nss_data_plane_init()
+@@ -323,6 +328,11 @@ static void __nss_data_plane_register(struct nss_ctx_instance *nss_ctx)
+ {
+ 	int i;
+ 
++	if (wifi_only) {
++		nss_info_always("NSS Wi-Fi only: keeping Ethernet on the host data plane\n");
++		return;
++	}
++
+ 	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
+ 		if (!nss_data_plane_register_to_nss_dp(nss_ctx, i)) {
+ 			nss_warning("%px: Register data plane failed for data plane %d\n", nss_ctx, i);
+--- a/nss_init.c
++++ b/nss_init.c
+@@ -60,6 +60,18 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/clk.h>
+ 
++static int nss_core0_ready_get(char *buffer, const struct kernel_param *kp)
++{
++	return sysfs_emit(buffer, "%u\n",
++		READ_ONCE(nss_top_main.nss[0].state) == NSS_CORE_STATE_INITIALIZED);
++}
++
++static const struct kernel_param_ops nss_core0_ready_ops = {
++	.get = nss_core0_ready_get,
++};
++module_param_cb(core0_ready, &nss_core0_ready_ops, NULL, 0444);
++MODULE_PARM_DESC(core0_ready, "NSS core 0 has completed its firmware handshake");
++
+ /*
+  * Global declarations
+  */

@@ -36,6 +36,12 @@ PKG_CONFIG_DEPENDS:= \
 	CONFIG_PACKAGE_MAC80211_DEBUGFS \
 	CONFIG_PACKAGE_MAC80211_MESH \
 	CONFIG_PACKAGE_MAC80211_TRACING \
+	CONFIG_ATH11K_NSS_SUPPORT \
+	CONFIG_ATH11K_MEM_PROFILE_256M \
+	CONFIG_ATH11K_MEM_PROFILE_512M \
+	CONFIG_ATH11K_MEM_PROFILE_1G \
+	CONFIG_NSS_FIRMWARE_VERSION_12_2 \
+	CONFIG_PACKAGE_nss-wifi \
 	CONFIG_PACKAGE_IWLWIFI_DEBUG \
 	CONFIG_PACKAGE_IWLWIFI_DEBUGFS \
 	CONFIG_PACKAGE_RTLWIFI_DEBUG \
@@ -130,7 +136,8 @@ define KernelPackage/mac80211
   $(call KernelPackage/mac80211/Default)
   TITLE:=Linux 802.11 Wireless Networking Stack
   # +kmod-crypto-cmac is a runtime only dependency of net/mac80211/aes_cmac.c
-  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common
+  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common \
+    +ATH11K_NSS_SUPPORT:kmod-qca-nss-drv
   KCONFIG:=\
 	CONFIG_AVERAGE=y
   FILES:= $(PKG_BUILD_DIR)/net/mac80211/mac80211.ko
@@ -278,6 +285,17 @@ config-$(CONFIG_LEDS_TRIGGERS) += MAC80211_LEDS
 
 C_DEFINES=
 
+ifdef CONFIG_ATH11K_NSS_SUPPORT
+  IREMAP_CFLAGS+=-I$(STAGING_DIR)/usr/include/qca-nss-drv
+  C_DEFINES+=-DNSS_FIRMWARE_VERSION_12_2
+  config-y += MAC80211_NSS_SUPPORT ATH11K_NSS_SUPPORT
+  # The imported 256M profile extends the compact 512M descriptor layout.
+  config-$(CONFIG_ATH11K_MEM_PROFILE_256M) += ATH11K_MEM_PROFILE_256M ATH11K_MEM_PROFILE_512M
+  config-$(CONFIG_ATH11K_MEM_PROFILE_512M) += ATH11K_MEM_PROFILE_512M
+  config-$(CONFIG_ATH11K_MEM_PROFILE_1G) += ATH11K_MEM_PROFILE_1G
+  config-$(CONFIG_PACKAGE_MAC80211_DEBUGFS) += ATH11K_DEBUGFS_STA ATH11K_DEBUGFS_HTT_STATS
+endif
+
 ifeq ($(BUILD_VARIANT),smallbuffers)
 	C_DEFINES+= -DCONFIG_ATH10K_SMALLBUFFERS
 endif
@@ -354,6 +372,10 @@ define Build/Patch
 	$(call PatchDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/mwl,mwl/)
 	$(call PatchDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/brcm,brcm/)
 	$(call PatchDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/rtl,rtl/)
+ifdef CONFIG_ATH11K_NSS_SUPPORT
+	$(call PatchDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/nss/subsys,nss/subsys/)
+	$(call PatchDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/nss/ath11k,nss/ath11k/)
+endif
 	$(if $(QUILT),touch $(PKG_BUILD_DIR)/.quilt_used)
 endef
 
@@ -371,6 +393,10 @@ define Quilt/Refresh/Package
 	$(call Quilt/RefreshDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/mwl,mwl/)
 	$(call Quilt/RefreshDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/brcm,brcm/)
 	$(call Quilt/RefreshDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/rtl,rtl/)
+ifdef CONFIG_ATH11K_NSS_SUPPORT
+	$(call Quilt/RefreshDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/nss/subsys,nss/subsys/)
+	$(call Quilt/RefreshDir,$(PKG_BUILD_DIR),$(PATCH_DIR)/nss/ath11k,nss/ath11k/)
+endif
 endef
 
 define Build/Compile

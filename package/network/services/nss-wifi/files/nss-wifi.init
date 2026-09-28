@@ -1,0 +1,48 @@
+#!/bin/sh /etc/rc.common
+
+START=19
+
+start() {
+	local enabled ready=0 attempts=0
+	. /lib/functions.sh
+	config_load nss-wifi
+	config_get_bool enabled main enabled 1
+
+	# Parameters are sampled when ath11k probes; do not reload live radios.
+	if [ -d /sys/module/ath11k ]; then
+		logger -t nss-wifi 'ath11k is already loaded; configuration changes require a reboot'
+		return 0
+	fi
+
+	if [ "$enabled" = 1 ]; then
+		modprobe qca-nss-dp
+		insmod qca-nss-drv wifi_only=1
+		while [ "$attempts" -lt 30 ]; do
+			if [ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" = 1 ]; then
+				ready=1
+				break
+			fi
+			attempts=$((attempts + 1))
+			sleep 1
+		done
+	fi
+
+	# modprobe resolves dependencies, insmod preserves the module parameters
+	# (OpenWrt's kmodloader modprobe does not pass parameters through).
+	modprobe mac80211
+	modprobe ath
+	modprobe qmi_helpers
+	if [ "$ready" = 1 ]; then
+		insmod ath11k nss_offload=1 frame_mode=2 || return 1
+		logger -t nss-wifi 'NSS core ready; loading ath11k with wireless offload'
+	else
+		insmod ath11k nss_offload=0 frame_mode=0 || return 1
+		logger -t nss-wifi 'Loading ath11k on the host path (NSS disabled or firmware not ready)'
+	fi
+	modprobe ath11k_ahb
+	modprobe ath11k_pci
+}
+
+stop() {
+	logger -t nss-wifi 'Use uci set nss-wifi.main.enabled=0; uci commit nss-wifi; reboot to disable wireless offload'
+}

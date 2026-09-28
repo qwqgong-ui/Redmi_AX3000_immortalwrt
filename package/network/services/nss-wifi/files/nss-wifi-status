@@ -1,0 +1,17 @@
+#!/bin/sh
+
+echo 'NSS Wi-Fi bring-up status'
+for param in /sys/module/qca_nss_drv/parameters/core0_ready \
+	/sys/module/qca_nss_drv/parameters/wifi_only \
+	/sys/module/ath11k/parameters/nss_offload \
+	/sys/module/ath11k/parameters/frame_mode; do
+	[ -r "$param" ] && printf '%s: %s\n' "$param" "$(cat "$param")"
+done
+echo 'Radio interfaces:'
+iw dev
+echo 'NSS wireless counters (compare two samples while transferring traffic):'
+for stats in /sys/kernel/debug/qca-nss-drv/stats/wifili*; do
+	[ -f "$stats" ] && cat "$stats"
+done
+echo 'Recent NSS / ath11k logs:'
+logread | grep -E 'nss-wifi|qca-nss|NSS|ath11k' | tail -n 80

@@ -1,0 +1,93 @@
+name: Redmi AX3000 NSS Wi-Fi (experimental)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - redmi_ax3000-25.12-nss-wifi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nss-wifi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space and install dependencies
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sudo bash -c 'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+      - name: Install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      - name: Configure wireless NSS image
+        run: |
+          cp configs/redmi-ax3000-nss-wifi.config .config
+          make defconfig
+          for symbol in PACKAGE_nss-wifi PACKAGE_kmod-qca-nss-drv PACKAGE_nss-firmware-ipq50xx ATH11K_NSS_SUPPORT ATH11K_MEM_PROFILE_256M NSS_MEM_PROFILE_LOW NSS_FIRMWARE_VERSION_12_2 NSS_DRV_WIFIOFFLOAD_ENABLE NSS_DRV_WIFI_EXT_VDEV_ENABLE NSS_DRV_VIRT_IF_ENABLE; do
+            grep -qx "CONFIG_${symbol}=y" .config || { echo "Required option lost: $symbol"; exit 1; }
+          done
+      - name: Restore downloads
+        uses: actions/cache@v6
+        with:
+          path: dl
+          key: nss-wifi-dl-${{ hashFiles('feeds.conf.default', '**/Makefile') }}
+          restore-keys: |
+            nss-wifi-dl-
+            openwrt-25.12-dl-
+      - name: Restore host and toolchain cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            build_dir/host
+            build_dir/hostpkg
+            build_dir/toolchain-*
+            staging_dir/host
+            staging_dir/hostpkg
+            staging_dir/toolchain-*
+          key: nss-wifi-toolchain-${{ runner.os }}-${{ hashFiles('.config', 'rules.mk', 'include/**', 'tools/**', 'toolchain/**') }}
+          restore-keys: |
+            nss-wifi-toolchain-${{ runner.os }}-
+            openwrt-25.12-toolchain-${{ runner.os }}-
+      - name: Restore compiler cache
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: nss-wifi-ccache-${{ github.sha }}
+          restore-keys: |
+            nss-wifi-ccache-
+      - name: Download sources
+        run: make -j16 download
+      - name: Build firmware
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" V=sc 2>&1 | tee build.log
+      - name: Verify image package manifest
+        run: |
+          manifest=bin/targets/qualcommax/ipq50xx/immortalwrt-qualcommax-ipq50xx-redmi_ax3000.manifest
+          for package in nss-wifi nss-firmware-ipq50xx kmod-qca-nss-drv kmod-ath11k kmod-ath11k-ahb kmod-ath11k-pci; do
+            grep -q "^${package} " "$manifest" || { echo "Missing image package: $package"; exit 1; }
+          done
+      - name: Upload test firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: redmi-ax3000-nss-wifi-${{ github.sha }}
+          path: bin/targets/qualcommax/ipq50xx/
+          if-no-files-found: error
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nss-wifi-build-diagnostics-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .config
+            build.log
+            logs/
