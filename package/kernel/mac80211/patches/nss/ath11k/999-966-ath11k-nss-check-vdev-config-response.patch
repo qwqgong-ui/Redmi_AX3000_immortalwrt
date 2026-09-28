@@ -1,0 +1,47 @@
+Subject: [PATCH] ath11k: nss: propagate rejected VDEV configurations
+
+Completing a configuration request does not mean firmware accepted it.
+Keep its response and fail VDEV creation when firmware rejects the request.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -201,6 +201,7 @@ struct arvif_nss {
+ #endif
+ 	/* Used for completion status for vdev config nss messages */
+ 	struct completion complete;
++	int config_result;
+ 	/* Keep the copy of encap type for nss */
+ 	int encap;
+ 	/* Keep the copy of decap type for nss */
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -541,6 +541,12 @@ static void ath11k_nss_vdev_cfg_cb(void *a
+ 	ath11k_dbg(arvif->ar->ab, ATH11K_DBG_NSS, "vdev cfg msg callback received msg:%d rsp:%d\n",
+ 		   msg->type, msg->response);
+ 
++	arvif->nss.config_result = msg->response == NSS_CMN_RESPONSE_ACK ? 0 : -EIO;
++	ath11k_info(arvif->ar->ab,
++		    "NSS VDEV config if=%d radio=%d vdev=%u txlen=%zu rxlen=%u response=%u error=%u\n",
++		    arvif->nss.if_num, arvif->ar->nss.if_num, arvif->vdev_id,
++		    sizeof(struct nss_wifi_vdev_config_msg), msg->len,
++		    msg->response, msg->error);
+ 	complete(&arvif->nss.complete);
+ }
+ 
+@@ -2391,6 +2397,7 @@ static int ath11k_nss_vdev_configure(struc
+ 	reinit_completion(&arvif->nss.complete);
++	arvif->nss.config_result = -ETIMEDOUT;
+ 
+ 	nss_wifi_vdev_msg_init(vdev_msg, arvif->nss.if_num,
+ 			       NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG,
+ 			       sizeof(struct nss_wifi_vdev_config_msg),
+ 			       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_cfg_cb,
+@@ -2412,7 +2419,7 @@ static int ath11k_nss_vdev_configure(struc
+ 		goto free;
+ 	}
+ 
+-	ret = 0;
++	ret = arvif->nss.config_result;
+ free:
+ 	kfree(vdev_msg);
+ 

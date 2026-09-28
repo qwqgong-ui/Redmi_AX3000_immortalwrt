@@ -1,0 +1,15 @@
+Subject: [PATCH] nss: report invalid receive interface metadata during bring-up
+
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -1051,6 +1051,10 @@
+ 
+ 	if (interface_num >= NSS_MAX_NET_INTERFACES) {
+ 		NSS_PKT_STATS_INC(&nss_ctx->nss_top->stats_drv[NSS_DRV_STATS_RX_INVALID_INTERFACE]);
++		pr_warn_ratelimited("nss RX invalid interface raw=%#x decoded=%u max=%u type=%u qid=%u len=%u flags=%#x\n",
++				    desc->interface_num, interface_num,
++				    NSS_MAX_NET_INTERFACES, buffer_type, qid,
++				    nbuf->len, desc->bit_flags);
+ 		nss_warning("%px: Invalid interface_num: %d", nss_ctx, interface_num);
+ 		dev_kfree_skb_any(nbuf);
+ 		return;

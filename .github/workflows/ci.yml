@@ -81,6 +81,20 @@ jobs:
             CONFIG_CCACHE=y
 
             CONFIG_PACKAGE_luci=y
+            CONFIG_PACKAGE_nss-wifi=y
+            CONFIG_PACKAGE_kmod-qca-nss-drv=y
+            CONFIG_PACKAGE_nss-firmware=y
+            CONFIG_PACKAGE_nss-firmware-ipq50xx=y
+            CONFIG_NSS_FIRMWARE_VERSION_12_2=y
+            CONFIG_NSS_MEM_PROFILE_LOW=y
+            CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE=y
+            CONFIG_NSS_DRV_WIFI_EXT_VDEV_ENABLE=y
+            CONFIG_NSS_DRV_VIRT_IF_ENABLE=y
+            # CONFIG_NSS_DRV_RMNET_ENABLE is not set
+            CONFIG_ATH11K_NSS_SUPPORT=y
+            CONFIG_ATH11K_MEM_PROFILE_256M=y
+            CONFIG_PACKAGE_MAC80211_DEBUGFS=y
+            CONFIG_PACKAGE_iw=y
           EOF
           make defconfig
 

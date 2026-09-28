@@ -36,7 +36,8 @@ start() {
 		insmod ath11k nss_offload=1 frame_mode=2 || return 1
 		logger -t nss-wifi 'NSS core ready; loading ath11k with wireless offload'
 	else
-		insmod ath11k nss_offload=0 frame_mode=0 || return 1
+		# Keep ath11k's default Ethernet decapsulation on the host path.
+		insmod ath11k nss_offload=0 frame_mode=2 || return 1
 		logger -t nss-wifi 'Loading ath11k on the host path (NSS disabled or firmware not ready)'
 	fi
 	modprobe ath11k_ahb

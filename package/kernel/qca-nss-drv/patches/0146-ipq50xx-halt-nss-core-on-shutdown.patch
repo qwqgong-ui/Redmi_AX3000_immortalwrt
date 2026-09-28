@@ -1,0 +1,74 @@
+Subject: [PATCH] nss: halt the IPQ50xx core on remove and shutdown
+
+IPQ50xx has no core_halt operation, and the platform driver has no
+shutdown callback. Consequently the NSS firmware can keep running after
+the host stops servicing it, including across a warm reboot into a kernel
+without the NSS driver.
+
+Use the core-local reset clamp, as firmware_load already does on IPQ5018.
+Do not assert GCC resets: those cover hardware shared with the host GMAC.
+Read back the reset register so the clamp reaches the device before the
+shutdown callback returns.
+
+--- a/nss_hal/ipq50xx/nss_hal_pvt.c
++++ b/nss_hal/ipq50xx/nss_hal_pvt.c
+@@ -670,9 +670,23 @@ bool __nss_hal_init_utcm_shared(struct nss
+ /*
++ * Stop firmware execution without resetting the shared GMAC hardware.
++ */
++static void __nss_hal_core_halt(struct nss_ctx_instance *nss_ctx)
++{
++	if (!nss_ctx->nmap)
++		return;
++
++	WRITE_ONCE(nss_ctx->state, NSS_CORE_STATE_UNINITIALIZED);
++	nss_write_32(nss_ctx->nmap, NSS_REGS_RESET_CTRL_OFFSET, 1);
++	nss_read_32(nss_ctx->nmap, NSS_REGS_RESET_CTRL_OFFSET);
++}
++
++/*
+  * nss_hal_ipq50xx_ops
+  */
+ struct nss_hal_ops nss_hal_ipq50xx_ops = {
+ 	.common_reset = __nss_hal_common_reset,
+ 	.core_reset = __nss_hal_core_reset,
++	.core_halt = __nss_hal_core_halt,
+ 	.clock_configure = __nss_hal_clock_configure,
+ 	.firmware_load = nss_hal_firmware_load,
+ 	.debug_enable = __nss_hal_debug_enable,
+--- a/nss_init.c
++++ b/nss_init.c
+@@ -147,6 +147,23 @@ static inline void nss_remove(struct plat
+ }
+ #endif
+ 
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++/*
++ * A warm reboot does not reset NSS. In particular, the next kernel may
++ * not have this driver and therefore cannot park the old firmware.
++ */
++static void nss_shutdown(struct platform_device *nss_dev)
++{
++	struct nss_top_instance *nss_top = &nss_top_main;
++
++	if (nss_dev->id < 0 || nss_dev->id >= nss_top->num_nss)
++		return;
++
++	if (nss_top->hal_ops->core_halt)
++		nss_top->hal_ops->core_halt(&nss_top->nss[nss_dev->id]);
++}
++#endif
++
+ #if (NSS_DT_SUPPORT == 1)
+ /*
+  * Platform Device ID for NSS core.
+@@ -167,6 +185,9 @@ MODULE_DEVICE_TABLE(of, nss_dt_ids);
+ struct platform_driver nss_driver = {
+ 	.probe	= nss_probe,
+ 	.remove	= nss_remove,
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++	.shutdown = nss_shutdown,
++#endif
+ 	.driver	= {
+ 		.name	= "qca-nss",
+ 		.owner	= THIS_MODULE,

@@ -352,7 +352,7 @@ endef
 define KernelPackage/ath11k/config
 
 	config ATH11K_NSS_SUPPORT
-		bool "Experimental IPQ50xx NSS Wi-Fi offload"
+		bool "IPQ50xx NSS Wi-Fi offload"
 		depends on TARGET_qualcommax_ipq50xx
 		select NSS_DRV_WIFIOFFLOAD_ENABLE
 		select NSS_DRV_WIFI_EXT_VDEV_ENABLE

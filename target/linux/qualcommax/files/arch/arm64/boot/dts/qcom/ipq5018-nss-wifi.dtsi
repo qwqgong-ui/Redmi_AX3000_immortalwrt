@@ -14,7 +14,7 @@
 &soc {
 	nss-common@1868010 {
 		compatible = "qcom,nss-common";
-		reg = <0x01868010 0x01>;
+		reg = <0x01868010 0x04>;
 		reg-names = "nss-misc-reset";
 		memory-region = <&nss_region>;
 	};

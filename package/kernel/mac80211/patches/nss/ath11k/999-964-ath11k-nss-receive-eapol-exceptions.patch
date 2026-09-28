@@ -1,0 +1,23 @@
+Subject: [PATCH] ath11k: nss: deliver EAPOL exceptions to the wireless interface
+
+The NSS vdev interface defines a separate EAPOL exception packet type.
+The special receive callback currently drops it as an unsupported type,
+preventing the host authenticator or supplicant from receiving these
+handshake frames.
+
+Use the existing receive delivery helper after decapsulation. This also
+retains the AP-side PAE group address handling used by normal NSS receive.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -978,6 +978,10 @@ ath11k_nss_vdev_special_data_receive(struc
+ 	}
+ 
+ 	switch(wifi_metadata->pkt_type) {
++	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_EAPOL:
++		ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap,
++				      data_offs, napi);
++		break;
+ 	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_WDS_LEARN:
+ 		if (eth_decap) {
+ 			wds_metadata = &wifi_metadata->metadata.wds_metadata;

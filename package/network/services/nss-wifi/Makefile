@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nss-wifi
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -9,7 +9,7 @@ include $(INCLUDE_DIR)/package.mk
 define Package/nss-wifi
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=Experimental Redmi AX3000 NSS Wi-Fi bring-up
+  TITLE:=Redmi AX3000 NSS Wi-Fi offload
   DEPENDS:=@TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000 +kmod-ath11k-ahb +kmod-ath11k-pci +kmod-qca-nss-drv +nss-firmware +@ATH11K_NSS_SUPPORT
 endef
 
