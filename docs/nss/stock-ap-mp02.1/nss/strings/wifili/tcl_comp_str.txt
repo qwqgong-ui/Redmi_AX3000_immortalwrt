@@ -1,0 +1,4 @@
+        2 , tx_desc_free_inv_bufsrc
+        4 , tx_desc_free_inv_cookie
+        4 , tx_desc_free_hw_ring_empty
+        4 , tx_desc_free_reaped

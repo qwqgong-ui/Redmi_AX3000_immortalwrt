@@ -1,0 +1,56 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< GMAC >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+
+#gmac stats
+
+        gmac[0]_ticks       = 0               special
+        gmac[0]_worst_ticks = 0               special
+        gmac[0]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[1]_ticks       = 0               special
+        gmac[1]_worst_ticks = 0               special
+        gmac[1]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[2]_ticks       = 0               special
+        gmac[2]_worst_ticks = 0               special
+        gmac[2]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[3]_ticks       = 0               special
+        gmac[3]_worst_ticks = 0               special
+        gmac[3]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[4]_ticks       = 0               special
+        gmac[4]_worst_ticks = 0               special
+        gmac[4]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[5]_ticks       = 0               special
+        gmac[5]_worst_ticks = 0               special
+        gmac[5]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[6]_ticks       = 0               special
+        gmac[6]_worst_ticks = 0               special
+        gmac[6]_iterations  = 0               special
+
+#gmac stats
+
+        gmac[7]_ticks       = 0               special
+        gmac[7]_worst_ticks = 0               special
+        gmac[7]_iterations  = 0               special
+
+gmac stats end

@@ -1,0 +1,63 @@
+           CPU0       CPU1       
+ 18:   20072308   20072281       GIC  20 Edge      arch_timer
+ 20:        344          0       GIC 139 Level     msm_serial0
+ 21:          0          0       GIC 270 Level     bam_dma
+ 22:          2          0       GIC 127 Level     78b5000.spi
+ 23:          0          0       GIC 239 Level     bam_dma
+ 24:      82635          0       GIC 178 Level     bam_dma
+ 25:    3163526          0       GIC 434 Edge      nss_empty_buf_sos
+ 26:    1528905          0       GIC 433 Edge      nss_empty_buf_queue
+ 27:          0          0       GIC 432 Edge      nss-tx-unblock
+ 28:  214545632          0       GIC 431 Edge      nss_queue0
+ 29:          0     691584       GIC 430 Edge      nss_queue1
+ 30:          0          0       GIC 429 Edge      nss_coredump_complete
+ 31:          0          0       GIC 428 Edge      nss_paged_empty_buf_sos
+ 32:          0          0       GIC 427 Edge      nss_profile_dma
+ 33:          0          0       GIC  35 Level     watchdog bark
+ 34:          8          0       GIC 209 Edge      smp2p
+ 35:          0          0       GIC 323 Edge      q6_wdog_interrupt
+ 39:          3          0       GIC 324 Edge      ce0
+ 40:    2289479          0       GIC 325 Edge      ce1
+ 41:   12504537          0       GIC 326 Edge      ce2
+ 42:     226827          0       GIC 327 Edge      ce3
+ 44:          2          0       GIC 329 Edge      ce5
+ 56:          0          0       GIC 341 Edge      host2rxdma-monitor-ring1
+ 58:          0          0       GIC 343 Edge      wbm2host-rx-release
+ 59:          0          0       GIC 344 Edge      reo2host-status
+ 66:          0          0       GIC 351 Edge      rxdma2host-monitor-destination-mac1
+ 69:          1   16733047       GIC 354 Edge      ppdu-end-interrupts-mac1
+ 72:          4          0       GIC 357 Edge      rxdma2host-monitor-status-ring-mac1
+ 78:   16656558          0       GIC 363 Edge      rxdma2host-destination-ring-mac1
+ 89:        183          0       GIC 448 Edge      pci0_wlan_ce_0, pci0_wlan_ce_5
+ 90:   12316816        302       GIC 449 Edge      pci0_wlan_ce_1
+ 91:   12476468          6       GIC 450 Edge      pci0_wlan_ce_2
+ 92:     220792          2       GIC 451 Edge      pci0_wlan_ce_3
+ 97:        166    6195891       GIC 456 Edge      pci0_wlan_grp_dp_3
+153:          0          0       GIC 299 Edge      tzerror
+154:          0          0       GIC 186 Level     eud_irq
+156:          0          0       GIC 216 Edge      tsens_interrupt
+157:          8          0       GIC 133 Level   
+183:          1          0   msmgpio  23 Edge      soc:gpio_keys
+185:          1          0   msmgpio  25 Edge      soc:gpio_keys
+207:          0          1     smp2p   1 Edge      q6v5 ready
+208:          0          1     smp2p   2 Edge      q6v5 handover
+209:          0          0     smp2p   0 Edge      err_fatal_interrupt
+210:          0          0     smp2p   3 Edge      stop_ack_interrupt
+211:          0          0     smp2p   8 Edge      q6v5_wcss_userpd1_fatal
+212:          0          1     smp2p   9 Edge      q6v5_wcss_userpd1_ready
+213:          0          1     smp2p  12 Edge      q6v5_wcss_userpd1_spawn_ack
+214:          0          0     smp2p  11 Edge      q6v5_wcss_userpd1_stop_ack
+215:          0          0     smp2p  16 Edge      q6v5_wcss_userpd2_fatal
+216:          0          1     smp2p  17 Edge      q6v5_wcss_userpd2_ready
+217:          0          1     smp2p  20 Edge      q6v5_wcss_userpd2_spawn_ack
+218:          0          0     smp2p  19 Edge      q6v5_wcss_userpd2_stop_ack
+220:         73          0       GIC 211 Edge      glink-native
+IPI0:          0          0  CPU wakeup interrupts
+IPI1:          0          0  Timer broadcast interrupts
+IPI2:    1530882   24721312  Rescheduling interrupts
+IPI3:          0          0  Function call interrupts
+IPI4:          9         15  Single function call interrupts
+IPI5:          0          0  CPU stop interrupts
+IPI6:          0          0  IRQ work interrupts
+IPI7:          0          0  completion interrupts
+Err:          0

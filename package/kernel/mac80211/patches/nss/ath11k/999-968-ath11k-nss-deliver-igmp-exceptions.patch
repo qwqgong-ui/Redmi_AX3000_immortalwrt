@@ -1,0 +1,16 @@
+Subject: [PATCH] ath11k: nss: deliver IGMP exceptions to the host
+
+The firmware defines a distinct IGMP exception type. Pass it through the
+existing decapsulation/delivery helper so the host bridge receives its
+membership control frames instead of dropping them as unsupported.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -984,6 +984,7 @@
+ 	}
+ 
+ 	switch(wifi_metadata->pkt_type) {
++	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_IGMP:
+ 	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_EAPOL:
+ 		ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap,
+ 				      data_offs, napi);

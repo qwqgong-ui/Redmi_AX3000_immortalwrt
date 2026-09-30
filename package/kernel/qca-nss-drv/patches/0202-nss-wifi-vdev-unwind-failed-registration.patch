@@ -1,0 +1,36 @@
+Subject: [PATCH] nss: wifi_vdev: unwind partial interface registration
+
+ath11k releases the dynamic interface on registration failure. Register both
+message handlers before publishing the datapath, so a failure cannot leave
+a stale netdev or RX callbacks on an interface number that may be reused.
+
+Propagate core handler registration errors and undo only the new message
+handler. Leave any pre-existing registrations intact when a duplicate
+handler is rejected.
+
+--- a/nss_wifi_vdev.c
++++ b/nss_wifi_vdev.c
+@@ -349,15 +349,20 @@
+ 
+ 	nss_assert((if_num >= NSS_DYNAMIC_IF_START) && (if_num < (NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES)));
+ 
+-	nss_core_register_subsys_dp(nss_ctx, if_num, vdev_data_callback, vdev_ext_data_callback, NULL, netdev, features);
+-
+ 	status = nss_core_register_msg_handler(nss_ctx, if_num, vdev_event_callback);
+ 	if (status != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("%px: unable to register event handler for interface(%u)", nss_ctx, if_num);
+ 		return status;
+ 	}
+ 
+-	nss_core_register_handler(nss_ctx, if_num, nss_wifi_vdev_handler, NULL);
++	status = nss_core_register_handler(nss_ctx, if_num, nss_wifi_vdev_handler, NULL);
++	if (status != NSS_CORE_STATUS_SUCCESS) {
++		nss_warning("%px: unable to register core handler for interface(%u)", nss_ctx, if_num);
++		nss_core_unregister_msg_handler(nss_ctx, if_num);
++		return status;
++	}
++
++	nss_core_register_subsys_dp(nss_ctx, if_num, vdev_data_callback, vdev_ext_data_callback, NULL, netdev, features);
+ 
+ 	return NSS_CORE_STATUS_SUCCESS;
+ }

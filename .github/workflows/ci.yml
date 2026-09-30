@@ -132,6 +132,16 @@ jobs:
       - name: Build all
         run: make -j$(nproc) V=sc
 
+      - name: Test NSS Wi-Fi error paths and VLAN keys
+        run: |
+          set -eu
+          NSS_SOURCE="$(find build_dir -path '*/qca-nss-drv-*/nss_wifi_vdev.c' -print -quit)"
+          ATH11K_MAC="$(find build_dir -path '*/backports-*/drivers/net/wireless/ath/ath11k/mac.c' -print -quit)"
+          test -n "$NSS_SOURCE"
+          test -n "$ATH11K_MAC"
+          python3 scripts/tests/test-nss-wifi.py "$(dirname "$NSS_SOURCE")" \
+            "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+
       - name: Upload bin to artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -7,6 +7,10 @@ Compared to upstream, we allow to use (non-upstreamable) modifications/hacks to 
 
 Default login address: http://192.168.1.1 or http://immortalwrt.lan, username: __root__, password: _none_.
 
+## Redmi AX3000 NSS 开发资料
+
+[NSS 开发交接、全部功能状态和原厂参考快照](docs/nss/README.md)包含设备树、时钟/IRQ、NSS 统计、完整配置项清单及验证边界。[原厂 NSS BIN](firmware/stock-nss/README.md)随仓库保存，可在没有原厂机器的工作地点继续分析。
+
 ## Download
 Built firmware images are available for many architectures and come with a package selection to be used as WiFi home router. To quickly find a factory image usable to migrate from a vendor stock firmware to ImmortalWrt, try the *Firmware Selector*.
 

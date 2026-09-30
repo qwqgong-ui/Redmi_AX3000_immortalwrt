@@ -1,0 +1,653 @@
+<stdout>: Warning (reg_format): /soc/ess-instance/ess-switch@0x39c00000:reg: property has invalid length (8 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@5:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@4:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@1:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@0:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@21:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi3@f00000/mhi_channels/mhi_chan@20:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/pci@80000000/pcie_x1_rp/qcom,mhi@0:reg: property has invalid length (20 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/pci@a0000000/pcie_x2_rp/qcom,mhi@1:reg: property has invalid length (20 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@5:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@4:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@1:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@0:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@21:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/wifi4@f00000/mhi_channels/mhi_chan@20:reg: property has invalid length (4 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@90000/ethernet-phy@4:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@90000/ethernet-phy@3:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@90000/ethernet-phy@2:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@90000/ethernet-phy@1:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@90000/ethernet-phy@0:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/mdio@88000/ethernet-phy@0:reg: property has invalid length (4 bytes) (#address-cells == 1, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/interrupt-controller@b000000/v2m@1000:reg: property has invalid length (8 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (reg_format): /soc/interrupt-controller@b000000/v2m@0:reg: property has invalid length (8 bytes) (#address-cells == 2, #size-cells == 1)
+<stdout>: Warning (ranges_format): /soc/interrupt-controller@b000000:ranges: "ranges" property has invalid length (12 bytes) (parent #address-cells == 1, child #address-cells == 2, #size-cells == 1)
+<stdout>: Warning (unit_address_vs_reg): /memory: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi2@c000000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1/qcom,port_phyinfo/port@4: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1/qcom,port_phyinfo/port@3: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1/qcom,port_phyinfo/port@2: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1/qcom,port_phyinfo/port@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch1@1/qcom,port_phyinfo/port@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch@0x39c00000/qcom,port_phyinfo/port@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch@0x39c00000/qcom,port_phyinfo/port@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/ess-instance/ess-switch@0x39c00000/led_source@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/qcom,test@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/qcom,smem@4AB00000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/hwlock@1905000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi3@f00000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi3@f00000/mhi_events/mhi_event@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi3@f00000/mhi_events/mhi_event@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/pci@80000000/pcie_x1_rp: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/qcom,msm-eud: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/qcom,diag@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/pcm_lb@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/gpio_keys/button@2: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/gpio_keys/button@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/pci@a0000000/pcie_x2_rp: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi4@f00000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi4@f00000/mhi_events/mhi_event@1: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi4@f00000/mhi_events/mhi_event@0: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/wifi1@c000000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/qcom,nss_crypto/ce5_node: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/nss-common: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/mailbox@b111000: node has a unit name, but no reg or ranges property
+<stdout>: Warning (unit_address_vs_reg): /soc/pwm: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/dp2: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_vs_reg): /soc/dp1: node has a reg or ranges property, but no unit name
+<stdout>: Warning (unit_address_format): /soc/ess-instance/ess-switch@0x39c00000: unit name should not have leading "0x"
+<stdout>: Warning (pci_device_reg): Failed prerequisite 'reg_format'
+<stdout>: Warning (pci_device_bus_num): Failed prerequisite 'reg_format'
+<stdout>: Warning (simple_bus_reg): Failed prerequisite 'reg_format'
+<stdout>: Warning (i2c_bus_reg): Failed prerequisite 'reg_format'
+<stdout>: Warning (spi_bus_reg): Failed prerequisite 'reg_format'
+<stdout>: Warning (avoid_default_addr_size): /soc/ess-instance/ess-switch@0x39c00000: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/ess-instance/ess-switch@0x39c00000: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@5: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@5: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@4: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@4: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@1: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@1: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@0: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@0: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@21: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@21: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@20: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi3@f00000/mhi_channels/mhi_chan@20: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/pci@80000000/pcie_x1_rp/qcom,mhi@0: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/pci@80000000/pcie_x1_rp/qcom,mhi@0: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/pci@a0000000/pcie_x2_rp/qcom,mhi@1: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/pci@a0000000/pcie_x2_rp/qcom,mhi@1: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@5: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@5: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@4: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@4: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@1: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@1: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@0: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@0: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@21: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@21: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@20: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/wifi4@f00000/mhi_channels/mhi_chan@20: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/interrupt-controller@b000000/v2m@1000: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/interrupt-controller@b000000/v2m@1000: Relying on default #size-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/interrupt-controller@b000000/v2m@0: Relying on default #address-cells value
+<stdout>: Warning (avoid_default_addr_size): /soc/interrupt-controller@b000000/v2m@0: Relying on default #size-cells value
+<stdout>: Warning (avoid_unnecessary_addr_size): Failed prerequisite 'avoid_default_addr_size'
+<stdout>: Warning (unique_unit_address): Failed prerequisite 'avoid_default_addr_size'
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 12 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 14 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 16 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 18 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 20 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 22 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 24 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 26 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 28 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 30 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 32 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 34 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 36 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 38 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 40 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 42 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 44 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 46 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 48 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 50 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 52 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 54 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 56 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 58 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 60 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 62 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 64 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 66 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 68 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 70 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 72 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 74 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 76 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 78 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 80 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 82 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 84 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 86 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 88 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 90 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 92 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 94 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 96 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 98 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 100 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 102 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 104 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 106 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 108 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 110 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 112 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 114 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 116 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 118 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 120 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 122 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 124 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 126 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 128 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 130 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 132 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 134 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 136 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 138 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 140 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 142 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 144 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 146 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 148 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 150 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 152 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 154 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 156 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 158 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 160 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 162 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 164 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 166 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 168 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 170 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 172 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 174 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 176 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 178 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 180 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 182 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 184 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 186 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 188 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 190 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 192 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 194 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 196 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 198 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 200 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 202 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 204 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 206 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 208 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 210 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 212 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 214 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 216 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 218 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 220 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 222 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 224 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 226 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 228 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 230 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 232 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 234 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 236 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 238 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 240 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 242 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 244 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 246 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 248 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 250 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 252 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 254 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 256 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 258 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 260 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 262 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 264 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 266 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 268 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 270 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 272 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 274 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 276 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 278 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 280 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 282 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 284 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 286 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 288 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 290 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 292 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 294 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 296 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 298 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 300 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 302 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 304 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 306 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 308 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 310 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 312 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 314 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 316 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 318 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 320 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 322 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 324 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 326 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 328 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 330 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 332 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 334 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 336 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 338 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 340 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 342 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 344 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 346 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 348 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 350 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 352 is not a phandle reference
+<stdout>: Warning (clocks_property): /clk_test:clocks: cell 354 is not a phandle reference
+<stdout>: Warning (clocks_property): /cpus/cpu@1:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /cpus/cpu@0:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/spi@78b5000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/spi@78b5000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/csr@6001000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/csr@6001000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tpdm@6110000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tpdm@6110000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/nss@40000000:clocks: cell 12 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qpic-nand@79b0000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qpic-nand@79b0000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qpic-nand@79b0000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/stm@6002000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/stm@6002000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 12 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 14 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 16 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 18 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 20 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 22 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 24 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 26 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 28 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 30 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 32 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 34 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 36 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 38 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 40 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ess-instance/ess-switch@0x39c00000:clocks: cell 42 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@80000000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/etm@619d000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/etm@619d000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/etm@619c000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/etm@619c000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/bt@7000000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 12 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 14 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 16 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qcom_q6v5_wcss@CD00000:clocks: cell 18 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dma@7984000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dma@7884000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ssuniphy@5d000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/ssuniphy@5d000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/i2c@78b7000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/i2c@78b7000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/replicator@6046000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/replicator@6046000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pci@a0000000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/phy@7e000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/phy@86000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/sdhci@7804000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/sdhci@7804000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dma@704000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/qrng@e1000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/crypto@73a000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/crypto@73a000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/crypto@73a000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/hwevent@6101000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/hwevent@6101000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/lpass@0xA000000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/lpass@0xA000000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/lpass@0xA000000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/lpass@0xA000000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dbgui@6108000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dbgui@6108000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/watchdog@b017000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tmc@6048000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tmc@6048000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tmc@6047000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tmc@6047000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tpda@6004000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/tpda@6004000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/serial@78af000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/serial@78af000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/serial@78b0000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/serial@78b0000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@61a1000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@61a1000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 4 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 6 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 8 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 10 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 12 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/usb3@8A00000:clocks: cell 14 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6199000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6199000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6198000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6198000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6130000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6130000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@610c000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@610c000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6120000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6120000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6100000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6100000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6041000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/funnel@6041000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601f000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601f000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601e000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601e000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601d000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601d000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601c000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601c000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601b000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601b000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601a000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@601a000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6019000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6019000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6018000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6018000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6017000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6017000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6016000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6016000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6015000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6015000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6014000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6014000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6013000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6013000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6012000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6012000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6011000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6011000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6010000:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/cti@6010000:clocks: cell 2 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/pwm:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dp2:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (clocks_property): /soc/dp1:clocks: cell 0 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/spi@78b5000:dmas: cell 0 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/spi@78b5000:dmas: cell 2 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/qpic-nand@79b0000:dmas: cell 0 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/qpic-nand@79b0000:dmas: cell 2 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/qpic-nand@79b0000:dmas: cell 4 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/qpic-nand@79b0000:dmas: cell 6 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/i2c@78b7000:dmas: cell 0 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/i2c@78b7000:dmas: cell 2 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/crypto@73a000:dmas: cell 0 is not a phandle reference
+<stdout>: Warning (dmas_property): /soc/crypto@73a000:dmas: cell 2 is not a phandle reference
+<stdout>: Warning (hwlocks_property): /soc/qcom,smem@4AB00000:hwlocks: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/q6v5_wcss@CD00000:interrupts-extended: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/q6v5_wcss@CD00000:interrupts-extended: cell 4 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/q6v5_wcss@CD00000:interrupts-extended: cell 7 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/q6v5_wcss@CD00000:interrupts-extended: cell 10 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000:interrupts-extended: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000:interrupts-extended: cell 4 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000:interrupts-extended: cell 7 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000:interrupts-extended: cell 10 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000:interrupts-extended: cell 13 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd3:interrupts-extended: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd3:interrupts-extended: cell 3 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd3:interrupts-extended: cell 6 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd3:interrupts-extended: cell 9 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd2:interrupts-extended: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd2:interrupts-extended: cell 3 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd2:interrupts-extended: cell 6 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd2:interrupts-extended: cell 9 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd1:interrupts-extended: cell 0 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd1:interrupts-extended: cell 3 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd1:interrupts-extended: cell 6 is not a phandle reference
+<stdout>: Warning (interrupts_extended_property): /soc/qcom_q6v5_wcss@CD00000/q6v5_wcss_userpd1:interrupts-extended: cell 9 is not a phandle reference
+<stdout>: Warning (mboxes_property): /soc/qcom_q6v5_wcss@CD00000/glink-edge:mboxes: cell 0 is not a phandle reference
+<stdout>: Warning (phys_property): /soc/pci@80000000:phys: cell 0 is not a phandle reference
+<stdout>: Warning (phys_property): /soc/pci@a0000000:phys: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 4 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 6 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 8 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 10 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 12 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 14 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 16 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 18 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 20 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 22 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 24 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 26 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 28 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 30 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 32 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 34 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 36 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 38 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 40 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 42 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 44 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 46 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 48 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 50 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 52 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 54 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 56 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 58 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 60 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 62 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 64 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 66 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 68 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 70 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 72 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 74 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 76 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 78 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 80 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 82 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 84 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 86 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 88 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 90 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 92 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 94 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 96 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 98 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 100 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 102 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 104 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 106 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 108 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 110 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 112 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 114 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 116 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 118 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 120 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 122 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 124 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 126 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 128 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 130 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 132 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 134 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 136 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 138 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 140 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 142 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 144 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 146 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 148 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 150 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 152 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 154 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 156 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 158 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 160 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 162 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 164 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 166 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 168 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 170 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 172 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 174 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 176 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 178 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 180 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 182 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 184 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 186 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 188 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 190 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 192 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 194 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 196 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 198 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 200 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 202 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 204 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 206 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 208 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 210 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 212 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 214 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 216 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 218 is not a phandle reference
+<stdout>: Warning (resets_property): /clk_test:resets: cell 220 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 4 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 6 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 8 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ess-instance/ess-switch@0x39c00000:resets: cell 10 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 4 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 6 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 8 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 10 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 12 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@80000000:resets: cell 14 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/bt@7000000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/qcom_q6v5_wcss@CD00000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/qcom_q6v5_wcss@CD00000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/qcom_q6v5_wcss@CD00000:resets: cell 4 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/qcom_q6v5_wcss@CD00000:resets: cell 6 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/ssuniphy@5d000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 4 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 6 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 8 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 10 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 12 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/pci@a0000000:resets: cell 14 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/phy@7e000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/phy@7e000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/phy@86000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/phy@86000:resets: cell 2 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/hs_m31phy@5b000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/mdio@88000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/lpass@0xA000000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (resets_property): /soc/usb3@8A00000:resets: cell 0 is not a phandle reference
+<stdout>: Warning (thermal_sensors_property): /thermal-zones/tsens_tz_sensor4:thermal-sensors: cell 0 is not a phandle reference
+<stdout>: Warning (thermal_sensors_property): /thermal-zones/tsens_tz_sensor3:thermal-sensors: cell 0 is not a phandle reference
+<stdout>: Warning (thermal_sensors_property): /thermal-zones/tsens_tz_sensor2:thermal-sensors: cell 0 is not a phandle reference
+<stdout>: Warning (thermal_sensors_property): /thermal-zones/tsens_tz_sensor1:thermal-sensors: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/pci@80000000:perst-gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/gpio_keys/button@2:gpios: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/gpio_keys/button@1:gpios: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/pci@a0000000:perst-gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/mdio@90000:phy-reset-gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/leds/led_sys_yellow:gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/leds/led_net_yellow:gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/leds/led_net_blue:gpio: cell 0 is not a phandle reference
+<stdout>: Warning (gpios_property): /soc/leds/led_sys_blue:gpio: cell 0 is not a phandle reference
+<stdout>: Warning (graph_port): /soc/replicator@6046000/ports/port@1: graph node unit address error, expected "0"
+<stdout>: Warning (graph_port): /soc/tmc@6047000/ports/port@1: graph node unit address error, expected "0"
+<stdout>: Warning (graph_port): /soc/tpda@6004000/ports/port@1: graph node unit address error, expected "0"
+<stdout>: Warning (graph_port): /soc/funnel@61a1000/ports/port@2: graph node unit address error, expected "1"
+<stdout>: Warning (graph_port): /soc/funnel@61a1000/ports/port@1: graph node unit address error, expected "0"
+<stdout>: Warning (graph_port): /soc/funnel@6130000/ports/port@1: graph node unit address error, expected "6"
+<stdout>: Warning (graph_port): /soc/funnel@6120000/ports/port@1: graph node unit address error, expected "3"
+<stdout>: Warning (graph_port): /soc/funnel@6100000/ports/port@1: graph node unit address error, expected "2"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@6: graph node unit address error, expected "0"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@5: graph node unit address error, expected "7"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@4: graph node unit address error, expected "6"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@3: graph node unit address error, expected "5"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@2: graph node unit address error, expected "4"
+<stdout>: Warning (graph_port): /soc/funnel@6041000/ports/port@1: graph node unit address error, expected "3"
+<stdout>: Warning (graph_child_address): Failed prerequisite 'graph_port'

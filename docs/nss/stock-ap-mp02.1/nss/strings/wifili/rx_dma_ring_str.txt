@@ -1,0 +1,2 @@
+        4 , rxdma_hw_desc_unavailable
+        4 , rxdma_buf_replenished

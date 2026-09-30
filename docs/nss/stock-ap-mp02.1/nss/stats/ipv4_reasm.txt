@@ -1,0 +1,17 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< IPV4_REASM >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        ipv4_reasm_rx_pkts           = 0               common
+        ipv4_reasm_rx_byts           = 0               common
+        ipv4_reasm_tx_pkts           = 0               common
+        ipv4_reasm_tx_byts           = 0               common
+        ipv4_reasm_rx_queue[0]_drops = 0               drop
+        ipv4_reasm_rx_queue[1]_drops = 0               drop
+        ipv4_reasm_rx_queue[2]_drops = 0               drop
+        ipv4_reasm_rx_queue[3]_drops = 0               drop
+        ipv4_reasm_evictions   = 0               drop
+        ipv4_reasm_alloc_fails = 0               drop
+        ipv4_reasm_timeouts    = 0               drop

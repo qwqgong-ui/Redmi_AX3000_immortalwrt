@@ -1,0 +1,36 @@
+Index Name                             Default User    Size       DMA Addr  
+N/A   n2h_rings                        SDRAM   SDRAM   0x30c0     0x4e990000
+N/A   h2n_rings                        SDRAM   SDRAM   0x71c0     0x4e998000
+0     profile_dma_ctrl                 SDRAM   SDRAM   0x100      0x4e8b0900
+1     gmac_tx_desc_0                   SDRAM   SDRAM   0x1000     0x4e899000
+2     gmac_tx_desc_1                   UTCM_SHARED UTCM_SHARED 0x1000     0x3f02e000
+3     gmac_rx_desc_0                   SDRAM   SDRAM   0x1000     0x4e89b000
+4     gmac_rx_desc_1                   UTCM_SHARED UTCM_SHARED 0x1000     0x3f02f000
+5     crypto_ce5_dma_desc_in           SDRAM   SDRAM   0x2000     0x4ef52000
+6     crypto_ce5_dma_desc_in_sg        SDRAM   SDRAM   0x2000     0x4ef54000
+7     crypto_ce5_bypass_desc_in        SDRAM   SDRAM   0x800      0x4ea39800
+8     crypto_ce5_bypass_desc_in_sg     SDRAM   SDRAM   0x800      0x4ea3a000
+9     crypto_ce5_dma_desc_out          SDRAM   SDRAM   0x2000     0x4ef56000
+10    crypto_ce5_dma_desc_out_sg       SDRAM   SDRAM   0x2000     0x4eb08000
+11    crypto_ce5_bypass_desc_out       SDRAM   SDRAM   0x800      0x4ea3a800
+12    crypto_ce5_bypass_desc_out_sg    SDRAM   SDRAM   0x800      0x4ea3b000
+13    crypto_ce5_hw_unlock             SDRAM   SDRAM   0x20       0x4eb6dc00
+14    crypto_ce5_hwtk_null             SDRAM   SDRAM   0xe0       0x4e8b0e00
+15    crypto_ce5_hwtk_aead             SDRAM   SDRAM   0xe000     0x4eb10000
+16    crypto_ce5_hwtk_cipher           SDRAM   SDRAM   0xe000     0x4eb90000
+17    crypto_ce5_hwtk_hash             SDRAM   SDRAM   0xe000     0x4ea60000
+18    crypto_ce5_hw_result_null        SDRAM   SDRAM   0xc0       0x4ef42600
+19    crypto_ce5_hw_result_aead        SDRAM   SDRAM   0xc000     0x4ea70000
+20    crypto_ce5_hw_result_cipher      SDRAM   SDRAM   0xc000     0x4eba0000
+21    crypto_ce5_hw_result_hash        SDRAM   SDRAM   0xc000     0x4ebb0000
+22    heap_ddr_size                    (null)  (null)  0x800000   0x40000000
+23    debug_boot_log_desc              SDRAM   SDRAM   0x1420     0x4eb0a000
+24    nss_if_mem_map_inst              SDRAM   SDRAM   0x200      0x4ea41a00
+Available IMEM: 0x0
+How to configure? 
+Overwrite the /etc/modules.d/32-qca-nss-drv with following contents then reboot
+
+qca-nss-drv meminfo_user_config="<core_id, name, memory_type>, .."
+
+For example, <1, h2n_rings, IMEM> stands for: h2n_rings of core 1 is on IMEM
+Note:UTCM_SHARED cannot be used for n2h_rings, h2n_rings and debug_log_boot_desc.

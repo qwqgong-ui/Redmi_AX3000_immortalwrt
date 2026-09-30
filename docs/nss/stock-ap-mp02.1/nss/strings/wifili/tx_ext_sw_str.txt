@@ -1,0 +1,4 @@
+        4 , ext_tx_desc_in_use
+        4 , ext_tx_desc_alloc_fail
+        4 , ext_tx_desc_already_allocated
+        4 , ext_tx_desc_invalid_free

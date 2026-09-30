@@ -1,0 +1,28 @@
+
+#pppoe base node stats start
+
+        pppoe_rx_packets               = 17223622        common
+        pppoe_rx_bytes                 = 21298360399      common
+        pppoe_tx_packets               = 7513238         common
+        pppoe_tx_bytes                 = 2306982775      common
+        pppoe_rx_dropped[0]            = 0               drop
+        pppoe_rx_dropped[1]            = 0               drop
+        pppoe_rx_dropped[2]            = 0               drop
+        pppoe_rx_dropped[3]            = 0               drop
+        pppoe_short_pppoe_hdr_length   = 0               exception
+        pppoe_short_packet_length      = 0               exception
+        pppoe_wrong_version_or_type    = 0               exception
+        pppoe_wrong_code               = 0               exception
+        pppoe_unsupported_ppp_protocol = 5               exception
+        pppoe_disabled_bridge_packet   = 0               exception
+0. nss interface id=36, netdevice=pppoe-wan
+
+#pppoe session node stats
+
+        pppoe[0]_rx_pkts                  = 17223578        common
+        pppoe[0]_rx_byts                  = 21160535180      common
+        pppoe[0]_tx_pkts                  = 7513230         common
+        pppoe[0]_tx_byts                  = 2306975483      common
+        pppoe[0]_wrong_version_or_type    = 0               exception
+        pppoe[0]_wrong_code               = 0               exception
+        pppoe[0]_unsupported_ppp_protocol = 1               exception

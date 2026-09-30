@@ -46,9 +46,13 @@
 		qcom,num-irq = <8>;
 		qcom,num-pri = <4>;
 		qcom,load-addr = <0x40000000>;
-		qcom,low-frequency = <850000000>;
-		qcom,mid-frequency = <1000000000>;
+		// IPQ50xx HAL uses MID/HIGH only. Match the stock AP-MP02.1
+		// 850 MHz / 1 GHz table rather than defining two 1 GHz slots.
+		qcom,mid-frequency = <850000000>;
 		qcom,max-frequency = <1000000000>;
+		// ath11k sends Wi-Fi frames to NSS_ETH_RX_INTERFACE. Its handler
+		// and the generic redirect interface types are registered by IPv4.
+		qcom,ipv4-enabled;
 		qcom,wlanredirect-enabled;
 		qcom,wlan-dataplane-offload-enabled;
 	};

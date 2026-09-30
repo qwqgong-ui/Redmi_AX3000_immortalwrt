@@ -1,0 +1,535 @@
+{
+  "definition": "package/kernel/qca-nss-drv/Config.in",
+  "profile": "configs/redmi-ax3000-nss-wifi.config",
+  "interpretation": "profile_value is an explicit fragment selection; null is unspecified, not a resolved build result",
+  "features": [
+    {
+      "symbol": "NSS_DRV_BRIDGE_ENABLE",
+      "prompt": "Enable BRIDGE",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 39
+    },
+    {
+      "symbol": "NSS_DRV_CAPWAP_ENABLE",
+      "prompt": "Enable CAPWAP",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 45
+    },
+    {
+      "symbol": "NSS_DRV_C2C_ENABLE",
+      "prompt": "Enable C2C",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_ipq806x || TARGET_qualcommax_ipq807x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 51
+    },
+    {
+      "symbol": "NSS_DRV_CLMAP_ENABLE",
+      "prompt": "Enable CLMAP",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 57
+    },
+    {
+      "symbol": "NSS_DRV_CRYPTO_ENABLE",
+      "prompt": "Enable CRYPTO",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 62
+    },
+    {
+      "symbol": "NSS_DRV_DTLS_ENABLE",
+      "prompt": "Enable DTLS",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 67
+    },
+    {
+      "symbol": "NSS_DRV_GRE_ENABLE",
+      "prompt": "Enable GRE",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 73
+    },
+    {
+      "symbol": "NSS_DRV_GRE_REDIR_ENABLE",
+      "prompt": "Enable GRE_REDIR",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_GRE_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 78
+    },
+    {
+      "symbol": "NSS_DRV_GRE_TUNNEL_ENABLE",
+      "prompt": "Enable GRE_TUNNEL",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_GRE_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 84
+    },
+    {
+      "symbol": "NSS_DRV_IGS_ENABLE",
+      "prompt": "Enable IGS",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 90
+    },
+    {
+      "symbol": "NSS_DRV_IPSEC_ENABLE",
+      "prompt": "Enable IPSEC",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 95
+    },
+    {
+      "symbol": "NSS_DRV_IPV4_REASM_ENABLE",
+      "prompt": "Enable IPV4_REASM",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 100
+    },
+    {
+      "symbol": "NSS_DRV_IPV6_ENABLE",
+      "prompt": "Enable IPV6",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 105
+    },
+    {
+      "symbol": "NSS_DRV_IPV6_REASM_ENABLE",
+      "prompt": "Enable IPV6_REASM",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_IPV6_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 110
+    },
+    {
+      "symbol": "NSS_DRV_L2TP_ENABLE",
+      "prompt": "Enable L2TP",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 116
+    },
+    {
+      "symbol": "NSS_DRV_LAG_ENABLE",
+      "prompt": "Enable LAG",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 121
+    },
+    {
+      "symbol": "NSS_DRV_MAPT_ENABLE",
+      "prompt": "Enable MAPT",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 127
+    },
+    {
+      "symbol": "NSS_DRV_MATCH_ENABLE",
+      "prompt": "Enable MATCH",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 132
+    },
+    {
+      "symbol": "NSS_DRV_MIRROR_ENABLE",
+      "prompt": "Enable MIRROR",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 137
+    },
+    {
+      "symbol": "NSS_DRV_OAM_ENABLE",
+      "prompt": "Enable OAM",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_ipq806x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 142
+    },
+    {
+      "symbol": "NSS_DRV_PORTID_ENABLE",
+      "prompt": "Enable PORTID",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_ipq806x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 148
+    },
+    {
+      "symbol": "NSS_DRV_LSO_RX_ENABLE",
+      "prompt": "Enable LSO RX",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 154
+    },
+    {
+      "symbol": "NSS_DRV_PPPOE_ENABLE",
+      "prompt": "Enable PPPOE",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 159
+    },
+    {
+      "symbol": "NSS_DRV_PPTP_ENABLE",
+      "prompt": "Enable PPTP",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 164
+    },
+    {
+      "symbol": "NSS_DRV_PVXLAN_ENABLE",
+      "prompt": "Enable PVXLAN",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 169
+    },
+    {
+      "symbol": "NSS_DRV_QRFS_ENABLE",
+      "prompt": "Enable QRFS",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 174
+    },
+    {
+      "symbol": "NSS_DRV_QVPN_ENABLE",
+      "prompt": "Enable OpenVpn (QVPN)",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 180
+    },
+    {
+      "symbol": "NSS_DRV_RMNET_ENABLE",
+      "prompt": "Enable RMNET",
+      "defaults": [
+        "y"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq50xx"
+      ],
+      "selects": [
+        "NSS_DRV_C2C_ENABLE"
+      ],
+      "profile_value": "n",
+      "source_line": 186
+    },
+    {
+      "symbol": "NSS_DRV_SHAPER_ENABLE",
+      "prompt": "Enable SHAPER",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 200
+    },
+    {
+      "symbol": "NSS_DRV_SJACK_ENABLE",
+      "prompt": "Enable SJACK",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 205
+    },
+    {
+      "symbol": "NSS_DRV_TLS_ENABLE",
+      "prompt": "Enable TLS",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 210
+    },
+    {
+      "symbol": "NSS_DRV_TRUSTSEC_ENABLE",
+      "prompt": "Enable TRUSTSEC",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 216
+    },
+    {
+      "symbol": "NSS_DRV_UDP_ST_ENABLE",
+      "prompt": "Enable UDP Speedtest",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq50xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 221
+    },
+    {
+      "symbol": "NSS_DRV_TRUSTSEC_RX_ENABLE",
+      "prompt": "Enable TRUSTSEC_RX",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_TRUSTSEC_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 227
+    },
+    {
+      "symbol": "NSS_DRV_TSTAMP_ENABLE",
+      "prompt": "Enable TSTAMP",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_ipq806x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 233
+    },
+    {
+      "symbol": "NSS_DRV_TUN6RD_ENABLE",
+      "prompt": "Enable TUN6RD",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 239
+    },
+    {
+      "symbol": "NSS_DRV_TUNIPIP6_ENABLE",
+      "prompt": "Enable TUNIPIP6",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 244
+    },
+    {
+      "symbol": "NSS_DRV_VIRT_IF_ENABLE",
+      "prompt": "Enable VIRT_IF",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": "y",
+      "source_line": 249
+    },
+    {
+      "symbol": "NSS_DRV_VLAN_ENABLE",
+      "prompt": "Enable VLAN",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx || TARGET_qualcommax_ipq50xx"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 254
+    },
+    {
+      "symbol": "NSS_DRV_VXLAN_ENABLE",
+      "prompt": "Enable VXLAN",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 260
+    },
+    {
+      "symbol": "NSS_DRV_WIFIOFFLOAD_ENABLE",
+      "prompt": "Enable WIFI",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [],
+      "selects": [],
+      "profile_value": "y",
+      "source_line": 265
+    },
+    {
+      "symbol": "NSS_DRV_WIFI_EXT_VDEV_ENABLE",
+      "prompt": "Enable WIFI EXT VDEV",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_WIFIOFFLOAD_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": "y",
+      "source_line": 270
+    },
+    {
+      "symbol": "NSS_DRV_WIFI_MESH_ENABLE",
+      "prompt": "Enable WIFI MESH",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "NSS_DRV_WIFIOFFLOAD_ENABLE"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 276
+    },
+    {
+      "symbol": "NSS_DRV_WIFI_LEGACY_ENABLE",
+      "prompt": "Enable Legacy WIFI",
+      "defaults": [
+        "n"
+      ],
+      "depends_on": [
+        "TARGET_ipq806x"
+      ],
+      "selects": [],
+      "profile_value": null,
+      "source_line": 282
+    }
+  ]
+}

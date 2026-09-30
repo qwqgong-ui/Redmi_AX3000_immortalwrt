@@ -1,0 +1,9 @@
+/sys/module/qca_nss_drv/parameters/max_ipv4_conn
+512
+/sys/module/qca_nss_drv/parameters/max_ipv6_conn
+512
+/sys/module/qca_nss_drv/parameters/meminfo_user_config
+/sys/module/qca_nss_drv/parameters/nss_skip_nw_process
+0
+/sys/module/qca_nss_drv/parameters/pn_mq_en
+N

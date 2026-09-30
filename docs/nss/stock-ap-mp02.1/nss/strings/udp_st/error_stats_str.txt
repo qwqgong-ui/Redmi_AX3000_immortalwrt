@@ -1,0 +1,17 @@
+        4 , error_none
+        1 , incorrect_rate
+        1 , incorrect_buffer_size
+        1 , memory_failure
+        1 , incorrect_state
+        1 , incorrect_flags
+        1 , entry_exist
+        1 , entry_add_failed
+        1 , entry_not_exist
+        1 , wrong_start_msg_type
+        1 , wrong_stop_msg_type
+        1 , too_many_users
+        1 , unknown_msg_type
+        1 , pb_alloc_failure
+        1 , pb_size_failure
+        1 , drop_queue_failure
+        4 , timer call is missed

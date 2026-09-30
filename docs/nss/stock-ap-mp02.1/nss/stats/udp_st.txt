@@ -1,0 +1,46 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< UDP_ST >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        udp_st_rx_pkts           = 0               common
+        udp_st_rx_byts           = 0               common
+        udp_st_tx_pkts           = 0               common
+        udp_st_tx_byts           = 0               common
+        udp_st_rx_queue[0]_drops = 0               drop
+        udp_st_rx_queue[1]_drops = 0               drop
+        udp_st_rx_queue[2]_drops = 0               drop
+        udp_st_rx_queue[3]_drops = 0               drop
+
+#udp_st error stats
+
+        udp_st_error_none            = 0               special
+        udp_st_incorrect_rate        = 0               drop
+        udp_st_incorrect_buffer_size = 0               drop
+        udp_st_memory_failure        = 0               drop
+        udp_st_incorrect_state       = 0               drop
+        udp_st_incorrect_flags       = 0               drop
+        udp_st_entry_exist           = 0               drop
+        udp_st_entry_add_failed      = 0               drop
+        udp_st_entry_not_exist       = 0               drop
+        udp_st_wrong_start_msg_type  = 0               drop
+        udp_st_wrong_stop_msg_type   = 0               drop
+        udp_st_too_many_users        = 0               drop
+        udp_st_unknown_msg_type      = 0               drop
+        udp_st_pb_alloc_failure      = 0               drop
+        udp_st_pb_size_failure       = 0               drop
+        udp_st_drop_queue_failure    = 0               drop
+        udp_st_timer call is missed  = 0               special
+
+#udp_st Rx time stats (ms)
+
+        udp_st_rx_start_time   = 0               special
+        udp_st_rx_current_time = 0               special
+        udp_st_rx_elapsed_time = 0               special
+
+#udp_st Tx time stats (ms)
+
+        udp_st_tx_start_time   = 0               special
+        udp_st_tx_current_time = 0               special
+        udp_st_tx_elapsed_time = 0               special

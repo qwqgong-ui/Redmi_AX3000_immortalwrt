@@ -1,0 +1,2 @@
+-rwxrwxr-x    1 0        0           761612 Aug 15  2024 [1;32m/lib/firmware/qca-nss0-retail.bin[0m
+lrwxrwxrwx    1 0        0               21 Aug 15  2024 [1;36m/lib/firmware/qca-nss0.bin[0m -> [1;32m./qca-nss0-retail.bin[0m

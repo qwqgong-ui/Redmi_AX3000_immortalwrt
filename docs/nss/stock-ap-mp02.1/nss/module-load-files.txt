@@ -1,0 +1,14 @@
+/etc/modules.d/31-qca-nss-dp
+qca-nss-dp
+/etc/modules.d/32-qca-nss-drv
+qca-nss-drv
+/etc/modules.d/51-qca-nss-drv-gre
+qca-nss-gre
+/etc/modules.d/51-qca-nss-drv-l2tpv2
+qca-nss-l2tpv2
+/etc/modules.d/51-qca-nss-drv-pppoe
+qca-nss-pppoe
+/etc/modules.d/51-qca-nss-drv-pptp
+qca-nss-pptp
+/etc/modules.d/52-qca-nss-macsec
+qca-nss-macsec

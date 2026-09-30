@@ -1,0 +1,22 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< GRE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        gre_base_rx_pkts                    = 0               common
+        gre_base_rx_drops                   = 0               drop
+        gre_base_exp_eth_hdr_missing        = 0               exception
+        gre_base_exp_eth_type_non_ip        = 0               exception
+        gre_base_exp_ip_unknown_protocol    = 0               exception
+        gre_base_exp_ip_header_incomplete   = 0               exception
+        gre_base_exp_ip_bad_total_length    = 0               exception
+        gre_base_exp_ip_bad_checksum        = 0               exception
+        gre_base_exp_ip_datagram_incomplete = 0               exception
+        gre_base_exp_ip_fragment            = 0               exception
+        gre_base_exp_ip_options_incomplete  = 0               exception
+        gre_base_exp_ip_with_options        = 0               exception
+        gre_base_exp_ipv6_unknown_protocol  = 0               exception
+        gre_base_exp_ipv6_header_incomplete = 0               exception
+        gre_base_exp_unknown_session        = 0               exception
+        gre_base_exp_node_inactive          = 0               exception

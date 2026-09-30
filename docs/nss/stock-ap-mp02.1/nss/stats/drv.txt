@@ -1,0 +1,45 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< DRV >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        drv_nbuf_alloc_errors         = 0               error
+        drv_paged_buf_alloc_errors    = 0               error
+        drv_tx_queue_full[0]          = 0               error
+        drv_tx_queue_full[1]          = 0               error
+        drv_tx_buffers_empty          = 2530460         special
+        drv_tx_paged_buffers_empty    = 0               special
+        drv_tx_buffer_pkt             = 2457606         special
+        drv_tx_buffers_cmd            = 9586519         special
+        drv_tx_buffers_crypto         = 0               special
+        drv_tx_buffers_reuse          = 851469          special
+        drv_rx_buffers_empty          = 1798534         special
+        drv_rx_buffers_pkt            = 2037806         special
+        drv_rx_buffers_ext_pkt        = 4489            special
+        drv_rx_buffers_cmd_resp       = 0               special
+        drv_rx_buffers_status_sync    = 309254132       special
+        drv_rx_buffers_crypto         = 0               special
+        drv_rx_buffers_virtual        = 0               special
+        drv_tx_skb_simple             = 11189493        special
+        drv_tx_skb_nr_frags           = 3095            special
+        drv_tx_skb_fraglist           = 68              special
+        drv_rx_skb_simple             = 311296427       special
+        drv_rx_skb_nr_frags           = 0               special
+        drv_rx_skb_fraglist           = 0               special
+        drv_rx_bad_desciptor          = 0               error
+        drv_invalid_interface         = 0               error
+        drv_invalid_core_id           = 0               error
+        drv_invalid_buffer_type       = 0               error
+        drv_nss_skb_count             = 11797           special
+        drv_rx_chain_seg_processed    = 0               special
+        drv_rx_frag_seg_processed     = 0               special
+        drv_tx_buffers_cmd_queue_full = 0               error
+        drv_tx_buffers_data_queue[0]  = 1219388         special
+        drv_tx_buffers_data_queue[1]  = 33253           special
+        drv_tx_buffers_data_queue[2]  = 1196094         special
+        drv_tx_buffers_data_queue[3]  = 8871            special
+        drv_tx_buffers_data_queue[4]  = 0               special
+        drv_tx_buffers_data_queue[5]  = 0               special
+        drv_tx_buffers_data_queue[6]  = 0               special
+        drv_tx_buffers_data_queue[7]  = 0               special

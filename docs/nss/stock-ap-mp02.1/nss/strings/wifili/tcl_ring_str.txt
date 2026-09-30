@@ -1,0 +1,3 @@
+        4 , tcl_no_hw_desc
+        4 , tcl_ring_full
+        4 , tcl_ring_sent

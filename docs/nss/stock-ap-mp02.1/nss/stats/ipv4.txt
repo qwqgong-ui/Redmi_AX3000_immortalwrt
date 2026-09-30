@@ -1,0 +1,127 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< IPV4 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        ipv4_rx_pkts           = 8227516         common
+        ipv4_rx_byts           = 6755876029      common
+        ipv4_tx_pkts           = 7008883         common
+        ipv4_tx_byts           = 6706232181      common
+        ipv4_rx_queue[0]_drops = 0               drop
+        ipv4_rx_queue[1]_drops = 0               drop
+        ipv4_rx_queue[2]_drops = 0               drop
+        ipv4_rx_queue[3]_drops = 0               drop
+
+#ipv4 special stats
+
+        ipv4_rx_pkts                               = 7008874         special
+        ipv4_rx_bytes                              = 6593433984      special
+        ipv4_tx_pkts                               = 7008874         special
+        ipv4_tx_bytes                              = 6706226276      special
+        ipv4_create_requests                       = 85597           special
+        ipv4_create_collisions                     = 0               special
+        ipv4_create_invalid_interface              = 0               special
+        ipv4_destroy_requests                      = 22867           special
+        ipv4_destroy_misses                        = 0               special
+        ipv4_hash_hits                             = 7069236         special
+        ipv4_hash_reorders                         = 2336            special
+        ipv4_flushes                               = 62687           special
+        ipv4_evictions                             = 0               special
+        ipv4_fragmentations                        = 0               special
+        ipv4_by_rule_drops                         = 0               drop
+        ipv4_mc_create_requests                    = 0               special
+        ipv4_mc_update_requests                    = 0               special
+        ipv4_mc_create_invalid_interface           = 0               special
+        ipv4_mc_destroy_requests                   = 0               special
+        ipv4_mc_destroy_misses                     = 0               special
+        ipv4_mc_flushes                            = 0               special
+        ipv4_mirror_invalid_ifnum_conn_create_req  = 0               special
+        ipv4_mirror_invalid_iftype_conn_create_req = 0               special
+        ipv4_mirror_failures                       = 0               special
+
+#ipv4 exception stats
+
+        ipv4_icmp_hdr_incomplete                 = 0               exception
+        ipv4_icmp_unhandled_type                 = 21481           exception
+        ipv4_icmp_ipv4_hdr_incomplete            = 0               exception
+        ipv4_icmp_ipv4_udp_hdr_incomplete        = 0               exception
+        ipv4_icmp_ipv4_tcp_header_incomplete     = 6               exception
+        ipv4_icmp_sipv4_unknown_protocol         = 0               exception
+        ipv4_icmp_no_icme                        = 8639            exception
+        ipv4_icmp_flush_to_host                  = 16960           exception
+        ipv4_tcp_header_incomplete               = 0               exception
+        ipv4_tcp_no_icme                         = 348744          exception
+        ipv4_tcp_ip_option                       = 0               exception
+        ipv4_tcp_ip_fragment                     = 2               exception
+        ipv4_tcp_small_ttl                       = 0               exception
+        ipv4_tcp_needs_fragmentation             = 0               exception
+        ipv4_tcp_flags                           = 45671           exception
+        ipv4_tcp_seq_exceeds_right_edge          = 0               exception
+        ipv4_tcp_small_data_offs                 = 0               exception
+        ipv4_tcp_bad_sack                        = 0               exception
+        ipv4_tcp_big_data_offs                   = 0               exception
+        ipv4_tcp_seq_before_left_edge            = 0               exception
+        ipv4_tcp_ack_exceeds_right_edge          = 0               exception
+        ipv4_tcp_ack_before_left_edge            = 0               exception
+        ipv4_udp_header_incomplete               = 0               exception
+        ipv4_udp_no_icme                         = 752924          exception
+        ipv4_udp_ip_option                       = 0               exception
+        ipv4_udp_ip_fragment                     = 55              exception
+        ipv4_udp_small_ttl                       = 1               exception
+        ipv4_udp_needs_fragmentation             = 0               exception
+        ipv4_wrong_target_mac                    = 0               exception
+        ipv4_header_incomplete                   = 0               exception
+        ipv4_bad_total_length                    = 0               exception
+        ipv4_bad_checksum                        = 0               exception
+        ipv4_non_initial_fragment                = 69              exception
+        ipv4_datagram_incomplete                 = 0               exception
+        ipv4_options_incomplete                  = 0               exception
+        ipv4_unknown_protocol                    = 24081           exception
+        ipv4_esp_header_incomplete               = 0               exception
+        ipv4_esp_no_icme                         = 0               exception
+        ipv4_esp_ip_option                       = 0               exception
+        ipv4_esp_ip_fragment                     = 0               exception
+        ipv4_esp_small_ttl                       = 0               exception
+        ipv4_esp_needs_fragmentation             = 0               exception
+        ipv4_ingress_vid_mismatch                = 0               exception
+        ipv4_ingress_vid_missing                 = 0               exception
+        ipv4_6rd_no_icme                         = 0               exception
+        ipv4_6rd_ip_option                       = 0               exception
+        ipv4_6rd_ip_fragment                     = 0               exception
+        ipv4_6rd_needs_fragmentation             = 0               exception
+        ipv4_dscp_marking_mismatch               = 0               exception
+        ipv4_vlan_marking_mismatch               = 0               exception
+        ipv4_interface_mismatch                  = 0               exception
+        ipv4_gre_header_incomplete               = 0               exception
+        ipv4_gre_no_icme                         = 0               exception
+        ipv4_gre_ip_option                       = 0               exception
+        ipv4_gre_ip_fragment                     = 0               exception
+        ipv4_gre_small_ttl                       = 0               exception
+        ipv4_gre_needs_fragmentation             = 0               exception
+        ipv4_pptp_gre_session_match_fail         = 0               exception
+        ipv4_pptp_gre_invalid_proto              = 0               exception
+        ipv4_pptp_gre_no_cme                     = 0               exception
+        ipv4_pptp_gre_ip_option                  = 0               exception
+        ipv4_pptp_gre_ip_fragment                = 0               exception
+        ipv4_pptp_gre_small_ttl                  = 0               exception
+        ipv4_pptp_gre_needs_fragmentation        = 0               exception
+        ipv4_destroy                             = 0               exception
+        ipv4_frag_df_set                         = 0               exception
+        ipv4_frag_fail                           = 0               exception
+        ipv4_icmp_ipv4_udplite_header_incomplete = 0               exception
+        ipv4_udplite_header_incomplete           = 0               exception
+        ipv4_udplite_no_icme                     = 0               exception
+        ipv4_udplite_ip_option                   = 0               exception
+        ipv4_udplite_ip_fragment                 = 0               exception
+        ipv4_udplite_small_ttl                   = 0               exception
+        ipv4_udplite_needs_fragmentation         = 0               exception
+        ipv4_mc_udp_no_icme                      = 0               exception
+        ipv4_mc_mem_alloc_failure                = 0               exception
+        ipv4_mc_update_failure                   = 0               exception
+        ipv4_mc_pbuf_alloc_failure               = 0               exception
+        ipv4_pppoe_bridge_no_icme                = 0               exception
+        ipv4_pppoe_no_session                    = 0               drop
+        ipv4_icmp_ipv4_gre_hdr_incomplete        = 0               exception
+        ipv4_icmp_ipv4_esp_hdr_incomplete        = 0               exception
+        ipv4_emesh_prio_mismatch                 = 0               exception

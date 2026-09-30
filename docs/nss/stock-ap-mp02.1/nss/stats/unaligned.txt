@@ -1,0 +1,2 @@
+core: 0, total unaligned traps: 0
+core: 1, total unaligned traps: 0

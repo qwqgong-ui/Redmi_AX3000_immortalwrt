@@ -1,0 +1,7 @@
+        2 , wbm_ie_local_alloc_fail
+        4 , wbm_src_dma
+        4 , wbm_src_dma_code_inv
+        4 , wbm_src_reo
+        4 , wbm_src_reo_code_nullq
+        2 , wbm_src_reo_code_inv
+        2 , wbm_src_inv

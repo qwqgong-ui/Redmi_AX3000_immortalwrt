@@ -1,0 +1,27 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< ETH_RX >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        eth_rx_rx_pkts           = 25667448        common
+        eth_rx_rx_byts           = 24030880708      common
+        eth_rx_tx_pkts           = 25667448        common
+        eth_rx_tx_byts           = 24030880708      common
+        eth_rx_rx_queue[0]_drops = 0               drop
+        eth_rx_rx_queue[1]_drops = 0               drop
+        eth_rx_rx_queue[2]_drops = 0               drop
+        eth_rx_rx_queue[3]_drops = 0               drop
+
+#eth_rx node stats
+
+        eth_rx_ticks       = 0               special
+        eth_rx_worst_ticks = 0               special
+        eth_rx_iterations  = 0               special
+
+#eth_rx exception stats
+
+        eth_rx_unknown_l3_protocol  = 93311           exception
+        eth_rx_eth_hdr_missing      = 0               exception
+        eth_rx_vlan_missing         = 0               exception
+        eth_rx_trustsec_hdr_missing = 0               exception

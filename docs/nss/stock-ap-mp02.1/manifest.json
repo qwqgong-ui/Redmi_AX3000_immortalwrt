@@ -1,0 +1,448 @@
+{
+  "collected_at_utc": "2026-09-30T09:28:28.131043+00:00",
+  "access": "read-only Telnet; no router files or configuration written",
+  "files": {
+    "system/uname.txt": {
+      "source": "uname -a",
+      "bytes": 80,
+      "sha256": "d1611e1b3768903b818f750655f8ae0747493e32e2c17a11c0b71f5b251a0c7f"
+    },
+    "system/board-name.txt": {
+      "source": "cat /tmp/sysinfo/board_name",
+      "bytes": 10,
+      "sha256": "e29001d1603b2d7bc6c5714c3b90f3400f52f44c4fd64e3ce8da88189c220724"
+    },
+    "system/model.txt": {
+      "source": "cat /proc/device-tree/model",
+      "bytes": 46,
+      "sha256": "108dd063b82e26046c5b665370db20ce24d0e7959579796b0ff15671df4943ff"
+    },
+    "system/cpu-online.txt": {
+      "source": "cat /sys/devices/system/cpu/online",
+      "bytes": 4,
+      "sha256": "06c7168eabf724fe9d8184b87c401160ff4c740c5782a6445495523f811d3cfd"
+    },
+    "system/memory.txt": {
+      "source": "cat /proc/meminfo",
+      "bytes": 952,
+      "sha256": "13e2ce6a6925d0b9728b39e237c2cc023939e594aba5a52b23883defdfea4906"
+    },
+    "system/uptime.txt": {
+      "source": "cat /proc/uptime",
+      "bytes": 20,
+      "sha256": "1fd6b83c5327837f47edaf693bc80398f11a035dddcac2a9c61f072cf11a936c"
+    },
+    "system/modules.txt": {
+      "source": "cat /proc/modules",
+      "bytes": 10323,
+      "sha256": "af63aadf57961a20d4b01ecbf2e0ae1df4e14323b0ff49f339339a12bf478fc7"
+    },
+    "system/interrupts.txt": {
+      "source": "cat /proc/interrupts",
+      "bytes": 4059,
+      "sha256": "c591a4205a4113ff221e209dbe5cf85b95a507d9b2a45857b9950152fc39f25a"
+    },
+    "system/clocks.txt": {
+      "source": "cat /sys/kernel/debug/clk/clk_summary",
+      "bytes": 17008,
+      "sha256": "3006b8c67440e9a42b19d2404a31e1c141dcdac8070fa5d3f7612b4de1aa30b3"
+    },
+    "nss/sysctl-tree.txt": {
+      "source": "find /proc/sys/dev/nss -type f",
+      "bytes": 1279,
+      "sha256": "b08bb193ef68cc3e3faff20090673ac6a7f3b604f17a0c012ef22c77b24d2e9f"
+    },
+    "nss/debugfs-tree.txt": {
+      "source": "find /sys/kernel/debug/qca-nss-drv -type f",
+      "bytes": 3191,
+      "sha256": "15118c35fe0df882bf2801e01ea5a3faf6132c782898780820320c8156a0b425"
+    },
+    "nss/firmware-listing.txt": {
+      "source": "ls -ln /lib/firmware/qca-nss*.bin",
+      "bytes": 233,
+      "sha256": "46af0fbae519d0da5aae3a25475fb051b618537e835447902eb4077dc3159fe8"
+    },
+    "nss/module-parameters.txt": {
+      "source": "for f in /sys/module/qca_nss_drv/parameters/*; do [ -r \"$f\" ] || continue; printf '%s\\n' \"$f\"; cat \"$f\"; done",
+      "bytes": 264,
+      "sha256": "2d3509f09aef7472bcc340069f0dfac83cfded7ecb05df91fa659e910a1fb899"
+    },
+    "nss/clock-settings.txt": {
+      "source": "for f in /proc/sys/dev/nss/clock/*; do [ -f \"$f\" ] || continue; printf '%s\\n' \"$f\"; cat \"$f\"; done",
+      "bytes": 146,
+      "sha256": "01fd0a0cf30a82388ddfdfbb23727bf64cb1e3d37305d4c7ec4eb7ba6c611c88"
+    },
+    "nss/module-load-files.txt": {
+      "source": "for f in /etc/modules.d/*nss*; do [ -f \"$f\" ] || continue; printf '%s\\n' \"$f\"; cat \"$f\"; done",
+      "bytes": 326,
+      "sha256": "891e4f837013214d7c8aec11f017dbb80bacba6f768ac6032ee420b64232112d"
+    },
+    "ecm/accelerated-counts.txt": {
+      "source": "for f in /sys/kernel/debug/ecm/ecm_nss_ipv4/accelerated_count /sys/kernel/debug/ecm/ecm_nss_ipv6/accelerated_count; do [ -r \"$f\" ] || continue; printf '%s\\n' \"$f\"; cat \"$f\"; done",
+      "bytes": 112,
+      "sha256": "380628e2471660f906d080e1ba4d8b26760ab8d5481bbc266659b3a834c87ff0"
+    },
+    "../../../firmware/stock-nss/ipq5018/qca-nss0-retail.bin": {
+      "source": "/lib/firmware/qca-nss0-retail.bin",
+      "bytes": 761612,
+      "sha256": "d90f7dd2d12d48445765ba013ffcc9a4e7a4448cd1dc497dfffe3d0b726298cd",
+      "router_checksum": {
+        "algorithm": "md5",
+        "value": "06fe9beb6bd736e497c8980710affcd4"
+      }
+    },
+    "../../../firmware/stock-nss/ipq5018/qca-nss0.bin": {
+      "source": "/lib/firmware/qca-nss0.bin",
+      "bytes": 761612,
+      "sha256": "d90f7dd2d12d48445765ba013ffcc9a4e7a4448cd1dc497dfffe3d0b726298cd",
+      "router_checksum": {
+        "algorithm": "md5",
+        "value": "06fe9beb6bd736e497c8980710affcd4"
+      }
+    },
+    "device-tree/device-tree.tar": {
+      "source": "/proc/device-tree",
+      "bytes": 2232320,
+      "sha256": "7e0b236fd2778292968a10bbb01bef7309c0f1fdf76ea14e7828448c9cfab101",
+      "identity_redacted": true,
+      "original_archive_sha256": "f564c3e78a8f54d3c54d322d170af6b8f7700afd911928db20767c05a044da7f"
+    },
+    "device-tree/redactions.json": {
+      "source": "local identity-property redaction",
+      "bytes": 145,
+      "sha256": "3ced980b9f00c2688ca852e80d208e59b572e0ac731dfc7ce0f6a418b520484a"
+    },
+    "device-tree/device-tree.dts": {
+      "source": "local dtc -I fs (identity-redacted)",
+      "bytes": 78113,
+      "sha256": "0ba0d9f81e09ec877c943c89c9764d31392656e445b1ee27d6aab225ee6bd23e"
+    },
+    "device-tree/dtc-warnings.txt": {
+      "source": "local dtc diagnostics",
+      "bytes": 66771,
+      "sha256": "b3d72d5fcd97d2bfc9c9740b75d65462c5966baee3a549a81789598d675a28be"
+    },
+    "nss/meminfo/core0.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/meminfo/core0",
+      "bytes": 2519,
+      "sha256": "0419df769716b268e9f9e99b195ba679832aca1f2da85301693b7cb0901eee0a"
+    },
+    "nss/stats/cpu_load_ubi.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi",
+      "bytes": 96,
+      "sha256": "47d43a6785e2eacd418d691b5be49b03c4ad2350100a5ddfb0f330a79d76aa6b"
+    },
+    "nss/stats/drv.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/drv",
+      "bytes": 2723,
+      "sha256": "37a2ac8d6e897f1bf95c95b2c2d8c355d950c211dde723d86e8e660ea2aa6542"
+    },
+    "nss/stats/dynamic_if/type_names.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/dynamic_if/type_names",
+      "bytes": 3722,
+      "sha256": "03d4adfe20bd1b505672706b6ade432ddfcafb2fdd916aee225acbe994066f57"
+    },
+    "nss/stats/eth_rx.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/eth_rx",
+      "bytes": 1166,
+      "sha256": "cb42a317927ccf801e669ff5ae7dac5ac8f11b16ede1043313b25f3ea265b1d9"
+    },
+    "nss/stats/gmac.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/gmac",
+      "bytes": 1670,
+      "sha256": "358ec459d3d9583bd3895937c91d2510c6337ebc2be7ae168e8edf8a15f4b5a9"
+    },
+    "nss/stats/gre.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/gre",
+      "bytes": 1389,
+      "sha256": "b6bf21632bcf717bf60ed95a9643e82827b4a8a71a9f653167814719224ce461"
+    },
+    "nss/stats/ipv4.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/ipv4",
+      "bytes": 8963,
+      "sha256": "53fffd1b787875b8093df551c82e956ac01127e90aee0070d030e1c7ed85a1bf"
+    },
+    "nss/stats/ipv4_reasm.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/ipv4_reasm",
+      "bytes": 896,
+      "sha256": "a62277b8d1d403277eedb69a554ddf08aef45a6fd0bd94c01b9717ce42d55ecc"
+    },
+    "nss/stats/ipv6.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/ipv6",
+      "bytes": 6970,
+      "sha256": "2bd3106f6e2c86e891aec830881107717aaa341c8b074c58951e2a31d5928fd6"
+    },
+    "nss/stats/ipv6_reasm.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/ipv6_reasm",
+      "bytes": 896,
+      "sha256": "b48205427dbcae334f83ebc03879b38c1af109584cc2121dda55767b7a782f6b"
+    },
+    "nss/stats/l2tpv2.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/l2tpv2",
+      "bytes": 276,
+      "sha256": "bf213b483271e941cc8b16b7597a2423013f17a4ce43b70f9f426fc7bdba8aa3"
+    },
+    "nss/stats/lso_rx.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/lso_rx",
+      "bytes": 957,
+      "sha256": "7a09cf10def4540ddcf9107cb82698bebc88bb8e6eda219b71d725929e0cd5bd"
+    },
+    "nss/stats/n2h.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/n2h",
+      "bytes": 2466,
+      "sha256": "59e12e18f7ccd9de4629f6d0ae1fff260e5b9b1df671e05eb16aff9d3d1b4b3b"
+    },
+    "nss/stats/pppoe.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/pppoe",
+      "bytes": 1489,
+      "sha256": "802780f65c86e52384323f054e6bce8394b787113a44e1ba0cd742bb2ce0c6d9"
+    },
+    "nss/stats/pptp.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/pptp",
+      "bytes": 52,
+      "sha256": "209eadc1d332db76b72f16582d9cc6c080ee651904ef11b207055ff8129ea07d"
+    },
+    "nss/stats/project/core0/worker_threads.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/project/core0/worker_threads",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "nss/stats/udp_st.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/udp_st",
+      "bytes": 2150,
+      "sha256": "8ffffe1981ed0059fb9ce10f32fe08f1c1d823223985b9069374e168cdb7b53b"
+    },
+    "nss/stats/unaligned.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/unaligned",
+      "bytes": 68,
+      "sha256": "e27e1bb7db76852763227f0e11b6233bfa20a4311ea8a309239167b0df21549a"
+    },
+    "nss/stats/wifi.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi",
+      "bytes": 14057,
+      "sha256": "1c5a6b78d489c1cc67d310b90426c98b5eeb54bc1b5e539e50c4b4738f358e11"
+    },
+    "nss/stats/wifi_ext_vdev.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi_ext_vdev",
+      "bytes": 244,
+      "sha256": "6120d61f5e936618604ec081e8bc636c2d4bab2bac12e8b6c1982af7b950ece9"
+    },
+    "nss/stats/wifi_mesh/decap_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi_mesh/decap_stats",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "nss/stats/wifi_mesh/encap_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi_mesh/encap_stats",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "nss/stats/wifi_mesh/path_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi_mesh/path_stats",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "nss/stats/wifi_mesh/proxy_path_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifi_mesh/proxy_path_stats",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "nss/stats/wifili.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifili",
+      "bytes": 17551,
+      "sha256": "c1647260005c0a6d6560228ada27c1b1155ae2441888b40c3496980f740bfdb6"
+    },
+    "nss/strings/common_node_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/common_node_stats",
+      "bytes": 200,
+      "sha256": "d1a98737b81adf0fd8dfd2399e202dd4c4a085c027a04b263cd2013cb271709d"
+    },
+    "nss/strings/drv.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/drv",
+      "bytes": 1226,
+      "sha256": "a7be7d830f78e6f40dfc2935e101db6c72806def1781754b7854122991d1b618"
+    },
+    "nss/strings/eth_rx/exception_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/eth_rx/exception_stats_str",
+      "bytes": 118,
+      "sha256": "9dd95c92d8f168eae64c4f1598b4904f16f6e899f84421c59fac550a150492c7"
+    },
+    "nss/strings/eth_rx/special_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/eth_rx/special_stats_str",
+      "bytes": 65,
+      "sha256": "5313089a47817d2a726615c2e0d7a478293764b0fa12645edf5871953df25669"
+    },
+    "nss/strings/gre/gre_base.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/gre/gre_base",
+      "bytes": 602,
+      "sha256": "a96c9d0a5ae63087e9cec2f2b84588b7761fe0ed74f68becab294f1110882c3a"
+    },
+    "nss/strings/gre/gre_session.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/gre/gre_session",
+      "bytes": 554,
+      "sha256": "3c9bf4d9becfb7dd139598feba0698be946b3318841efe69549813488acea599"
+    },
+    "nss/strings/ipv4/exception_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv4/exception_stats_str",
+      "bytes": 2606,
+      "sha256": "7e1ee25f269cf89d31dcfa82d1434517ce1efa39703f2ebd33b053f802279ad7"
+    },
+    "nss/strings/ipv4/special_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv4/special_stats_str",
+      "bytes": 690,
+      "sha256": "cc9c6a008c566400cf64b49640feab8307e2678ec5d89869112a033d0cbdf47e"
+    },
+    "nss/strings/ipv4_reasm.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv4_reasm",
+      "bytes": 67,
+      "sha256": "2beae018259f62c9a43637d90d3d51701c03d22c9488521a63b78ac67cc80553"
+    },
+    "nss/strings/ipv6/exception_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv6/exception_stats_str",
+      "bytes": 1952,
+      "sha256": "af639ad8c1a318e99c31713890a3b7926c2fa4c63a0f79cbe82649b8778f9058"
+    },
+    "nss/strings/ipv6/special_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv6/special_stats_str",
+      "bytes": 713,
+      "sha256": "eba08ea85026df46b63a1c2d4c78829b3a68de54007a9887e8443b83da3e0c7b"
+    },
+    "nss/strings/ipv6_reasm.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/ipv6_reasm",
+      "bytes": 66,
+      "sha256": "e5c2f26dfc275cbc92d188db6cdb72cb4eb7708c1d6d2ccf0fb21709298f5e67"
+    },
+    "nss/strings/l2tpv2.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/l2tpv2",
+      "bytes": 159,
+      "sha256": "1b83347a6033d6d1380083039743b6b8c42efe4727f51c3492ac2e0bfe6d8ea0"
+    },
+    "nss/strings/lso_rx.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/lso_rx",
+      "bytes": 99,
+      "sha256": "09a763c68eefcdf131a2b05f977ad06b1862548881249bbd80052239e4002a7a"
+    },
+    "nss/strings/n2h.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/n2h",
+      "bytes": 966,
+      "sha256": "fe44db4aecc953f205021b56e2e49d50d7bac804ba4d43ef5e82d15312568540"
+    },
+    "nss/strings/pppoe/base_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/pppoe/base_stats_str",
+      "bytes": 388,
+      "sha256": "8c4a4104f2c53c5e0d471e28919554eaa6eeebe52c572be7d2b0db587ea93b23"
+    },
+    "nss/strings/pppoe/session_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/pppoe/session_stats_str",
+      "bytes": 174,
+      "sha256": "ead773101a8f66470b566f6464a4e6577a799fcdf0d4df3f4c6c739d72ffd6b5"
+    },
+    "nss/strings/pptp.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/pptp",
+      "bytes": 857,
+      "sha256": "2ea949526e16422ff47d9d5897b1558668aee23a452127c62ec2ec9139d0f0bc"
+    },
+    "nss/strings/udp_st/error_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/udp_st/error_stats_str",
+      "bytes": 490,
+      "sha256": "99a209bddfc61e1a3cfbe0389cea784fa248477842f5e2aeb04096b85226f093"
+    },
+    "nss/strings/udp_st/rx_time_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/udp_st/rx_time_stats_str",
+      "bytes": 82,
+      "sha256": "abc1aec4845f52c32740aa3f560fc6a2cf54c4e38d9c8f2214df668b6465325e"
+    },
+    "nss/strings/udp_st/tx_time_stats_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/udp_st/tx_time_stats_str",
+      "bytes": 82,
+      "sha256": "dc5ea03e61b26571cd614eee7d716f06cf0a5a93ec3cf9c30cf342433bad685f"
+    },
+    "nss/strings/wifi_mesh/decap_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifi_mesh/decap_stats",
+      "bytes": 582,
+      "sha256": "ceeb7c33fde486be9e117ae9dd712021e9cb113f0e7cecafdc6d9b4acad212fb"
+    },
+    "nss/strings/wifi_mesh/encap_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifi_mesh/encap_stats",
+      "bytes": 595,
+      "sha256": "de9e46b40c068f7eab4e17533d99fd887a2805fd4ac821432b88cae16a39ee67"
+    },
+    "nss/strings/wifi_mesh/path_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifi_mesh/path_stats",
+      "bytes": 258,
+      "sha256": "1e8e60358885269d1db25176d3303261320ee82e4a63d50f06204ab8773bbb8f"
+    },
+    "nss/strings/wifi_mesh/proxy_path_stats.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifi_mesh/proxy_path_stats",
+      "bytes": 301,
+      "sha256": "7b67548950d64e4dc56d8b6d33cf7c9bcad05ae3add9f6041fc07d1a20db2747"
+    },
+    "nss/strings/wifili/reo_ring_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/reo_ring_str",
+      "bytes": 103,
+      "sha256": "61721911bb6fb63c5939d80bfc914dffec122cfb0f6286d9f6d2c77f05140f9e"
+    },
+    "nss/strings/wifili/rx_dma_pool_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/rx_dma_pool_str",
+      "bytes": 84,
+      "sha256": "2b92b2c5a97dc28e833e76700df134e70573cf44aee64db81c2b5d617afc5421"
+    },
+    "nss/strings/wifili/rx_dma_ring_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/rx_dma_ring_str",
+      "bytes": 72,
+      "sha256": "4e7d996d2399c411f3b79f38d6916ac93fea66cfbaef7685bec42fb742721bf3"
+    },
+    "nss/strings/wifili/tcl_comp_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/tcl_comp_str",
+      "bytes": 143,
+      "sha256": "feb962a696937cb1fa897a457a1e75269e0ca9faf5d86581d857499a9adf27ff"
+    },
+    "nss/strings/wifili/tcl_ring_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/tcl_ring_str",
+      "bytes": 79,
+      "sha256": "b73bf4d889297a81e8b7188a285715fe4445c469485d42d716d207ccf949b8f0"
+    },
+    "nss/strings/wifili/tx_ext_sw_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/tx_ext_sw_str",
+      "bytes": 145,
+      "sha256": "61d696291b43727e14a69a6fff705ad6b85f306336f0b42e1320739abf4dbf1b"
+    },
+    "nss/strings/wifili/tx_sw_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/tx_sw_str",
+      "bytes": 259,
+      "sha256": "0816ae975cd962bbe9b63cfea543a45442c9bba20c8b6f63f3f11186cd9621b7"
+    },
+    "nss/strings/wifili/txrx_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/txrx_str",
+      "bytes": 824,
+      "sha256": "5eb0f834f264ca07968c1680196c294f19131559470baa3700dce5fde17ed6fd"
+    },
+    "nss/strings/wifili/wbm_ring_str.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/strings/wifili/wbm_ring_str",
+      "bytes": 209,
+      "sha256": "240dae01f71ffbd40b5931c296e3815646b830cb4f84b1fa9ac0a23e84bf462a"
+    },
+    "nss/stats-second/drv.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/drv",
+      "bytes": 2723,
+      "sha256": "aefbafaa024f2c3acfc34b0db22e505dd9dccda1bcf3f3022d91db3549b38fec"
+    },
+    "nss/stats-second/n2h.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/n2h",
+      "bytes": 2466,
+      "sha256": "a6548e97e7d448fc1085ca49c6e6d0a759c8011c78cbf6f1c00844a0dda78460"
+    },
+    "nss/stats-second/wifili.txt": {
+      "source": "cat /sys/kernel/debug/qca-nss-drv/stats/wifili",
+      "bytes": 17551,
+      "sha256": "5d230210bcd741fccec2dd2b6630ca6f818c2f9d91406c8f718f770077c0e644"
+    }
+  },
+  "unavailable": [
+    {
+      "source": "dmesg | grep -iE 'nss|ubi32|wifili|qcn6122'",
+      "exit_status": 1
+    }
+  ],
+  "completed_at_utc": "2026-09-30T09:28:37.527847+00:00"
+}

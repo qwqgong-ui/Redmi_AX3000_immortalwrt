@@ -1,0 +1,6 @@
+CPU Utilization:
+Note: Averaged over 1 second
+
+Core 0:
+Min     Avg     Max
+ 1%      5%      15%

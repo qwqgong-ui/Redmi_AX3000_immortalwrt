@@ -1,0 +1,5 @@
+/proc/sys/dev/nss/clock/auto_scale
+1
+/proc/sys/dev/nss/clock/current_freq
+/proc/sys/dev/nss/clock/freq_table
+/proc/sys/dev/nss/clock/inst_per_sec

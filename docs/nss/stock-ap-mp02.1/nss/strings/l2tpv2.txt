@@ -1,0 +1,5 @@
+        3 , rx_ppp_lcp_pkts
+        3 , rx_exp_pkts
+        4 , encap_pbuf_alloc_fails
+        4 , decap_pbuf_alloc_fails
+        4 , decap_l2tpoipsec_src_err

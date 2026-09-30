@@ -1,0 +1,10 @@
+[
+  {
+    "property": "./soc/dp1/local-mac-address",
+    "bytes": 6
+  },
+  {
+    "property": "./soc/dp2/local-mac-address",
+    "bytes": 6
+  }
+]

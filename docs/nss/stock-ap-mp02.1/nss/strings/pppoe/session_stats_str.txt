@@ -1,0 +1,7 @@
+        0 , rx_pkts
+        0 , rx_byts
+        0 , tx_pkts
+        0 , tx_byts
+        3 , wrong_version_or_type
+        3 , wrong_code
+        3 , unsupported_ppp_protocol

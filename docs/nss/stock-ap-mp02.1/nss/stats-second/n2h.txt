@@ -1,0 +1,39 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< N2H >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        n2h_rx_pkts                       = 311304966       common
+        n2h_rx_byts                       = 75221135229      common
+        n2h_tx_pkts                       = 12044664        common
+        n2h_tx_byts                       = 39247254979       common
+        n2h_rx_queue[0]_drops             = 5280            drop
+        n2h_rx_queue[1]_drops             = 0               drop
+        n2h_rx_queue[2]_drops             = 0               drop
+        n2h_rx_queue[3]_drops             = 0               drop
+        n2h_queue_drops                   = 0               drop
+        n2h_ticks                         = 0               special
+        n2h_worst_ticks                   = 0               special
+        n2h_iterations                    = 0               special
+        n2h_pbuf_ocm_total_count          = 1500            special
+        n2h_pbuf_ocm_free_count           = 1219            special
+        n2h_pbuf_ocm_alloc_fail_payload   = 44350           special
+        n2h_pbuf_ocm_alloc_fail_nopayload = 96              special
+        n2h_pbuf_def_total_count          = 14884           special
+        n2h_pbuf_def_free_count           = 6626            special
+        n2h_pbuf_def_alloc_fail_payload   = 156             special
+        n2h_pbuf_def_alloc_fail_nopayload = 0               special
+        n2h_payload_alloc_fails           = 160             special
+        n2h_payload_free_count            = 2052            special
+        n2h_h2n_control_pkts              = 9586786         special
+        n2h_h2n_control_byts              = 38824337920       special
+        n2h_n2h_control_pkts              = 309262410       special
+        n2h_n2h_control_byts              = 74832509768      special
+        n2h_h2n_data_pkts                 = 2457878         special
+        n2h_h2n_data_byts                 = 422917059       special
+        n2h_n2h_data_pkts                 = 2042556         special
+        n2h_n2h_data_byts                 = 388625461       special
+        n2h_n2h_tot_payloads              = 11783           special
+        n2h_n2h_data_interface_invalid    = 0               special
+        n2h_n2h_enqueue_retries           = 0               special

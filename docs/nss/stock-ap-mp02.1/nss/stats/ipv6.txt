@@ -1,0 +1,105 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< IPV6 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        ipv6_rx_pkts           = 17434910        common
+        ipv6_rx_byts           = 16777680392      common
+        ipv6_tx_pkts           = 16709109        common
+        ipv6_tx_byts           = 16869250130      common
+        ipv6_rx_queue[0]_drops = 0               drop
+        ipv6_rx_queue[1]_drops = 0               drop
+        ipv6_rx_queue[2]_drops = 0               drop
+        ipv6_rx_queue[3]_drops = 0               drop
+
+#ipv6 node stats
+
+        ipv6_rx_pkts                               = 16709109        special
+        ipv6_rx_bytes                              = 16589884644      special
+        ipv6_tx_pkts                               = 16709109        special
+        ipv6_tx_bytes                              = 16869250130      special
+        ipv6_create_requests                       = 65740           special
+        ipv6_create_collisions                     = 0               special
+        ipv6_create_invalid_interface              = 0               special
+        ipv6_destroy_requests                      = 13770           special
+        ipv6_destroy_misses                        = 0               special
+        ipv6_hash_hits                             = 16754887        special
+        ipv6_hash_reorders                         = 6178            special
+        ipv6_flushes                               = 51954           special
+        ipv6_evictions                             = 0               special
+        ipv6_fragmentations                        = 83              special
+        ipv6_frag_fails                            = 0               special
+        ipv6_by_rule_drops                         = 0               drop
+        ipv6_mc_create_requests                    = 0               special
+        ipv6_mc_update_requests                    = 0               special
+        ipv6_mc_create_invalid_interface           = 0               special
+        ipv6_mc_destroy_requests                   = 0               special
+        ipv6_mc_destroy_misses                     = 0               special
+        ipv6_mc_flushes                            = 0               special
+        ipv6_mirror_invalid_ifnum_conn_create_req  = 0               special
+        ipv6_mirror_invalid_iftype_conn_create_req = 0               special
+        ipv6_mirror_failures                       = 0               special
+
+#ipv6 exception stats
+
+        ipv6_icmp_header_incomplete         = 0               exception
+        ipv6_icmp_unhandled_type            = 23222           exception
+        ipv6_icmp_header_incomplete         = 0               exception
+        ipv6_icmp_udp_header_incomplete     = 0               exception
+        ipv6_icmp_tcp_header_incomplete     = 0               exception
+        ipv6_icmp_unknown_protocol          = 0               exception
+        ipv6_icmp_no_icme                   = 1837            exception
+        ipv6_icmp_flush_to_host             = 3371            exception
+        ipv6_tcp_header_incomplete          = 0               exception
+        ipv6_tcp_no_icme                    = 444205          exception
+        ipv6_tcp_small_hop_limit            = 0               exception
+        ipv6_tcp_needs_fragmentation        = 0               exception
+        ipv6_tcp_flags                      = 48577           exception
+        ipv6_tcp_seq_exceeds_right_edge     = 0               exception
+        ipv6_tcp_small_data_offs            = 0               exception
+        ipv6_tcp_bad_sack                   = 0               exception
+        ipv6_tcp_big_data_offs              = 0               exception
+        ipv6_tcp_seq_before_left_edge       = 0               exception
+        ipv6_tcp_ack_exceeds_right_edge     = 0               exception
+        ipv6_tcp_ack_before_left_edge       = 0               exception
+        ipv6_udp_header_incomplete          = 0               exception
+        ipv6_udp_no_icme                    = 69992           exception
+        ipv6_udp_small_hop_limit            = 8               exception
+        ipv6_udp_needs_fragmentation        = 0               exception
+        ipv6_wrong_target_mac               = 0               exception
+        ipv6_header_incomplete              = 0               exception
+        ipv6_unknown_protocol               = 1631            exception
+        ipv6_ingress_vid_mismatch           = 0               exception
+        ipv6_ingress_vid_missing            = 0               exception
+        ipv6_dscp_marking_mismatch          = 0               exception
+        ipv6_vlan_marking_mismatch          = 0               exception
+        ipv6_interface_mismatch             = 0               exception
+        ipv6_gre_no_icme                    = 0               exception
+        ipv6_gre_needs_fragmentation        = 0               exception
+        ipv6_gre_small_hop_limit            = 0               exception
+        ipv6_destroy                        = 0               exception
+        ipv6_icmp_udplite_header_incomplete = 0               exception
+        ipv6_udplite_header_incomplete      = 0               exception
+        ipv6_udplite_no_icme                = 0               exception
+        ipv6_udplite_small_hop_limit        = 0               exception
+        ipv6_udplite_needs_fragmentation    = 0               exception
+        ipv6_mc_udp_no_icme                 = 0               exception
+        ipv6_mc_mem_alloc_failure           = 0               exception
+        ipv6_mc_update_failure              = 0               exception
+        ipv6_mc_pbuf_alloc_failure          = 0               exception
+        ipv6_esp_header_incomplete          = 0               exception
+        ipv6_esp_no_icme                    = 0               exception
+        ipv6_esp_ip_fragment                = 0               exception
+        ipv6_esp_small_hop_limit            = 0               exception
+        ipv6_esp_needs_fragmentation        = 0               exception
+        ipv6_tunipip6_no_icme               = 0               exception
+        ipv6_tunipip6_small_hop_limit       = 0               exception
+        ipv6_tunipip6_needs_fragmentation   = 0               exception
+        ipv6_pppoe_bridge_no_icme           = 0               exception
+        ipv6_dont_frag_set                  = 0               exception
+        ipv6_reassembly_not_supported       = 132958          exception
+        ipv6_pppoe_no_session               = 0               drop
+        ipv6_icmp_gre_header_incomplete     = 0               exception
+        ipv6_icmp_esp_header_incomplete     = 0               exception
+        ipv6_emesh_prio_mismatch            = 0               exception

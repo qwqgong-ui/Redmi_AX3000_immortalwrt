@@ -1,0 +1,4 @@
+        2 , reo_error
+        4 , reo_reaped
+        4 , reo_inv_cookie
+        4 , stats_reo_frag_rcv

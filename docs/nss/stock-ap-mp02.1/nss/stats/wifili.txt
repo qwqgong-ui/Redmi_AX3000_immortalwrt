@@ -1,0 +1,386 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< WIFILI >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+
+#txrx
+
+        wifili[0]_rx_msdu_error                 = 0               error
+        wifili[0]_rx_inv_peer_rcv               = 0               special
+        wifili[0]_rx_wds_srcport_exception      = 1               exception
+        wifili[0]_rx_wds_srcport_exception_fail = 0               drop
+        wifili[0]_rx_deliverd                   = 73078           special
+        wifili[0]_rx_deliver_drops              = 0               drop
+        wifili[0]_rx_intra_bss_ucast            = 0               special
+        wifili[0]_rx_intra_bss_ucast_fail       = 0               drop
+        wifili[0]_rx_intra_bss_mcast            = 22884           special
+        wifili[0]_rx_intra_bss_mcast_fail       = 0               drop
+        wifili[0]_rx_sg_rcv_send                = 0               special
+        wifili[0]_rx_sg_rcv_fail                = 0               drop
+        wifili[0]_rx_mcast_echo                 = 0               special
+        wifili[0]_rx_inv_tid                    = 0               special
+        wifili[0]_stats_rx_frag_inv_sc          = 0               special
+        wifili[0]_stats_rx_frag_inv_fc          = 0               special
+        wifili[0]_stats_rx_frag_non_frag        = 0               special
+        wifili[0]_stats_rx_frag_retry           = 0               special
+        wifili[0]_stats_rx_frag_ooo             = 0               special
+        wifili[0]_stats_rx_frag_ooo_seq         = 0               special
+        wifili[0]_stats_rx_frag_all_frag_rcv    = 0               special
+        wifili[0]_stats_rx_frag_deliver         = 0               special
+        wifili[0]_tx_enqueue                    = 137710          special
+        wifili[0]_tx_enqueue_drop               = 0               drop
+        wifili[0]_tx_dequeue                    = 137710          special
+        wifili[0]_tx_hw_enqueue_fail            = 0               drop
+        wifili[0]_tx_sent_count                 = 137709          special
+
+
+#tcl ring
+
+        wifili[0]_tcl_no_hw_desc = 0               special
+        wifili[0]_tcl_ring_full  = 0               special
+        wifili[0]_tcl_ring_sent  = 137709          special
+
+
+#tcl comp
+
+        wifili[0]_tx_desc_free_inv_bufsrc    = 0               error
+        wifili[0]_tx_desc_free_inv_cookie    = 0               special
+        wifili[0]_tx_desc_free_hw_ring_empty = 0               special
+        wifili[0]_tx_desc_free_reaped        = 150641          special
+
+
+#reo ring
+
+        wifili[0]_reo_error          = 0               error
+        wifili[0]_reo_reaped         = 73077           special
+        wifili[0]_reo_inv_cookie     = 0               special
+        wifili[0]_stats_reo_frag_rcv = 0               special
+
+
+#tx sw pool
+
+        wifili[0]_tx_desc_in_use            = 0               special
+        wifili[0]_tx_desc_alloc_fail        = 0               special
+        wifili[0]_tx_desc_already_allocated = 0               special
+        wifili[0]_tx_desc_invalid_free      = 0               special
+        wifili[0]_tx_desc_free_src_fw       = 93209           special
+        wifili[0]_tx_desc_free_completion   = 44500           special
+        wifili[0]_tx_desc_no_pb             = 0               special
+        wifili[0]_tx_desc_queuelimit_drop   = 0               drop
+
+
+#tx ext sw pool
+
+        wifili[0]_ext_tx_desc_in_use            = 0               special
+        wifili[0]_ext_tx_desc_alloc_fail        = 0               special
+        wifili[0]_ext_tx_desc_already_allocated = 0               special
+        wifili[0]_ext_tx_desc_invalid_free      = 0               special
+
+
+#rxdma pool
+
+        wifili[0]_rx_desc_no_pb      = 1               special
+        wifili[0]_rx_desc_alloc_fail = 64              special
+        wifili[0]_rx_desc_in_use     = 4095            special
+
+
+#rxdma ring
+
+        wifili[0]_rxdma_hw_desc_unavailable = 0               special
+        wifili[0]_rxdma_buf_replenished     = 90100           special
+
+
+#txrx
+
+        wifili[1]_rx_msdu_error                 = 0               error
+        wifili[1]_rx_inv_peer_rcv               = 0               special
+        wifili[1]_rx_wds_srcport_exception      = 0               exception
+        wifili[1]_rx_wds_srcport_exception_fail = 0               drop
+        wifili[1]_rx_deliverd                   = 0               special
+        wifili[1]_rx_deliver_drops              = 0               drop
+        wifili[1]_rx_intra_bss_ucast            = 0               special
+        wifili[1]_rx_intra_bss_ucast_fail       = 0               drop
+        wifili[1]_rx_intra_bss_mcast            = 0               special
+        wifili[1]_rx_intra_bss_mcast_fail       = 0               drop
+        wifili[1]_rx_sg_rcv_send                = 0               special
+        wifili[1]_rx_sg_rcv_fail                = 0               drop
+        wifili[1]_rx_mcast_echo                 = 0               special
+        wifili[1]_rx_inv_tid                    = 0               special
+        wifili[1]_stats_rx_frag_inv_sc          = 0               special
+        wifili[1]_stats_rx_frag_inv_fc          = 0               special
+        wifili[1]_stats_rx_frag_non_frag        = 0               special
+        wifili[1]_stats_rx_frag_retry           = 0               special
+        wifili[1]_stats_rx_frag_ooo             = 0               special
+        wifili[1]_stats_rx_frag_ooo_seq         = 0               special
+        wifili[1]_stats_rx_frag_all_frag_rcv    = 0               special
+        wifili[1]_stats_rx_frag_deliver         = 0               special
+        wifili[1]_tx_enqueue                    = 0               special
+        wifili[1]_tx_enqueue_drop               = 0               drop
+        wifili[1]_tx_dequeue                    = 0               special
+        wifili[1]_tx_hw_enqueue_fail            = 0               drop
+        wifili[1]_tx_sent_count                 = 0               special
+
+
+#tcl ring
+
+        wifili[1]_tcl_no_hw_desc = 0               special
+        wifili[1]_tcl_ring_full  = 0               special
+        wifili[1]_tcl_ring_sent  = 0               special
+
+
+#tcl comp
+
+        wifili[1]_tx_desc_free_inv_bufsrc    = 0               error
+        wifili[1]_tx_desc_free_inv_cookie    = 0               special
+        wifili[1]_tx_desc_free_hw_ring_empty = 0               special
+        wifili[1]_tx_desc_free_reaped        = 0               special
+
+
+#reo ring
+
+        wifili[1]_reo_error          = 0               error
+        wifili[1]_reo_reaped         = 0               special
+        wifili[1]_reo_inv_cookie     = 0               special
+        wifili[1]_stats_reo_frag_rcv = 0               special
+
+
+#tx sw pool
+
+        wifili[1]_tx_desc_in_use            = 0               special
+        wifili[1]_tx_desc_alloc_fail        = 0               special
+        wifili[1]_tx_desc_already_allocated = 0               special
+        wifili[1]_tx_desc_invalid_free      = 0               special
+        wifili[1]_tx_desc_free_src_fw       = 0               special
+        wifili[1]_tx_desc_free_completion   = 0               special
+        wifili[1]_tx_desc_no_pb             = 0               special
+        wifili[1]_tx_desc_queuelimit_drop   = 0               drop
+
+
+#tx ext sw pool
+
+        wifili[1]_ext_tx_desc_in_use            = 0               special
+        wifili[1]_ext_tx_desc_alloc_fail        = 0               special
+        wifili[1]_ext_tx_desc_already_allocated = 0               special
+        wifili[1]_ext_tx_desc_invalid_free      = 0               special
+
+
+#rxdma pool
+
+        wifili[1]_rx_desc_no_pb      = 0               special
+        wifili[1]_rx_desc_alloc_fail = 0               special
+        wifili[1]_rx_desc_in_use     = 0               special
+
+
+#rxdma ring
+
+        wifili[1]_rxdma_hw_desc_unavailable = 0               special
+        wifili[1]_rxdma_buf_replenished     = 0               special
+
+
+#txrx
+
+        wifili[2]_rx_msdu_error                 = 0               error
+        wifili[2]_rx_inv_peer_rcv               = 0               special
+        wifili[2]_rx_wds_srcport_exception      = 0               exception
+        wifili[2]_rx_wds_srcport_exception_fail = 0               drop
+        wifili[2]_rx_deliverd                   = 0               special
+        wifili[2]_rx_deliver_drops              = 0               drop
+        wifili[2]_rx_intra_bss_ucast            = 0               special
+        wifili[2]_rx_intra_bss_ucast_fail       = 0               drop
+        wifili[2]_rx_intra_bss_mcast            = 0               special
+        wifili[2]_rx_intra_bss_mcast_fail       = 0               drop
+        wifili[2]_rx_sg_rcv_send                = 0               special
+        wifili[2]_rx_sg_rcv_fail                = 0               drop
+        wifili[2]_rx_mcast_echo                 = 0               special
+        wifili[2]_rx_inv_tid                    = 0               special
+        wifili[2]_stats_rx_frag_inv_sc          = 0               special
+        wifili[2]_stats_rx_frag_inv_fc          = 0               special
+        wifili[2]_stats_rx_frag_non_frag        = 0               special
+        wifili[2]_stats_rx_frag_retry           = 0               special
+        wifili[2]_stats_rx_frag_ooo             = 0               special
+        wifili[2]_stats_rx_frag_ooo_seq         = 0               special
+        wifili[2]_stats_rx_frag_all_frag_rcv    = 0               special
+        wifili[2]_stats_rx_frag_deliver         = 0               special
+        wifili[2]_tx_enqueue                    = 0               special
+        wifili[2]_tx_enqueue_drop               = 0               drop
+        wifili[2]_tx_dequeue                    = 0               special
+        wifili[2]_tx_hw_enqueue_fail            = 0               drop
+        wifili[2]_tx_sent_count                 = 0               special
+
+
+#tcl ring
+
+        wifili[2]_tcl_no_hw_desc = 0               special
+        wifili[2]_tcl_ring_full  = 0               special
+        wifili[2]_tcl_ring_sent  = 0               special
+
+
+#tcl comp
+
+        wifili[2]_tx_desc_free_inv_bufsrc    = 0               error
+        wifili[2]_tx_desc_free_inv_cookie    = 0               special
+        wifili[2]_tx_desc_free_hw_ring_empty = 0               special
+        wifili[2]_tx_desc_free_reaped        = 0               special
+
+
+#reo ring
+
+        wifili[2]_reo_error          = 0               error
+        wifili[2]_reo_reaped         = 0               special
+        wifili[2]_reo_inv_cookie     = 0               special
+        wifili[2]_stats_reo_frag_rcv = 0               special
+
+
+#tx sw pool
+
+        wifili[2]_tx_desc_in_use            = 0               special
+        wifili[2]_tx_desc_alloc_fail        = 0               special
+        wifili[2]_tx_desc_already_allocated = 0               special
+        wifili[2]_tx_desc_invalid_free      = 0               special
+        wifili[2]_tx_desc_free_src_fw       = 0               special
+        wifili[2]_tx_desc_free_completion   = 0               special
+        wifili[2]_tx_desc_no_pb             = 0               special
+        wifili[2]_tx_desc_queuelimit_drop   = 0               drop
+
+
+#tx ext sw pool
+
+        wifili[2]_ext_tx_desc_in_use            = 0               special
+        wifili[2]_ext_tx_desc_alloc_fail        = 0               special
+        wifili[2]_ext_tx_desc_already_allocated = 0               special
+        wifili[2]_ext_tx_desc_invalid_free      = 0               special
+
+
+#rxdma pool
+
+        wifili[2]_rx_desc_no_pb      = 0               special
+        wifili[2]_rx_desc_alloc_fail = 0               special
+        wifili[2]_rx_desc_in_use     = 0               special
+
+
+#rxdma ring
+
+        wifili[2]_rxdma_hw_desc_unavailable = 0               special
+        wifili[2]_rxdma_buf_replenished     = 0               special
+
+
+#wbm ring
+
+        wifili_wbm_ie_local_alloc_fail = 0               error
+        wifili_wbm_src_dma             = 5855            special
+        wifili_wbm_src_dma_code_inv    = 0               special
+        wifili_wbm_src_reo             = 7073            special
+        wifili_wbm_src_reo_code_nullq  = 2               special
+        wifili_wbm_src_reo_code_inv    = 7070            error
+        wifili_wbm_src_inv             = 0               error
+
+
+#txrx
+
+        wifili[0]_rx_msdu_error                 = 0               error
+        wifili[0]_rx_inv_peer_rcv               = 0               special
+        wifili[0]_rx_wds_srcport_exception      = 4486            exception
+        wifili[0]_rx_wds_srcport_exception_fail = 0               drop
+        wifili[0]_rx_deliverd                   = 8413227         special
+        wifili[0]_rx_deliver_drops              = 0               drop
+        wifili[0]_rx_intra_bss_ucast            = 46              special
+        wifili[0]_rx_intra_bss_ucast_fail       = 0               drop
+        wifili[0]_rx_intra_bss_mcast            = 15136           special
+        wifili[0]_rx_intra_bss_mcast_fail       = 0               drop
+        wifili[0]_rx_sg_rcv_send                = 0               special
+        wifili[0]_rx_sg_rcv_fail                = 0               drop
+        wifili[0]_rx_mcast_echo                 = 0               special
+        wifili[0]_rx_inv_tid                    = 0               special
+        wifili[0]_stats_rx_frag_inv_sc          = 0               special
+        wifili[0]_stats_rx_frag_inv_fc          = 0               special
+        wifili[0]_stats_rx_frag_non_frag        = 0               special
+        wifili[0]_stats_rx_frag_retry           = 0               special
+        wifili[0]_stats_rx_frag_ooo             = 0               special
+        wifili[0]_stats_rx_frag_ooo_seq         = 0               special
+        wifili[0]_stats_rx_frag_all_frag_rcv    = 0               special
+        wifili[0]_stats_rx_frag_deliver         = 0               special
+        wifili[0]_tx_enqueue                    = 16993253        special
+        wifili[0]_tx_enqueue_drop               = 0               drop
+        wifili[0]_tx_dequeue                    = 16993262        special
+        wifili[0]_tx_hw_enqueue_fail            = 0               drop
+        wifili[0]_tx_sent_count                 = 16993283        special
+
+
+#tcl ring
+
+        wifili[0]_tcl_no_hw_desc = 0               special
+        wifili[0]_tcl_ring_full  = 0               special
+        wifili[0]_tcl_ring_sent  = 16993279        special
+
+
+#tcl comp
+
+        wifili[0]_tx_desc_free_inv_bufsrc    = 0               error
+        wifili[0]_tx_desc_free_inv_cookie    = 0               special
+        wifili[0]_tx_desc_free_hw_ring_empty = 0               special
+        wifili[0]_tx_desc_free_reaped        = 17410661        special
+
+
+#reo ring
+
+        wifili[0]_reo_error          = 0               error
+        wifili[0]_reo_reaped         = 8408797         special
+        wifili[0]_reo_inv_cookie     = 0               special
+        wifili[0]_stats_reo_frag_rcv = 0               special
+
+
+#tx sw pool
+
+        wifili[0]_tx_desc_in_use            = 1               special
+        wifili[0]_tx_desc_alloc_fail        = 0               special
+        wifili[0]_tx_desc_already_allocated = 0               special
+        wifili[0]_tx_desc_invalid_free      = 0               special
+        wifili[0]_tx_desc_free_src_fw       = 88282           special
+        wifili[0]_tx_desc_free_completion   = 16904966        special
+        wifili[0]_tx_desc_no_pb             = 0               special
+        wifili[0]_tx_desc_queuelimit_drop   = 0               drop
+
+
+#tx ext sw pool
+
+        wifili[0]_ext_tx_desc_in_use            = 0               special
+        wifili[0]_ext_tx_desc_alloc_fail        = 0               special
+        wifili[0]_ext_tx_desc_already_allocated = 0               special
+        wifili[0]_ext_tx_desc_invalid_free      = 0               special
+
+
+#rxdma pool
+
+        wifili[0]_rx_desc_no_pb      = 11              special
+        wifili[0]_rx_desc_alloc_fail = 2171654         special
+        wifili[0]_rx_desc_in_use     = 4095            special
+
+
+#rxdma ring
+
+        wifili[0]_rxdma_hw_desc_unavailable = 0               special
+        wifili[0]_rxdma_buf_replenished     = 8830258         special
+
+
+#wbm ring
+
+        wifili_wbm_ie_local_alloc_fail = 0               error
+        wifili_wbm_src_dma             = 396536          special
+        wifili_wbm_src_dma_code_inv    = 0               special
+        wifili_wbm_src_reo             = 20806           special
+        wifili_wbm_src_reo_code_nullq  = 81              special
+        wifili_wbm_src_reo_code_inv    = 16239           error
+        wifili_wbm_src_inv             = 0               error
+
+
+#wbm ring
+
+        wifili_wbm_ie_local_alloc_fail = 0               error
+        wifili_wbm_src_dma             = 0               special
+        wifili_wbm_src_dma_code_inv    = 0               special
+        wifili_wbm_src_reo             = 0               special
+        wifili_wbm_src_reo_code_nullq  = 0               special
+        wifili_wbm_src_reo_code_inv    = 0               error
+        wifili_wbm_src_inv             = 0               error

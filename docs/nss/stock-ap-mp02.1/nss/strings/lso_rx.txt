@@ -1,0 +1,4 @@
+        1 , tx_drops
+        1 , drops
+        2 , pbuf_alloc_fail
+        2 , pbuf_reference_fail

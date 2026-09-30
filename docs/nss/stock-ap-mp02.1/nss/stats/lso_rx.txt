@@ -1,0 +1,21 @@
+
+________________________________________________________________________________
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< LSO_RX >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+________________________________________________________________________________
+
+        lso_rx_rx_pkts           = 0               common
+        lso_rx_rx_byts           = 0               common
+        lso_rx_tx_pkts           = 0               common
+        lso_rx_tx_byts           = 0               common
+        lso_rx_rx_queue[0]_drops = 0               drop
+        lso_rx_rx_queue[1]_drops = 0               drop
+        lso_rx_rx_queue[2]_drops = 0               drop
+        lso_rx_rx_queue[3]_drops = 0               drop
+
+#lso_rx node stats
+
+        lso_rx_tx_drops            = 0               drop
+        lso_rx_drops               = 0               drop
+        lso_rx_pbuf_alloc_fail     = 0               error
+        lso_rx_pbuf_reference_fail = 0               error

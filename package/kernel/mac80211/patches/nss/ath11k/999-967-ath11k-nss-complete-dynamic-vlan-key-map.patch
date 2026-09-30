@@ -1,0 +1,85 @@
+Subject: [PATCH] ath11k: nss: support the full dynamic VLAN key map
+
+Size the u16 map by VLAN_N_VID, reject invalid IDs and absent maps, and
+allocate all 127 usable group-key indices on both 32-bit and 64-bit hosts.
+Keep the bitmap search and allocation under the same data lock.
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -8,6 +8,8 @@
+ #include <net/cfg80211.h>
+ #include <linux/etherdevice.h>
+ #include <linux/bitfield.h>
++#include <linux/bitmap.h>
++#include <linux/if_vlan.h>
+ #include <linux/inetdevice.h>
+ #include <net/if_inet6.h>
+ #include <net/ipv6.h>
+@@ -4447,20 +4449,17 @@
+ 					  struct ieee80211_key_conf *key)
+ {
+ 	struct ath11k *ar = arvif->ar;
+-	int map_idx = 0;
+-	int free_bit;
+-
+-	for (map_idx = 0; map_idx < ATH11K_FREE_GROUP_IDX_MAP_MAX; map_idx++)
+-		if (arvif->free_groupidx_map[map_idx] != 0)
+-			break;
+-
+-	if (map_idx == ATH11K_FREE_GROUP_IDX_MAP_MAX)
+-		return -ENOSPC;
++	unsigned long free_bit;
+ 
+ 	spin_lock_bh(&ar->data_lock);
+ 	/* select the first free key index */
+-	free_bit = __ffs64(arvif->free_groupidx_map[map_idx]);
+-	key->hw_key_idx = (map_idx * ATH11K_FREE_GROUP_IDX_MAP_BITS) + free_bit;
++	free_bit = find_first_bit(arvif->free_groupidx_map,
++				  ATH11K_GROUP_KEYS_NUM_MAX);
++	if (free_bit == ATH11K_GROUP_KEYS_NUM_MAX) {
++		spin_unlock_bh(&ar->data_lock);
++		return -ENOSPC;
++	}
++	key->hw_key_idx = free_bit;
+ 	/* clear the selected bit from free index map */
+ 	clear_bit(key->hw_key_idx, arvif->free_groupidx_map);
+ 	spin_unlock_bh(&ar->data_lock);
+@@ -4494,6 +4493,8 @@
+ 
+ 	if (key->keyidx > WMI_MAX_KEY_INDEX)
+ 		return -ENOSPC;
++	if (key->vlan_id >= VLAN_VID_MASK)
++		return -EINVAL;
+ 
+ 	arvif = ath11k_vif_to_arvif(vif);
+ 
+@@ -4527,6 +4528,11 @@
+ 		}
+ 	}
+ 
++	if (key->vlan_id && !arvif->vlan_keyid_map) {
++		ret = -EINVAL;
++		goto exit;
++	}
++
+ 	/* the peer should not disappear in mid-way (unless FW goes awry) since
+ 	 * we already hold conf_mutex. we just make sure its there now.
+ 	 */
+@@ -7286,13 +7292,13 @@
+ 
+ 	spin_lock_bh(&ar->data_lock);
+ 	/* Configure vlan specific parameters */
+-	for (i = 0; i < ATH11K_FREE_GROUP_IDX_MAP_MAX; i++)
+-		arvif->free_groupidx_map[i] = 0xFFFFFFFFL;
++	bitmap_fill(arvif->free_groupidx_map, ATH11K_GROUP_KEYS_NUM_MAX);
+ 	/* Group idx 0 is not valid for VLAN*/
+-	arvif->free_groupidx_map[0] &= ~(1L);
++	clear_bit(0, arvif->free_groupidx_map);
+ 	spin_unlock_bh(&ar->data_lock);
+ 
+-	arvif->vlan_keyid_map = kzalloc(4096, GFP_KERNEL);
++	arvif->vlan_keyid_map = kcalloc(VLAN_N_VID,
++					 sizeof(*arvif->vlan_keyid_map), GFP_KERNEL);
+ 	if (!arvif->vlan_keyid_map) {
+ 		ret = -ENOMEM;
+ 		goto err;
