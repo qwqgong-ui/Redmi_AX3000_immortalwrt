@@ -123,8 +123,10 @@ define Device/redmi_ax3000
 	BLOCKSIZE := 128k
 	PAGESIZE := 2048
 	NAND_SIZE := 128m
+	# Omit the unused USB and disk automount stacks from the 256 MiB image.
 	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
-		ipq-wifi-redmi_ax3000 zram-swap
+		ipq-wifi-redmi_ax3000 zram-swap \
+		-automount -kmod-usb3 -kmod-usb-dwc3 -kmod-usb-dwc3-qcom
 ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
 	ARTIFACTS := initramfs-factory.ubi
 	ARTIFACT/initramfs-factory.ubi := append-image-stage initramfs-uImage.itb | ubinize-kernel
