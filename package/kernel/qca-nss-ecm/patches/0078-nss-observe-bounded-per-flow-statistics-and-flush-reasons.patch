@@ -1,0 +1,117 @@
+From: NSS integration <nss@local>
+Subject: [PATCH] nss: add default-off bounded per-flow sync metadata
+
+Observe hardware TCP/UDP sync increments, original/NAT tuples and terminal
+reasons without recording packet data or changing forwarding. The root-only
+port filter covers all four identifiers. A bounded ring reports overwritten
+events; reading drains it. Capture unmatched final syncs before the existing
+no-CI return. Counts are firmware sync increments, not connection totals.
+
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -90,6 +90,8 @@
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv4.h"
+ #include "ecm_ipv4.h"
++
++#include "ecm_nss_ipv4_diag.inc"
+ 
+ #define ECM_NSS_IPV4_STATS_SYNC_PERIOD msecs_to_jiffies(1000)
+ #define ECM_NSS_IPV4_STATS_SYNC_UDELAY 4000	/* Delay for 4 ms */
+@@ -289,4 +291,5 @@
+ #endif
++	ecm_nss_flow_sync_diag_record(sync, request, notification, ci);
+ 	if (!ci) {
+ 		DEBUG_TRACE("%px: NSS Sync: no connection\n", sync);
+ 		return;
+--- /dev/null
++++ b/frontends/nss/ecm_nss_ipv4_diag.inc
+@@ -0,0 +1,88 @@
++/* Default-off bounded sync metadata; no skb or application bytes. */
++#define ECM_NSS_SYNC_DIAG_SIZE 512
++struct ecm_nss_sync_diag_event {
++	u64 ns, request;
++	u32 serial;
++	u8 matched, notification;
++	struct nss_ipv4_conn_sync sync;
++};
++static bool ecm_nss_flow_sync_diag;
++static unsigned int ecm_nss_flow_sync_diag_port_low = 47000;
++static unsigned int ecm_nss_flow_sync_diag_port_high = 47127;
++module_param_named(flow_sync_diag, ecm_nss_flow_sync_diag, bool, 0600);
++module_param_named(flow_sync_diag_port_low, ecm_nss_flow_sync_diag_port_low, uint, 0600);
++module_param_named(flow_sync_diag_port_high, ecm_nss_flow_sync_diag_port_high, uint, 0600);
++MODULE_PARM_DESC(flow_sync_diag, "Observe bounded IPv4 TCP firmware sync increments; no packet payload");
++static DEFINE_SPINLOCK(ecm_nss_flow_sync_diag_lock);
++static struct ecm_nss_sync_diag_event ecm_nss_flow_sync_diag_ring[ECM_NSS_SYNC_DIAG_SIZE];
++static u64 ecm_nss_flow_sync_diag_write, ecm_nss_flow_sync_diag_read, ecm_nss_flow_sync_diag_lost;
++
++static bool ecm_nss_flow_sync_diag_port(u32 port)
++{
++	return port >= READ_ONCE(ecm_nss_flow_sync_diag_port_low) &&
++		port <= READ_ONCE(ecm_nss_flow_sync_diag_port_high);
++}
++
++static void ecm_nss_flow_sync_diag_record(struct nss_ipv4_conn_sync *sync,
++			unsigned long request, bool notification,
++			struct ecm_db_connection_instance *ci)
++{
++	struct ecm_nss_sync_diag_event event = {};
++	unsigned long irqflags;
++	if (!READ_ONCE(ecm_nss_flow_sync_diag) ||
++	    (sync->protocol != IPPROTO_TCP && sync->protocol != IPPROTO_UDP))
++		return;
++	if (!ecm_nss_flow_sync_diag_port(sync->flow_ident) &&
++	    !ecm_nss_flow_sync_diag_port(sync->flow_ident_xlate) &&
++	    !ecm_nss_flow_sync_diag_port(sync->return_ident) &&
++	    !ecm_nss_flow_sync_diag_port(sync->return_ident_xlate))
++		return;
++	event.ns = ktime_get_ns();
++	event.request = request;
++	event.notification = notification;
++	event.matched = !!ci;
++	if (ci)
++		event.serial = ecm_db_connection_serial_get(ci);
++	event.sync = *sync;
++	spin_lock_irqsave(&ecm_nss_flow_sync_diag_lock, irqflags);
++	if (ecm_nss_flow_sync_diag_write - ecm_nss_flow_sync_diag_read == ECM_NSS_SYNC_DIAG_SIZE) {
++		ecm_nss_flow_sync_diag_read++;
++		ecm_nss_flow_sync_diag_lost++;
++	}
++	ecm_nss_flow_sync_diag_ring[ecm_nss_flow_sync_diag_write++ % ECM_NSS_SYNC_DIAG_SIZE] = event;
++	spin_unlock_irqrestore(&ecm_nss_flow_sync_diag_lock, irqflags);
++}
++
++static int ecm_nss_flow_sync_diag_events_get(char *buffer, const struct kernel_param *kp)
++{
++	unsigned long irqflags;
++	int length;
++	spin_lock_irqsave(&ecm_nss_flow_sync_diag_lock, irqflags);
++	length = scnprintf(buffer, PAGE_SIZE,
++		"enabled=%u write=%llu read=%llu lost=%llu counters=sync-increments coverage=IPv4-TCP-UDP; read drains metadata\n",
++		READ_ONCE(ecm_nss_flow_sync_diag), ecm_nss_flow_sync_diag_write,
++		ecm_nss_flow_sync_diag_read, ecm_nss_flow_sync_diag_lost);
++	while (ecm_nss_flow_sync_diag_read != ecm_nss_flow_sync_diag_write && PAGE_SIZE - length > 640) {
++		struct ecm_nss_sync_diag_event *event = &ecm_nss_flow_sync_diag_ring[ecm_nss_flow_sync_diag_read++ % ECM_NSS_SYNC_DIAG_SIZE];
++		struct nss_ipv4_conn_sync *sync = &event->sync;
++		length += scnprintf(buffer + length, PAGE_SIZE - length,
++			"ns=%llu req=%llu notify=%u matched=%u serial=%u protocol=%u reason=%u cause=%u flags=%u qos=%u "
++			"flow=%pI4h:%u flow_xlate=%pI4h:%u return=%pI4h:%u return_xlate=%pI4h:%u "
++			"flow_rx=%u/%u flow_tx=%u/%u return_rx=%u/%u return_tx=%u/%u "
++			"flow_maxwin=%u flow_end=%u flow_maxend=%u return_maxwin=%u return_end=%u return_maxend=%u ticks=%u\n",
++			event->ns, event->request, event->notification, event->matched, event->serial,
++			sync->protocol, sync->reason, sync->cause, sync->flags, sync->qos_tag,
++			&sync->flow_ip, sync->flow_ident, &sync->flow_ip_xlate, sync->flow_ident_xlate,
++			&sync->return_ip, sync->return_ident, &sync->return_ip_xlate, sync->return_ident_xlate,
++			sync->flow_rx_packet_count, sync->flow_rx_byte_count, sync->flow_tx_packet_count, sync->flow_tx_byte_count,
++			sync->return_rx_packet_count, sync->return_rx_byte_count, sync->return_tx_packet_count, sync->return_tx_byte_count,
++			sync->flow_max_window, sync->flow_end, sync->flow_max_end,
++			sync->return_max_window, sync->return_end, sync->return_max_end, sync->inc_ticks);
++	}
++	spin_unlock_irqrestore(&ecm_nss_flow_sync_diag_lock, irqflags);
++	return length;
++}
++static const struct kernel_param_ops ecm_nss_flow_sync_diag_events_ops = {
++	.get = ecm_nss_flow_sync_diag_events_get,
++};
++module_param_cb(flow_sync_diag_events, &ecm_nss_flow_sync_diag_events_ops, NULL, 0400);

@@ -1,0 +1,44 @@
+From: NSS integration <nss@local>
+Subject: [PATCH] frontends: match slow-path QoS priority to packet direction
+
+NSS CREATE programs flow_qos_tag and return_qos_tag separately. The common
+IPv4 and IPv6 host paths nevertheless copy flow_qos_tag into every skb,
+including replies. A connection whose classifier returns distinct tags can
+therefore change priority when packets transition between host and firmware.
+
+Use the sender already resolved against the connection's FROM address to
+select the same direction that NSS CREATE uses. Preserve the complete tag;
+this changes no rate, queue limit, classifier result or acceleration policy.
+
+--- a/frontends/cmn/ecm_ported_ipv4.c
++++ b/frontends/cmn/ecm_ported_ipv4.c
+@@ -1357,10 +1357,10 @@ unsigned int ecm_ported_ipv4_process(struct net_device *out_dev,
+ 	ecm_db_connection_data_totals_update(ci, (sender == ECM_TRACKER_SENDER_TYPE_SRC)? true : false, skb->len, 1);
+ 
+ 	/*
+-	 * Assign qos tag
+-	 * GGG TODO Should we use sender to identify whether to use flow or return qos tag?
++	 * Match the flow/return QoS tags programmed into the accelerated rule.
+ 	 */
+-	skb->priority = prevalent_pr.flow_qos_tag;
++	skb->priority = (sender == ECM_TRACKER_SENDER_TYPE_SRC) ?
++		prevalent_pr.flow_qos_tag : prevalent_pr.return_qos_tag;
+ 	DEBUG_TRACE("%px: skb priority: %u\n", ci, skb->priority);
+ 
+ 	/*
+--- a/frontends/cmn/ecm_ported_ipv6.c
++++ b/frontends/cmn/ecm_ported_ipv6.c
+@@ -1377,10 +1377,10 @@ unsigned int ecm_ported_ipv6_process(struct net_device *out_dev,
+ 	ecm_db_connection_data_totals_update(ci, (sender == ECM_TRACKER_SENDER_TYPE_SRC)? true : false, skb->len, 1);
+ 
+ 	/*
+-	 * Assign qos tag
+-	 * GGG TODO Should we use sender to identify whether to use flow or return qos tag?
++	 * Match the flow/return QoS tags programmed into the accelerated rule.
+ 	 */
+-	skb->priority = prevalent_pr.flow_qos_tag;
++	skb->priority = (sender == ECM_TRACKER_SENDER_TYPE_SRC) ?
++		prevalent_pr.flow_qos_tag : prevalent_pr.return_qos_tag;
+ 	DEBUG_TRACE("%px: skb priority: %u\n", ci, skb->priority);
+ 
+ 	/*

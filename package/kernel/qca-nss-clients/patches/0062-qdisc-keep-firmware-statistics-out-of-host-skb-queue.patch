@@ -1,0 +1,17 @@
+Subject: [PATCH] Keep firmware queue statistics out of the host skb queue
+
+qdisc->q.qlen belongs to the Linux skb list and controls scheduler emptiness.
+Writing a firmware queue length there can hide a queued skb or underflow
+the count when the host dequeues it. Hardware queue length is already
+reported separately through qstats->qlen and the NSS stats dump wrapper.
+
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -389,7 +389,6 @@ static void nss_qdisc_stats_process_node_stats(struct nss_qdisc *nqr,
+ 		bstats = &qdisc->bstats;
+ 		qstats = &qdisc->qstats;
+ 		refcnt = &qdisc->refcnt;
+-		qdisc->q.qlen = response->sn_stats.qlen_packets;
+ 	}
+ 
+ 	/*
