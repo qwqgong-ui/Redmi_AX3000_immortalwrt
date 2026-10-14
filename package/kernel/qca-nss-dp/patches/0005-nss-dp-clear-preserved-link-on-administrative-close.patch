@@ -1,0 +1,11 @@
+Subject: [PATCH] nss-dp: clear preserved-link state on administrative close
+
+--- a/nss_dp_main.c
++++ b/nss_dp_main.c
+@@ -342,5 +342,6 @@
+ 	if (dp_priv->phydev)
+ 		phy_stop(dp_priv->phydev);
++	dp_priv->handoff_link_preserved = false;
+ 	dp_priv->link_state = __NSS_DP_LINK_DOWN;
+ 
+ #if defined(NSS_DP_PPE_SUPPORT)

@@ -1,0 +1,40 @@
+Serialize IGS module pointer publication with reference acquisition. Use the
+modern tc action id and return a normal failure if ingress shaping is absent.
+
+--- a/nss_igs.c
++++ b/nss_igs.c
+@@ -24,6 +24,7 @@
+ #endif
+ 
+ static struct module *nss_igs_module;
++static DEFINE_SPINLOCK(nss_igs_module_lock);
+ 
+ /*
+  * nss_igs_verify_if_num()
+@@ -177,8 +178,14 @@ void nss_igs_module_save(struct tc_acti
+ {
+ 	nss_assert(act);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
++	nss_assert(act->id == TCA_ID_MIRRED_NSS);
++#else
+ 	nss_assert(act->type == TCA_ACT_MIRRED_NSS);
++#endif
+ 
++	spin_lock_bh(&nss_igs_module_lock);
+ 	nss_igs_module = module;
++	spin_unlock_bh(&nss_igs_module_lock);
+ }
+ EXPORT_SYMBOL(nss_igs_module_save);
+ #endif
+@@ -190,6 +197,9 @@ EXPORT_SYMBOL(nss_igs_module_save);
+ bool nss_igs_module_get()
+ {
+-	nss_assert(nss_igs_module);
+-	return try_module_get(nss_igs_module);
++	bool held;
++	spin_lock_bh(&nss_igs_module_lock);
++	held = nss_igs_module && try_module_get(nss_igs_module);
++	spin_unlock_bh(&nss_igs_module_lock);
++	return held;
+ }
+ EXPORT_SYMBOL(nss_igs_module_get);

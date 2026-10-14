@@ -1,0 +1,257 @@
+Subject: [PATCH] ecm: own bridge conntrack and quiesce interface rules
+
+Use a balanced temporary pause at both ingress and the final pending gate.
+Retain unknown firmware ownership after a destroy NACK, and enable bridge
+conntrack only when the bridge hook is requested.
+
+--- a/frontends/nss/ecm_nss_ipv4.h
++++ b/frontends/nss/ecm_nss_ipv4.h
+@@ -23,6 +23,10 @@
+ extern int ecm_nss_ipv4_nack_limit_default;			/* Default nack limit. */
+ extern int ecm_nss_ipv4_accelerated_count;			/* Total offloads */
+ extern int ecm_nss_ipv4_pending_accel_count;			/* Total pending offloads issued to the NSS / awaiting completion */
++extern int ecm_nss_ipv4_decel_unknown_count;
++extern atomic_t ecm_front_end_ipv4_stopped_temp;
++extern void ecm_nss_ipv4_pause_barrier(void);
++extern bool ecm_nss_ipv4_rules_drained(void);
+ extern int ecm_nss_ipv4_pending_decel_count;			/* Total pending deceleration requests issued to the NSS / awaiting completion */
+ 
+ /*
+@@ -94,6 +97,11 @@
+ 	 * Do we have a fixed upper limit for acceleration?
+ 	 */
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
++	if (atomic_read(&ecm_front_end_ipv4_stopped_temp)) {
++		spin_unlock_bh(&ecm_nss_ipv4_lock);
++		spin_unlock_bh(&feci->lock);
++		return false;
++	}
+ 	if (ecm_nss_ipv4_accel_limit_mode & ECM_FRONT_END_ACCEL_LIMIT_MODE_FIXED) {
+ 		if ((ecm_nss_ipv4_pending_accel_count + ecm_nss_ipv4_accelerated_count) >= nss_ipv4_max_conn_count()) {
+ 			spin_unlock_bh(&ecm_nss_ipv4_lock);
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -1182,3 +1182,26 @@
+ 	 */
+ 	ecm_nss_ipv4_sync_queue_exit();
+ }
++
++/* A destroy NACK is not evidence that the firmware rule is gone. */
++int ecm_nss_ipv4_decel_unknown_count;
++
++void ecm_nss_ipv4_pause_barrier(void)
++{
++	/* Serialise with the final check before a CREATE enters pending. */
++	spin_lock_bh(&ecm_nss_ipv4_lock);
++	spin_unlock_bh(&ecm_nss_ipv4_lock);
++}
++
++bool ecm_nss_ipv4_rules_drained(void)
++{
++	bool drained;
++
++	spin_lock_bh(&ecm_nss_ipv4_lock);
++	drained = !ecm_nss_ipv4_accelerated_count &&
++		  !ecm_nss_ipv4_pending_accel_count &&
++		  !ecm_nss_ipv4_pending_decel_count &&
++		  !ecm_nss_ipv4_decel_unknown_count;
++	spin_unlock_bh(&ecm_nss_ipv4_lock);
++	return drained;
++}
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -1743,6 +1743,8 @@
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
+ 	ecm_nss_ported_ipv4_accelerated_count[feci->ported_accelerated_count_index]--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_ported_ipv4_accelerated_count[feci->ported_accelerated_count_index] >= 0, "Bad udp accel counter\n");
++	if (nim->cm.response != NSS_CMN_RESPONSE_ACK)
++		ecm_nss_ipv4_decel_unknown_count++;
+ 	ecm_nss_ipv4_accelerated_count--;		/* General running counter */
+ 	DEBUG_ASSERT(ecm_nss_ipv4_accelerated_count >= 0, "Bad accel counter\n");
+ 	spin_unlock_bh(&ecm_nss_ipv4_lock);
+--- a/frontends/nss/ecm_nss_ipv6.h
++++ b/frontends/nss/ecm_nss_ipv6.h
+@@ -23,6 +23,10 @@
+ extern int ecm_nss_ipv6_nack_limit_default;			/* Default nack limit. */
+ extern int ecm_nss_ipv6_accelerated_count;			/* Total offloads */
+ extern int ecm_nss_ipv6_pending_accel_count;			/* Total pending offloads issued to the NSS / awaiting completion */
++extern int ecm_nss_ipv6_decel_unknown_count;
++extern atomic_t ecm_front_end_ipv6_stopped_temp;
++extern void ecm_nss_ipv6_pause_barrier(void);
++extern bool ecm_nss_ipv6_rules_drained(void);
+ extern int ecm_nss_ipv6_pending_decel_count;			/* Total pending deceleration requests issued to the NSS / awaiting completion */
+ 
+ /*
+@@ -94,6 +97,11 @@
+ 	 * Do we have a fixed upper limit for acceleration?
+ 	 */
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
++	if (atomic_read(&ecm_front_end_ipv6_stopped_temp)) {
++		spin_unlock_bh(&ecm_nss_ipv6_lock);
++		spin_unlock_bh(&feci->lock);
++		return false;
++	}
+ 	if (ecm_nss_ipv6_accel_limit_mode & ECM_FRONT_END_ACCEL_LIMIT_MODE_FIXED) {
+ 		if ((ecm_nss_ipv6_pending_accel_count + ecm_nss_ipv6_accelerated_count) >= nss_ipv6_max_conn_count()) {
+ 			spin_unlock_bh(&ecm_nss_ipv6_lock);
+--- a/frontends/nss/ecm_nss_ipv6.c
++++ b/frontends/nss/ecm_nss_ipv6.c
+@@ -1162,3 +1162,26 @@
+ 	 */
+ 	ecm_nss_ipv6_sync_queue_exit();
+ }
++
++/* A destroy NACK is not evidence that the firmware rule is gone. */
++int ecm_nss_ipv6_decel_unknown_count;
++
++void ecm_nss_ipv6_pause_barrier(void)
++{
++	/* Serialise with the final check before a CREATE enters pending. */
++	spin_lock_bh(&ecm_nss_ipv6_lock);
++	spin_unlock_bh(&ecm_nss_ipv6_lock);
++}
++
++bool ecm_nss_ipv6_rules_drained(void)
++{
++	bool drained;
++
++	spin_lock_bh(&ecm_nss_ipv6_lock);
++	drained = !ecm_nss_ipv6_accelerated_count &&
++		  !ecm_nss_ipv6_pending_accel_count &&
++		  !ecm_nss_ipv6_pending_decel_count &&
++		  !ecm_nss_ipv6_decel_unknown_count;
++	spin_unlock_bh(&ecm_nss_ipv6_lock);
++	return drained;
++}
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -1653,6 +1653,8 @@
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
+ 	ecm_nss_ported_ipv6_accelerated_count[feci->ported_accelerated_count_index]--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_ported_ipv6_accelerated_count[feci->ported_accelerated_count_index] >= 0, "Bad udp accel counter\n");
++	if (nim->cm.response != NSS_CMN_RESPONSE_ACK)
++		ecm_nss_ipv6_decel_unknown_count++;
+ 	ecm_nss_ipv6_accelerated_count--;		/* General running counter */
+ 	DEBUG_ASSERT(ecm_nss_ipv6_accelerated_count >= 0, "Bad accel counter\n");
+ 	spin_unlock_bh(&ecm_nss_ipv6_lock);
+--- a/ecm_notifier.c
++++ b/ecm_notifier.c
+@@ -41,6 +41,10 @@
+ #include "ecm_front_end_types.h"
+ #include "ecm_db.h"
+ #include "ecm_front_end_common.h"
++#include "ecm_front_end_ipv4.h"
++#ifdef ECM_IPV6_ENABLE
++#include "ecm_front_end_ipv6.h"
++#endif
+ 
+ #include "ecm_notifier_pvt.h"
+ #include "exports/ecm_notifier.h"
+@@ -342,3 +346,47 @@
+ 	return ECM_NOTIFIER_CONNECTION_STATE_FAILED;
+ }
+ EXPORT_SYMBOL(ecm_notifier_connection_state_get);
++
++#ifdef ECM_FRONT_END_NSS_ENABLE
++extern void ecm_nss_ipv4_pause_barrier(void);
++extern bool ecm_nss_ipv4_rules_drained(void);
++#ifdef ECM_IPV6_ENABLE
++extern void ecm_nss_ipv6_pause_barrier(void);
++extern bool ecm_nss_ipv6_rules_drained(void);
++#endif
++#endif
++
++void ecm_notifier_offload_pause(bool pause)
++{
++	/* Temporary references leave the administrator's stopped flags intact. */
++	ecm_front_end_ipv4_stop_temp(pause);
++#ifdef ECM_IPV6_ENABLE
++	ecm_front_end_ipv6_stop_temp(pause);
++#endif
++	if (!pause)
++		return;
++#ifdef ECM_FRONT_END_NSS_ENABLE
++	ecm_nss_ipv4_pause_barrier();
++#ifdef ECM_IPV6_ENABLE
++	ecm_nss_ipv6_pause_barrier();
++#endif
++#endif
++	ecm_db_connection_defunct_all();
++}
++EXPORT_SYMBOL_GPL(ecm_notifier_offload_pause);
++
++bool ecm_notifier_offload_drained(void)
++{
++#ifdef ECM_FRONT_END_NSS_ENABLE
++	if (!ecm_nss_ipv4_rules_drained())
++		return false;
++#ifdef ECM_IPV6_ENABLE
++	if (!ecm_nss_ipv6_rules_drained())
++		return false;
++#endif
++	return true;
++#else
++	return false;
++#endif
++}
++EXPORT_SYMBOL_GPL(ecm_notifier_offload_drained);
+--- a/exports/ecm_notifier.h
++++ b/exports/ecm_notifier.h
+@@ -135,4 +135,10 @@
+  * @}
+  */
+ 
++/* Balanced process-context pause references for interface owners.
++ * A zero software count is not enough after a firmware destroy NACK.
++ */
++void ecm_notifier_offload_pause(bool pause);
++bool ecm_notifier_offload_drained(void);
++
+ #endif
+--- a/ecm_init.c
++++ b/ecm_init.c
+@@ -145,6 +145,8 @@
+ /*
+  * ecm_init()
+  */
++static bool ecm_bridge_conntrack_acquired;
++
+ static int __init ecm_init(void)
+ {
+ 	int ret = -1;
+@@ -295,10 +297,24 @@
+ 	}
+ #endif
+ 
++	if (register_br_post_routing) {
++		ret = nf_ct_netns_get(&init_net, NFPROTO_BRIDGE);
++		if (ret)
++			goto err_bridge_conntrack;
++		ecm_bridge_conntrack_acquired = true;
++	}
++
+ 	ecm_front_end_common_sysctl_register();
+ 	ecm_tracker_udp_sysctl_register();
+ 	printk(KERN_INFO "ECM init complete\n");
+ 	return 0;
++
++err_bridge_conntrack:
++#ifdef ECM_STATE_OUTPUT_ENABLE
++	ecm_state_exit();
++#endif
++	ecm_conntrack_notifier_exit();
++	goto err_ct;
+ 
+ #ifdef ECM_STATE_OUTPUT_ENABLE
+ err_state:
+@@ -466,6 +482,10 @@
+ 		ecm_debugfs_remove_recursive(ecm_dentry);
+ 	}
+ 
++	if (ecm_bridge_conntrack_acquired) {
++		nf_ct_netns_put(&init_net, NFPROTO_BRIDGE);
++		ecm_bridge_conntrack_acquired = false;
++	}
+ 	ecm_tracker_udp_sysctl_unregister();
+ 	ecm_front_end_common_sysctl_unregister();
+ #ifdef ECM_FRONT_END_PPE_ENABLE

@@ -1,0 +1,64 @@
+Subject: [PATCH] ath11k: stop recovery when NSS reset ownership is unresolved
+
+A failed SOC RESET does not give shared DMA rings back to the host. Abort
+crash reconfiguration before freeing or clearing those rings, and reject
+later firmware-ready events before allocating a replacement datapath.
+Turning off the offload parameter cannot waive unresolved ownership.
+
+This protects recovery/reinitialization. Removal and setup-error release
+paths still need shared-DMA quarantine or a verified hardware stop.
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2345,6 +2345,11 @@ int ath11k_core_qmi_firmware_ready(struct
+ {
+ 	int ret;
+ 
++	if (ab->nss.ownership_uncertain) {
++		ath11k_err(ab, "NSS DMA ownership unresolved; refusing firmware restart\n");
++		return -EIO;
++	}
++
+ 	switch (ath11k_crypto_mode) {
+ 	case ATH11K_CRYPT_MODE_SW:
+ 		set_bit(ATH11K_FLAG_HW_CRYPTO_DISABLED, &ab->dev_flags);
+@@ -2415,7 +2420,12 @@ static int ath11k_core_reconfigure_on_cra
+ 
+ 	mutex_lock(&ab->core_lock);
+ 
+-	ath11k_nss_teardown(ab);
++	ret = ath11k_nss_teardown(ab);
++	if (ret) {
++		ath11k_err(ab, "NSS reset failed: %d; preserving shared DMA rings\n", ret);
++		mutex_unlock(&ab->core_lock);
++		return ret;
++	}
+ 	ab->nss.enabled = false;
+ 
+ 	ath11k_thermal_unregister(ab);
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -5152,7 +5152,7 @@ int ath11k_nss_teardown(struct ath11k_bas
+ 	int i, ret;
+ 
+ 	if (!ab->nss.enabled)
+-		return 0;
++		return ab->nss.ownership_uncertain ? -EIO : 0;
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 	ab->nss.quiescing = true;
+@@ -5188,11 +5188,11 @@ int ath11k_nss_setup(struct ath11k_base *
+ 	int ret = 0;
+ 	u32 target_type;
+ 
+-	if (!ab->nss.enabled)
+-		return 0;
+-
+ 	if (ab->nss.ownership_uncertain)
+ 		return -EBUSY;
++	if (!ab->nss.enabled)
++		return 0;
++
+ 	ab->nss.init_submitted = false;
+ 	ab->nss.quiescing = true;
+ 	if (!ab->nss.peers_initialized) {

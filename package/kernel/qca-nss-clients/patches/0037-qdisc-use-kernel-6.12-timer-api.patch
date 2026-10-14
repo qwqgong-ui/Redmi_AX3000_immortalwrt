@@ -1,0 +1,13 @@
+Use timer_delete on Linux 6.12 while retaining its from_timer callback API.
+
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -490,7 +490,7 @@ void nss_qdisc_stats_sync_many_exit(stru
+ 	 * We will have to wait until we have received the pending response.
+ 	 */
+ cleanup:
+-	if (del_timer(&nqsw->stats_get_timer) > 0) {
++	if (timer_delete(&nqsw->stats_get_timer) > 0) {
+ 		/*
+ 		 * The timer was still active (counting down) when it was deleted.
+ 		 * Therefore we are sure that there are no pending stats request

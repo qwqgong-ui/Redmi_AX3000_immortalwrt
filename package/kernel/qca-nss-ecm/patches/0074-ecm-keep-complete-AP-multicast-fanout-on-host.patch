@@ -1,0 +1,184 @@
+Subject: [PATCH] nss: keep complete AP multicast fanout under host policy
+
+Native Linux bridge/MFC events invalidate complete ECM multicast rules. An AP
+output must not be removed from a hardware fanout and leave a partial rule,
+nor bypass the host's MDB/ME policy. Scan all hierarchy layers with owned
+netdev references both during construction and before CREATE submission.
+
+--- a/frontends/nss/ecm_nss_common.h
++++ b/frontends/nss/ecm_nss_common.h
+@@ -33,6 +33,83 @@
+ #endif
+ 
+ #include <net/xfrm.h>
++#include <net/cfg80211.h>
++
++#ifdef ECM_MULTICAST_ENABLE
++/* Reject the complete fanout if a host-managed AP appears at any hierarchy
++ * layer. Removing only that output would leave an incomplete hardware rule.
++ * Netdev references pin mac80211's embedded wdev; RCU also covers cfg80211
++ * unregister. This type snapshot is not a type-change/firmware-drain barrier.
++ */
++static inline bool ecm_nss_common_multicast_fanout_allowed(
++		struct ecm_db_iface_instance *to_ifaces, int32_t *first)
++{
++	int row, layer;
++	bool seen = false;
++
++	for (row = 0; row < ECM_DB_MULTICAST_IF_MAX; row++) {
++		int start = *ecm_db_multicast_if_first_get_at_index(first, row);
++		struct ecm_db_iface_instance **ifaces;
++
++		if (start == ECM_DB_IFACE_HEIRARCHY_MAX)
++			continue;
++		if (start < 0 || start >= ECM_DB_IFACE_HEIRARCHY_MAX)
++			return false;
++		seen = true;
++		ifaces = (struct ecm_db_iface_instance **)
++				ecm_db_multicast_if_heirarchy_get(to_ifaces, row);
++		if (!ifaces)
++			return false;
++		for (layer = start; layer < ECM_DB_IFACE_HEIRARCHY_MAX; layer++) {
++			struct net_device *dev;
++			struct wireless_dev *wdev;
++			bool allowed = true;
++			int ifindex;
++
++			if (!ifaces[layer])
++				return false;
++			ifindex = ecm_db_iface_interface_identifier_get(ifaces[layer]);
++			rcu_read_lock();
++			dev = dev_get_by_index(&init_net, ifindex);
++			if (!dev) {
++				rcu_read_unlock();
++				return false;
++			}
++			wdev = READ_ONCE(dev->ieee80211_ptr);
++			if (wdev) {
++				enum nl80211_iftype type = READ_ONCE(wdev->iftype);
++
++				allowed = type != NL80211_IFTYPE_AP &&
++					  type != NL80211_IFTYPE_AP_VLAN;
++			}
++			rcu_read_unlock();
++			dev_put(dev);
++			if (!allowed)
++				return false;
++		}
++	}
++	return seen;
++}
++
++static inline bool ecm_nss_common_multicast_outputs_allowed(
++		struct ecm_front_end_connection_instance *feci)
++{
++	struct ecm_db_iface_instance *to_ifaces = NULL;
++	int32_t *first = NULL;
++	bool allowed;
++
++	if (!ecm_db_multicast_connection_to_interfaces_get_and_ref_all(
++			feci->ci, &to_ifaces, &first)) {
++		/* A set but empty DB table still returns allocated snapshots. */
++		if (to_ifaces && first)
++			ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, first);
++		return false;
++	}
++	allowed = ecm_nss_common_multicast_fanout_allowed(to_ifaces, first);
++	ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, first);
++	return allowed;
++}
++#endif
+ 
+ /*
+  * This macro converts ECM ip_addr_t to NSS IPv6 address
+--- a/frontends/nss/ecm_nss_multicast_ipv4.c
++++ b/frontends/nss/ecm_nss_multicast_ipv4.c
+@@ -906,7 +906,7 @@
+ 									ecm_tracker_sender_type_t sender)
+ {
+ 	uint16_t regen_occurrances;
+-	struct ecm_db_iface_instance *to_ifaces;
++	struct ecm_db_iface_instance *to_ifaces = NULL;
+ 	struct ecm_db_iface_instance *ii_temp;
+ 	struct ecm_db_iface_instance *ii_single;
+ 	struct ecm_db_iface_instance **ifaces;
+@@ -916,7 +916,7 @@
+ 	struct nss_ipv4_mc_rule_create_msg *create;
+ 	struct nss_ipv4_msg *nim;
+ 	struct ecm_classifier_instance *assignments[ECM_CLASSIFIER_TYPES];
+-	int32_t *to_ifaces_first;
++	int32_t *to_ifaces_first = NULL;
+ 	int32_t *to_ii_first;
+ 	int32_t from_ifaces_first;
+ 	int32_t from_nss_iface_id;
+@@ -1098,6 +1098,14 @@
+ 	ret = ecm_db_multicast_connection_to_interfaces_get_and_ref_all(feci->ci, &to_ifaces, &to_ifaces_first);
+ 	if (!ret) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no multicast interfaces in to_interfaces list!\n", feci);
++		/* A set but empty table still owns allocated snapshots. */
++		if (to_ifaces && to_ifaces_first)
++			ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
++		goto invalid_rule;
++	}
++
++	if (!ecm_nss_common_multicast_fanout_allowed(to_ifaces, to_ifaces_first)) {
++		ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+ 		goto invalid_rule;
+ 	}
+ 
+@@ -1544,6 +1552,11 @@
+ 	 * the callback function can trust the correct ref was taken for its purpose.
+ 	 * NOTE: remember that this will also implicitly hold the feci.
+ 	 */
++	if (!ecm_nss_common_multicast_outputs_allowed(feci)) {
++		ecm_nss_multicast_ipv4_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_FAIL_RULE);
++		kfree(nim);
++		return;
++	}
+ 	ecm_db_connection_ref(feci->ci);
+ 
+ 	/*
+--- a/frontends/nss/ecm_nss_multicast_ipv6.c
++++ b/frontends/nss/ecm_nss_multicast_ipv6.c
+@@ -916,12 +916,12 @@
+ 	struct ecm_db_iface_instance *from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX];
+ 	struct ecm_db_iface_instance *from_nss_iface;
+ 	int32_t from_ifaces_first;
+-	struct ecm_db_iface_instance *to_ifaces;
++	struct ecm_db_iface_instance *to_ifaces = NULL;
+ 	struct ecm_db_iface_instance *ii_temp;
+ 	struct ecm_db_iface_instance *ii_single;
+ 	struct ecm_db_iface_instance **ifaces;
+ 	struct nss_ipv6_msg *nim;
+-	int32_t *to_ifaces_first;
++	int32_t *to_ifaces_first = NULL;
+ 	int32_t *to_ii_first;
+ 	int32_t from_nss_iface_id;
+ 	int32_t to_nss_iface_id;
+@@ -1105,6 +1105,14 @@
+ 	ret = ecm_db_multicast_connection_to_interfaces_get_and_ref_all(feci->ci, &to_ifaces, &to_ifaces_first);
+ 	if (!ret) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no multicast interfaces in to_interfaces list!\n", feci);
++		/* A set but empty table still owns allocated snapshots. */
++		if (to_ifaces && to_ifaces_first)
++			ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
++		goto invalid_rule;
++	}
++
++	if (!ecm_nss_common_multicast_fanout_allowed(to_ifaces, to_ifaces_first)) {
++		ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+ 		goto invalid_rule;
+ 	}
+ 
+@@ -1516,6 +1524,11 @@
+ 	 * the callback function can trust the correct ref was taken for its purpose.
+ 	 * NOTE: remember that this will also implicitly hold the feci.
+ 	 */
++	if (!ecm_nss_common_multicast_outputs_allowed(feci)) {
++		ecm_nss_multicast_ipv6_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_FAIL_RULE);
++		kfree(nim);
++		return;
++	}
+ 	ecm_db_connection_ref(feci->ci);
+ 
+ 	/*

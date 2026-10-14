@@ -1,0 +1,890 @@
+--- /dev/null
++++ b/include/linux/br_mcast_packet.h
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_BR_MCAST_PACKET_H
++#define _LINUX_BR_MCAST_PACKET_H
++
++#include <linux/if_ether.h>
++#include <linux/atomic.h>
++#include <linux/refcount.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++#include <linux/wait.h>
++
++#define BR_MCAST_PACKET_VERSION 1
++#define BR_MCAST_PACKET_MAC_MAX 64
++#define BR_MCAST_PACKET_INGRESS_PORT 1
++#define BR_MCAST_PACKET_LOCAL_ORIG 2
++
++enum br_mcast_packet_action {
++	BR_MCAST_PACKET_ORDINARY = 1,
++	BR_MCAST_PACKET_HOSTS = 2,
++};
++
++/* Immutable native forwarding result, not firmware metadata. A storage
++ * object owns one reference; skb clones share that storage reference.
++ */
++struct br_mcast_packet {
++	refcount_t refs;
++	u8 version;
++	u8 action;
++	u8 flags;
++	u16 count;
++	__be16 proto;
++	u64 port_cookie;
++	u64 mcu_cookie;
++	u64 seq;
++	int bridge_ifindex;
++	int port_ifindex;
++	u8 group_da[ETH_ALEN];
++	u8 source_mac[ETH_ALEN];
++	u8 source_ip[16];
++	u8 group_ip[16];
++	u8 mac[][ETH_ALEN];
++};
++
++/* Independent of a driver's lifetime: core skb storage releases only this
++ * reference/counter, never a callback into an unloaded module or freed VIF.
++ */
++struct br_mcast_flight {
++	refcount_t refs;
++	atomic_t pending;
++	wait_queue_head_t drained;
++};
++
++struct br_mcast_packet_ext {
++	struct br_mcast_packet *packet;
++	struct br_mcast_flight *flight;
++};
++
++static inline void br_mcast_flight_put(struct br_mcast_flight *flight)
++{
++	if (flight && refcount_dec_and_test(&flight->refs))
++		kfree(flight);
++}
++
++static inline void br_mcast_flight_hold(struct br_mcast_flight *flight)
++{
++	if (flight) {
++		refcount_inc(&flight->refs);
++		atomic_inc(&flight->pending);
++	}
++}
++
++static inline void br_mcast_flight_drop(struct br_mcast_flight *flight)
++{
++	if (!flight)
++		return;
++	if (atomic_dec_and_test(&flight->pending))
++		wake_up_all(&flight->drained);
++	br_mcast_flight_put(flight);
++}
++
++static inline void br_mcast_packet_get(struct br_mcast_packet *packet)
++{
++	if (packet)
++		refcount_inc(&packet->refs);
++}
++
++static inline void br_mcast_packet_put(struct br_mcast_packet *packet)
++{
++	if (packet && refcount_dec_and_test(&packet->refs))
++		kfree(packet);
++}
++
++#endif
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -998,6 +998,10 @@
+ 	__u8			offload_l3_fwd_mark:1;
+ #endif
+ 	__u8			redirected:1;
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	/* Survives extension scrub: losing a native target set must not flood. */
++	__u8			br_mcast_contract:1;
++#endif
+ #ifdef CONFIG_NET_REDIRECT
+ 	__u8			from_ingress:1;
+ #endif
+@@ -4876,6 +4880,9 @@
+ #if IS_ENABLED(CONFIG_MCTP_FLOWS)
+ 	SKB_EXT_MCTP,
+ #endif
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	SKB_EXT_BR_MCAST_PACKET,
++#endif
+ 	SKB_EXT_NUM, /* must be last */
+ };
+ 
+@@ -4912,6 +4919,10 @@
+ static inline void __skb_ext_copy(struct sk_buff *dst,
+ 				  const struct sk_buff *src)
+ {
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	/* Also covers IP fragments which copy extensions without all headers. */
++	dst->br_mcast_contract = src->br_mcast_contract;
++#endif
+ 	dst->active_extensions = src->active_extensions;
+ 
+ 	if (src->active_extensions) {
+--- a/include/linux/if_bridge.h
++++ b/include/linux/if_bridge.h
+@@ -12,6 +12,7 @@
+ #include <linux/netdevice.h>
+ #include <uapi/linux/if_bridge.h>
+ #include <linux/bitops.h>
++#include <linux/br_mcast_packet.h>
+ 
+ struct br_ip {
+ 	union {
+@@ -177,6 +178,22 @@
+ 		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq);
+ int br_mcast_offload_set_mcu(struct net_device *dev, int bridge_ifindex,
+ 			   u64 seq, bool enabled);
++int br_mcast_offload_commit_mcu(struct net_device *dev,
++		const struct br_mcast_offload_lookup_snapshot *expected, u64 owner_cookie);
++bool br_mcast_offload_mcu_capable(struct net_device *dev);
++u64 br_mcast_offload_port_cookie(struct net_device *dev);
++/* 0: no bridge contract; 1: borrowed immutable packet; negative: lost/stale.
++ * The skb must remain owned by the caller until it finishes using packet.
++ * This validates output ownership only. An Ethernet TX consumer MUST also
++ * compare the saved L2/IP identity before applying targets or hardware ME.
++ */
++int br_mcast_offload_packet_get(struct net_device *dev, const struct sk_buff *skb,
++			       const struct br_mcast_packet **packet);
++static inline void br_mcast_offload_packet_clear(struct sk_buff *skb)
++{
++	skb_ext_del(skb, SKB_EXT_BR_MCAST_PACKET);
++	skb->br_mcast_contract = 0;
++}
+ #else
+ static inline int br_multicast_list_adjacent(struct net_device *dev,
+ 					     struct list_head *br_ip_list)
+--- a/include/linux/netfilter.h
++++ b/include/linux/netfilter.h
+@@ -92,6 +92,15 @@
+ 	NF_HOOK_OP_UNDEFINED,
+ 	NF_HOOK_OP_NF_TABLES,
+ 	NF_HOOK_OP_BPF,
++	/* Bridge conntrack confirm/refragment only. M2U collapse additionally
++	 * requires no helper/sequence adjustment and a confirmed or absent CT.
++	 */
++	NF_HOOK_OP_BRIDGE_CT_GUARDED,
++	/* The hook accepts AP/AP_VLAN bridge contract packets without changing
++	 * them or running per-copy tracking/classification. Other traffic retains
++	 * its normal hook behavior; this is only valid for an AP MCU consumer.
++	 */
++	NF_HOOK_OP_BRIDGE_AP_MCAST_CONTRACT,
+ };
+ 
+ struct nf_hook_ops {
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -51,6 +51,7 @@
+ #endif
+ #include <linux/string.h>
+ #include <linux/skbuff.h>
++#include <linux/br_mcast_packet.h>
+ #include <linux/skbuff_ref.h>
+ #include <linux/splice.h>
+ #include <linux/cache.h>
+@@ -5103,6 +5104,9 @@
+ #if IS_ENABLED(CONFIG_MCTP_FLOWS)
+ 	[SKB_EXT_MCTP] = SKB_EXT_CHUNKSIZEOF(struct mctp_flow),
+ #endif
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	[SKB_EXT_BR_MCAST_PACKET] = SKB_EXT_CHUNKSIZEOF(struct br_mcast_packet_ext),
++#endif
+ };
+ 
+ static __always_inline unsigned int skb_ext_total_length(void)
+@@ -7016,6 +7020,16 @@
+ 	memcpy(new, old, old->chunks * SKB_EXT_ALIGN_VALUE);
+ 	refcount_set(&new->refcnt, 1);
+ 
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	/* Inactive slots remain owned by storage and are copied too. */
++	if (__skb_ext_exist(new, SKB_EXT_BR_MCAST_PACKET)) {
++		struct br_mcast_packet_ext *slot =
++			skb_ext_get_ptr(new, SKB_EXT_BR_MCAST_PACKET);
++
++		br_mcast_packet_get(slot->packet);
++		br_mcast_flight_hold(slot->flight);
++	}
++#endif
+ #ifdef CONFIG_XFRM
+ 	if (old_active & (1 << SKB_EXT_SEC_PATH)) {
+ 		struct sec_path *sp = skb_ext_get_ptr(old, SKB_EXT_SEC_PATH);
+@@ -7056,6 +7070,10 @@
+ 	newlen = newoff + skb_ext_type_len[id];
+ 	ext->chunks = newlen;
+ 	ext->offset[id] = newoff;
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	if (id == SKB_EXT_BR_MCAST_PACKET)
++		memset(skb_ext_get_ptr(ext, id), 0, sizeof(struct br_mcast_packet_ext));
++#endif
+ 	skb->extensions = ext;
+ 	skb->active_extensions = 1 << id;
+ 	return skb_ext_get_ptr(ext, id);
+@@ -7102,6 +7120,10 @@
+ 	newlen = newoff + skb_ext_type_len[id];
+ 	new->chunks = newlen;
+ 	new->offset[id] = newoff;
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	if (id == SKB_EXT_BR_MCAST_PACKET)
++		memset(skb_ext_get_ptr(new, id), 0, sizeof(struct br_mcast_packet_ext));
++#endif
+ set_active:
+ 	skb->slow_gro = 1;
+ 	skb->extensions = new;
+@@ -7159,6 +7181,15 @@
+ 	if (!refcount_dec_and_test(&ext->refcnt))
+ 		return;
+ free_now:
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	if (__skb_ext_exist(ext, SKB_EXT_BR_MCAST_PACKET)) {
++		struct br_mcast_packet_ext *slot =
++			skb_ext_get_ptr(ext, SKB_EXT_BR_MCAST_PACKET);
++
++		br_mcast_packet_put(slot->packet);
++		br_mcast_flight_drop(slot->flight);
++	}
++#endif
+ #ifdef CONFIG_XFRM
+ 	if (__skb_ext_exist(ext, SKB_EXT_SEC_PATH))
+ 		skb_ext_put_sp(skb_ext_get_ptr(ext, SKB_EXT_SEC_PATH));
+--- a/net/bridge/Kconfig
++++ b/net/bridge/Kconfig
+@@ -38,6 +38,7 @@
+ 	bool "IGMP/MLD snooping"
+ 	depends on BRIDGE
+ 	depends on INET
++	select SKB_EXTENSIONS
+ 	default y
+ 	help
+ 	  If you say Y here, then the Ethernet bridge will be able selectively
+--- a/net/bridge/br_private.h
++++ b/net/bridge/br_private.h
+@@ -19,6 +19,9 @@
+ #include <linux/if_vlan.h>
+ #include <linux/rhashtable.h>
+ #include <linux/refcount.h>
++#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
++#include <net/cfg80211.h>
++#endif
+ 
+ #define BR_HASH_BITS 8
+ #define BR_HASH_SIZE (1 << BR_HASH_BITS)
+@@ -422,6 +425,9 @@
+ #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
+ 	struct bridge_mcast_stats	__percpu *mcast_stats;
+ 	bool				mcast_hw_to_unicast;
++	u64				mcast_packet_cookie;
++	u64				mcast_mcu_cookie;
++	struct br_mcast_offload_lookup_snapshot mcast_hw_snapshot;
+ 
+ 	u32				multicast_eht_hosts_limit;
+ 	u32				multicast_eht_hosts_cnt;
+@@ -1011,6 +1017,27 @@
+ void br_mdb_notify(struct net_device *dev, struct net_bridge_mdb_entry *mp,
+ 		   struct net_bridge_port_group *pg, int type);
+ void br_mcast_offload_config_notify(struct net_bridge *br);
++bool br_mcast_offload_mcu_valid(const struct net_bridge_port *p);
++static inline bool br_mcast_offload_ap_port(const struct net_bridge_port *p)
++{
++#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
++	const struct wireless_dev *wdev = p->dev->ieee80211_ptr;
++
++	return wdev && (wdev->iftype == NL80211_IFTYPE_AP ||
++			wdev->iftype == NL80211_IFTYPE_AP_VLAN);
++#else
++	return false;
++#endif
++}
++
++static inline bool br_mcast_offload_wireless_port(const struct net_bridge_port *p)
++{
++#if IS_ENABLED(CONFIG_CFG80211_HEADERS)
++	return !!p->dev->ieee80211_ptr;
++#else
++	return false;
++#endif
++}
+ void br_rtr_notify(struct net_device *dev, struct net_bridge_mcast_port *pmctx,
+ 		   int type);
+ void br_multicast_del_pg(struct net_bridge_mdb_entry *mp,
+--- a/net/bridge/br_mdb.c
++++ b/net/bridge/br_mdb.c
+@@ -7,7 +7,9 @@
+ #include <linux/skbuff.h>
+ #include <linux/if_ether.h>
+ #include <linux/notifier.h>
++#include <linux/netfilter_bridge.h>
+ #include <net/ip.h>
++#include <net/sch_generic.h>
+ #include <net/netlink.h>
+ #include <net/switchdev.h>
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -18,6 +20,65 @@
+ #include "br_private.h"
+ 
+ static ATOMIC_NOTIFIER_HEAD(br_mcast_offload_chain);
++static atomic64_t br_mcast_packet_cookie_sequence = ATOMIC64_INIT(0);
++
++u64 br_mcast_offload_port_cookie(struct net_device *dev)
++{
++	struct net_bridge_port *p;
++	u64 cookie = 0;
++
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (p) {
++		spin_lock_bh(&p->br->multicast_lock);
++		if (!p->mcast_packet_cookie)
++			WRITE_ONCE(p->mcast_packet_cookie,
++				   atomic64_inc_return(&br_mcast_packet_cookie_sequence));
++		cookie = p->mcast_packet_cookie;
++		spin_unlock_bh(&p->br->multicast_lock);
++	}
++	rcu_read_unlock();
++	return cookie;
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_port_cookie);
++
++int br_mcast_offload_packet_get(struct net_device *dev, const struct sk_buff *skb,
++			       const struct br_mcast_packet **result)
++{
++	const struct br_mcast_packet_ext *slot;
++	const struct br_mcast_packet *packet;
++	struct net_bridge_port *p;
++	int ret = -ESTALE;
++
++	if (!result)
++		return -EINVAL;
++	*result = NULL;
++	slot = skb_ext_find(skb, SKB_EXT_BR_MCAST_PACKET);
++	if (!skb->br_mcast_contract)
++		return slot ? -EPROTO : 0;
++	if (!slot || !slot->packet)
++		return -ENODATA;
++	packet = slot->packet;
++	if (packet->version != BR_MCAST_PACKET_VERSION ||
++	    !packet->port_cookie || packet->count > BR_MCAST_PACKET_MAC_MAX ||
++	    (packet->flags & ~(BR_MCAST_PACKET_INGRESS_PORT | BR_MCAST_PACKET_LOCAL_ORIG)) ||
++	    (packet->action != BR_MCAST_PACKET_HOSTS &&
++	     packet->action != BR_MCAST_PACKET_ORDINARY) ||
++	    (packet->action == BR_MCAST_PACKET_ORDINARY && packet->count) ||
++	    (packet->action == BR_MCAST_PACKET_HOSTS && !packet->count))
++		return -EPROTO;
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (p && packet->port_ifindex == dev->ifindex &&
++	    packet->bridge_ifindex == p->br->dev->ifindex &&
++	    packet->port_cookie == READ_ONCE(p->mcast_packet_cookie)) {
++		*result = packet;
++		ret = 1;
++	}
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_packet_get);
+ 
+ int br_mcast_offload_mdb_register_notify(struct notifier_block *nb)
+ {
+@@ -1827,35 +1888,14 @@
+ }
+ EXPORT_SYMBOL_GPL(br_mcast_offload_snapshot_port);
+ 
+-int br_mcast_offload_snapshot_lookups(struct net_device *dev,
+-		struct br_mcast_offload_host hosts[], u32 host_capacity,
+-		struct br_ip keys[], u32 key_capacity,
++static void br_mcast_offload_conditions(const struct net_bridge_port *p,
+ 		struct br_mcast_offload_lookup_snapshot *snapshot)
+ {
+-	struct net_bridge_mdb_entry *mp;
+-	struct net_bridge_port_group *pg;
+-	struct net_bridge_port *p;
+-	struct net_bridge *br;
++	struct net_bridge *br = p->br;
+ 	struct ethhdr eth = { .h_proto = htons(ETH_P_IP) };
+-	u32 host_count = 0, key_count = 0, i = 0;
+-	int ret = -ENODEV;
+-
+-	if (!snapshot || (!hosts && host_capacity) || (!keys && key_capacity))
+-		return -EINVAL;
+-	rcu_read_lock();
+-	p = br_port_get_rcu(dev);
+-	if (!p)
+-		goto out;
+-	br = p->br;
+-	spin_lock_bh(&br->multicast_lock);
+-	hlist_for_each_entry(pg, &p->mglist, mglist)
+-		host_count++;
+-	hlist_for_each_entry(mp, &br->mdb_list, mdb_node)
+-		key_count++;
+-	memset(snapshot, 0, sizeof(*snapshot));
++
++	lockdep_assert_held(&br->multicast_lock);
+ 	snapshot->seq = atomic64_read(&br->mcast_offload_seq);
+-	snapshot->host_count = host_count;
+-	snapshot->key_count = key_count;
+ 	snapshot->bridge_ifindex = br->dev->ifindex;
+ 	snapshot->snooping = br_opt_get(br, BROPT_MULTICAST_ENABLED);
+ 	snapshot->vlan_snooping = br_opt_get(br, BROPT_MCAST_VLAN_SNOOPING_ENABLED);
+@@ -1874,6 +1914,171 @@
+ #endif
+ 	snapshot->forwarding = p->state == BR_STATE_FORWARDING;
+ 	snapshot->multicast_to_unicast = !!(p->flags & BR_MULTICAST_TO_UNICAST);
++}
++
++static bool br_mcast_offload_conditions_equal(
++		const struct br_mcast_offload_lookup_snapshot *a,
++		const struct br_mcast_offload_lookup_snapshot *b)
++{
++	return a->seq == b->seq && a->bridge_ifindex == b->bridge_ifindex &&
++		a->snooping == b->snooping && a->vlan_snooping == b->vlan_snooping &&
++		a->source_filter_ipv4 == b->source_filter_ipv4 &&
++		a->source_filter_ipv6 == b->source_filter_ipv6 &&
++		a->querier_ipv4 == b->querier_ipv4 && a->querier_ipv6 == b->querier_ipv6 &&
++		a->router_ipv4 == b->router_ipv4 && a->router_ipv6 == b->router_ipv6 &&
++		a->forwarding == b->forwarding &&
++		a->multicast_to_unicast == b->multicast_to_unicast;
++}
++
++#ifdef CONFIG_NETFILTER_FAMILY_BRIDGE
++static bool br_mcast_offload_ct_only_hooks(const struct nf_hook_entries *entries)
++{
++	struct nf_hook_ops **ops;
++	u32 i;
++
++	if (!entries)
++		return true;
++	ops = nf_hook_entries_get_hook_ops(entries);
++	for (i = 0; i < entries->num_hook_entries; i++) {
++		const struct nf_hook_ops *op = READ_ONCE(ops[i]);
++
++		if (!op || (op->hook_ops_type != NF_HOOK_OP_BRIDGE_CT_GUARDED &&
++			    op->hook_ops_type != NF_HOOK_OP_BRIDGE_AP_MCAST_CONTRACT))
++			return false;
++	}
++	return true;
++}
++#endif
++
++static bool br_mcast_offload_mcu_supported(const struct net_bridge_port *p)
++{
++	/* Native M2U runs the forwarding/egress hooks once per unicast DA.
++	 * A group collapse cannot reproduce per-host MAC filters or classifiers.
++	 */
++#ifdef CONFIG_NETFILTER_FAMILY_BRIDGE
++	struct net *net = dev_net(p->dev);
++
++	if (rcu_access_pointer(net->nf.hooks_bridge[NF_BR_FORWARD]) ||
++	    rcu_access_pointer(net->nf.hooks_bridge[NF_BR_LOCAL_OUT]) ||
++	    !br_mcast_offload_ct_only_hooks(rcu_dereference(net->nf.hooks_bridge[NF_BR_POST_ROUTING])))
++		return false;
++#endif
++#ifdef CONFIG_NETFILTER_EGRESS
++	if (rcu_access_pointer(p->dev->nf_hooks_egress))
++		return false;
++#endif
++#ifdef CONFIG_NET_XGRESS
++	if (rcu_access_pointer(p->dev->tcx_egress))
++		return false;
++#endif
++#ifdef CONFIG_NET_SCHED
++	{
++		struct Qdisc *qdisc = rcu_dereference(p->dev->qdisc);
++
++		if (qdisc && strcmp(qdisc->ops->id, "noqueue"))
++			return false;
++	}
++#endif
++	return br_mcast_offload_ap_port(p) &&
++		!br_opt_get(p->br, BROPT_VLAN_ENABLED) &&
++		!br_opt_get(p->br, BROPT_MCAST_VLAN_SNOOPING_ENABLED) &&
++		!br_opt_get(p->br, BROPT_MST_ENABLED) &&
++		!br_opt_get(p->br, BROPT_NEIGH_SUPPRESS_ENABLED) &&
++		!(p->flags & (BR_PROXYARP | BR_PROXYARP_WIFI | BR_NEIGH_SUPPRESS |
++			      BR_NEIGH_VLAN_SUPPRESS | BR_ISOLATED | BR_PORT_LOCKED)) &&
++		!rcu_access_pointer(p->backup_port);
++}
++
++bool br_mcast_offload_mcu_capable(struct net_device *dev)
++{
++	struct net_bridge_port *p;
++	bool capable = false;
++
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (p) {
++		spin_lock_bh(&p->br->multicast_lock);
++		capable = br_mcast_offload_mcu_supported(p);
++		spin_unlock_bh(&p->br->multicast_lock);
++	}
++	rcu_read_unlock();
++	return capable;
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_mcu_capable);
++
++bool br_mcast_offload_mcu_valid(const struct net_bridge_port *p)
++{
++	struct br_mcast_offload_lookup_snapshot now = { };
++
++	lockdep_assert_held(&p->br->multicast_lock);
++	if (!p->mcast_hw_to_unicast || !p->mcast_mcu_cookie ||
++	    !br_mcast_offload_mcu_supported(p))
++		return false;
++	br_mcast_offload_conditions(p, &now);
++	return br_mcast_offload_conditions_equal(&now, &p->mcast_hw_snapshot);
++}
++
++int br_mcast_offload_commit_mcu(struct net_device *dev,
++		const struct br_mcast_offload_lookup_snapshot *expected, u64 owner_cookie)
++{
++	struct br_mcast_offload_lookup_snapshot now = { };
++	struct net_bridge_port *p;
++	int ret = -ENODEV;
++
++	if (!expected || !owner_cookie)
++		return -EINVAL;
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (!p)
++		goto out;
++	spin_lock_bh(&p->br->multicast_lock);
++	br_mcast_offload_conditions(p, &now);
++	if (!br_mcast_offload_conditions_equal(&now, expected)) {
++		ret = -ESTALE;
++	} else if (!br_mcast_offload_mcu_supported(p) || !now.snooping ||
++		   !now.forwarding || !now.multicast_to_unicast) {
++		ret = -EOPNOTSUPP;
++	} else {
++		p->mcast_hw_snapshot = *expected;
++		p->mcast_mcu_cookie = owner_cookie;
++		WRITE_ONCE(p->mcast_hw_to_unicast, true);
++		ret = 0;
++	}
++	spin_unlock_bh(&p->br->multicast_lock);
++out:
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_commit_mcu);
++
++int br_mcast_offload_snapshot_lookups(struct net_device *dev,
++		struct br_mcast_offload_host hosts[], u32 host_capacity,
++		struct br_ip keys[], u32 key_capacity,
++		struct br_mcast_offload_lookup_snapshot *snapshot)
++{
++	struct net_bridge_mdb_entry *mp;
++	struct net_bridge_port_group *pg;
++	struct net_bridge_port *p;
++	struct net_bridge *br;
++	u32 host_count = 0, key_count = 0, i = 0;
++	int ret = -ENODEV;
++
++	if (!snapshot || (!hosts && host_capacity) || (!keys && key_capacity))
++		return -EINVAL;
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (!p)
++		goto out;
++	br = p->br;
++	spin_lock_bh(&br->multicast_lock);
++	hlist_for_each_entry(pg, &p->mglist, mglist)
++		host_count++;
++	hlist_for_each_entry(mp, &br->mdb_list, mdb_node)
++		key_count++;
++	memset(snapshot, 0, sizeof(*snapshot));
++	snapshot->host_count = host_count;
++	snapshot->key_count = key_count;
++	br_mcast_offload_conditions(p, snapshot);
+ 	if (snapshot->vlan_snooping) {
+ 		ret = -EOPNOTSUPP;
+ 		goto unlock;
+--- a/net/bridge/br_forward.c
++++ b/net/bridge/br_forward.c
+@@ -15,7 +15,137 @@
+ #include <linux/skbuff.h>
+ #include <linux/if_vlan.h>
+ #include <linux/netfilter_bridge.h>
++#include <net/ip.h>
++#include <net/ipv6.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_helper.h>
+ #include "br_private.h"
++
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++static bool br_mcast_packet_nf_safe(const struct sk_buff *skb)
++{
++	/* A helper can queue/drop/rewrite each native host copy independently.
++	 * Do not collapse its invocations, or a first CT confirmation/clash.
++	 */
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
++
++	if (ct && (!nf_ct_is_confirmed(ct) || nfct_help(ct) ||
++		   test_bit(IPS_SEQ_ADJUST_BIT, &ct->status)))
++		return false;
++#endif
++	return !skb_is_gso(skb);
++}
++
++static bool br_mcast_packet_install(struct sk_buff *skb,
++				    struct br_mcast_packet *packet)
++{
++	struct br_mcast_packet_ext *slot;
++
++	/* add() provides storage COW. find() alone never permits mutation. */
++	slot = skb_ext_add(skb, SKB_EXT_BR_MCAST_PACKET);
++	if (!slot)
++		return false;
++	br_mcast_packet_put(slot->packet);
++	slot->packet = packet;
++	skb->br_mcast_contract = 1;
++	return true;
++}
++
++static void br_mcast_packet_init(struct br_mcast_packet *packet,
++		const struct net_bridge_port *p, const struct sk_buff *skb,
++		bool local_orig, u64 cookie, u16 count)
++{
++	struct iphdr ip4, *ip4p;
++	int offset = skb_network_offset(skb);
++
++	memset(packet, 0, struct_size(packet, mac, count));
++	refcount_set(&packet->refs, 1);
++	packet->version = BR_MCAST_PACKET_VERSION;
++	packet->action = BR_MCAST_PACKET_ORDINARY;
++	packet->port_cookie = cookie;
++	packet->bridge_ifindex = p->br->dev->ifindex;
++	packet->port_ifindex = p->dev->ifindex;
++	packet->count = count;
++	packet->proto = eth_hdr(skb)->h_proto;
++	ether_addr_copy(packet->group_da, eth_hdr(skb)->h_dest);
++	ether_addr_copy(packet->source_mac, eth_hdr(skb)->h_source);
++	if (local_orig)
++		packet->flags |= BR_MCAST_PACKET_LOCAL_ORIG;
++	else if (skb->dev == p->dev)
++		packet->flags |= BR_MCAST_PACKET_INGRESS_PORT;
++	if (packet->proto == htons(ETH_P_IP)) {
++		ip4p = skb_header_pointer(skb, offset, sizeof(ip4), &ip4);
++		if (ip4p && ip4p->version == 4 && ip4p->ihl >= 5) {
++			memcpy(packet->source_ip, &ip4p->saddr, 4);
++			memcpy(packet->group_ip, &ip4p->daddr, 4);
++		}
++	}
++#if IS_ENABLED(CONFIG_IPV6)
++	else if (packet->proto == htons(ETH_P_IPV6)) {
++		struct ipv6hdr ip6, *ip6p;
++
++		ip6p = skb_header_pointer(skb, offset, sizeof(ip6), &ip6);
++		if (ip6p && ip6p->version == 6) {
++			memcpy(packet->source_ip, &ip6p->saddr, 16);
++			memcpy(packet->group_ip, &ip6p->daddr, 16);
++		}
++	}
++#endif
++}
++
++static bool br_mcast_packet_ip_group(const struct sk_buff *skb)
++{
++	int offset = skb_network_offset(skb);
++
++	/* Native M2U already replaced the Ethernet DA. Keep its per-host copies
++	 * under the same ECM boundary as a collapsed HOSTS delivery.
++	 */
++	if (eth_hdr(skb)->h_proto == htons(ETH_P_IP)) {
++		struct iphdr ip, *iph;
++
++		iph = skb_header_pointer(skb, offset, sizeof(ip), &ip);
++		return iph && iph->version == 4 && iph->ihl >= 5 &&
++			ipv4_is_multicast(iph->daddr);
++	}
++#if IS_ENABLED(CONFIG_IPV6)
++	if (eth_hdr(skb)->h_proto == htons(ETH_P_IPV6)) {
++		struct ipv6hdr ip6, *ip6h;
++
++		ip6h = skb_header_pointer(skb, offset, sizeof(ip6), &ip6);
++		return ip6h && ip6h->version == 6 &&
++			ipv6_addr_is_multicast(&ip6h->daddr);
++	}
++#endif
++	return false;
++}
++
++static bool br_mcast_packet_ordinary(const struct net_bridge_port *p,
++				     struct sk_buff *skb, bool local_orig)
++{
++	struct br_mcast_packet *packet;
++	u64 cookie;
++
++	if (skb->br_mcast_contract)
++		return true;
++	if (!br_mcast_offload_wireless_port(p) ||
++	    (!is_multicast_ether_addr(eth_hdr(skb)->h_dest) &&
++	     !br_mcast_packet_ip_group(skb)))
++		return true;
++	cookie = br_mcast_offload_port_cookie(p->dev);
++	if (!cookie)
++		return false;
++	packet = kmalloc(sizeof(*packet), GFP_ATOMIC);
++	if (!packet)
++		return false;
++	br_mcast_packet_init(packet, p, skb, local_orig, cookie, 0);
++	if (br_mcast_packet_install(skb, packet))
++		return true;
++	br_mcast_packet_put(packet);
++	return false;
++}
++#endif
+ 
+ /* Don't forward packets to originating port or forwarding disabled */
+ static inline int should_deliver(const struct net_bridge_port *p,
+@@ -78,6 +208,16 @@
+ 	struct net *net;
+ 	int br_hook;
+ 
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++	/* Capture origin before VLAN/egress rewrite and before cb is repurposed.
++	 * This skb already belongs exclusively to this output delivery.
++	 */
++	if (!br_mcast_packet_ordinary(to, skb, local_orig)) {
++		DEV_STATS_INC(to->br->dev, tx_dropped);
++		kfree_skb(skb);
++		return;
++	}
++#endif
+ 	/* Mark the skb for forwarding offload early so that br_handle_vlan()
+ 	 * can know whether to pop the VLAN header on egress or keep it.
+ 	 */
+@@ -259,6 +399,81 @@
+ }
+ 
+ #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++/* Collapse only a complete native per-host result. On failure the caller
++ * performs its normal M2U copies; it must never use the old MCU suppression.
++ */
++static bool br_mcast_packet_hosts(struct net_bridge_port *port,
++		struct net_bridge_mdb_entry *mdst, struct sk_buff *skb,
++		bool local_orig, bool allow_include)
++{
++	struct net_bridge_port_group *pg, *override;
++	struct br_mcast_packet *packet;
++	struct sk_buff *copy;
++	u8 mac[BR_MCAST_PACKET_MAC_MAX][ETH_ALEN];
++	u32 count = 0, i;
++	u64 cookie, mcu_cookie, seq;
++	bool complete = false;
++
++	if (!should_deliver(port, skb) || !br_mcast_packet_nf_safe(skb))
++		return false;
++	cookie = br_mcast_offload_port_cookie(port->dev);
++	if (!cookie)
++		return false;
++	spin_lock_bh(&port->br->multicast_lock);
++	if (!br_mcast_offload_mcu_valid(port))
++		goto unlock;
++	override = br_multicast_port_static_override(mdst, port);
++	for (pg = mlock_dereference(mdst->ports, port->br); pg;
++	     pg = mlock_dereference(pg->next, port->br)) {
++		if (pg->key.port != port || (override && pg != override) ||
++		    (!allow_include && pg->filter_mode == MCAST_INCLUDE) ||
++		    (pg->flags & MDB_PG_FLAGS_BLOCKED))
++			continue;
++		if (!pg->host_specific || !is_valid_ether_addr(pg->eth_addr))
++			goto unlock;
++		if (skb->dev == port->dev &&
++		    ether_addr_equal(eth_hdr(skb)->h_source, pg->eth_addr))
++			continue;
++		for (i = 0; i < count; i++)
++			if (ether_addr_equal(mac[i], pg->eth_addr))
++				break;
++		if (i != count)
++			continue;
++		if (count == BR_MCAST_PACKET_MAC_MAX)
++			goto unlock;
++		ether_addr_copy(mac[count++], pg->eth_addr);
++	}
++	mcu_cookie = port->mcast_mcu_cookie;
++	seq = port->mcast_hw_snapshot.seq;
++	complete = true;
++unlock:
++	spin_unlock_bh(&port->br->multicast_lock);
++	if (!complete)
++		return false;
++	if (!count)
++		return true;
++	packet = kmalloc(struct_size(packet, mac, count), GFP_ATOMIC);
++	if (!packet)
++		return false;
++	br_mcast_packet_init(packet, port, skb, local_orig, cookie, count);
++	packet->action = BR_MCAST_PACKET_HOSTS;
++	packet->mcu_cookie = mcu_cookie;
++	packet->seq = seq;
++	memcpy(packet->mac, mac, count * ETH_ALEN);
++	copy = skb_clone(skb, GFP_ATOMIC);
++	if (!copy) {
++		br_mcast_packet_put(packet);
++		return false;
++	}
++	if (!br_mcast_packet_install(copy, packet)) {
++		kfree_skb(copy);
++		br_mcast_packet_put(packet);
++		return false;
++	}
++	__br_forward(port, copy, local_orig);
++	return true;
++}
++
+ static void maybe_deliver_addr(struct net_bridge_port *p, struct sk_buff *skb,
+ 			       const unsigned char *addr, bool local_orig)
+ {
+@@ -297,6 +512,7 @@
+ {
+ 	struct net_bridge_port *prev = NULL;
+ 	struct net_bridge_port_group *p;
++	struct net_bridge_port *collapse_failed = NULL;
+ 	bool allow_mode_include = true;
+ 	struct hlist_node *rp;
+ 
+@@ -329,6 +545,16 @@
+ 					goto delivered;
+ 				goto ordinary;
+ 			}
++			if (port != collapse_failed &&
++			    (port->flags & BR_MULTICAST_TO_UNICAST) &&
++			    READ_ONCE(port->mcast_hw_to_unicast)) {
++				if (br_mcast_packet_hosts(port, mdst, skb, local_orig,
++						 allow_mode_include)) {
++					consume_port = true;
++					goto delivered;
++				}
++				collapse_failed = port;
++			}
+ 			override = br_multicast_port_static_override(mdst, lport);
+ 			if (override && p != override)
+ 				goto delivered;
+@@ -337,8 +563,7 @@
+ 			     p->filter_mode == MCAST_INCLUDE) ||
+ 			    (p->flags & MDB_PG_FLAGS_BLOCKED))
+ 				goto delivered;
+-			if ((port->flags & BR_MULTICAST_TO_UNICAST) &&
+-			    !READ_ONCE(port->mcast_hw_to_unicast)) {
++			if (port->flags & BR_MULTICAST_TO_UNICAST) {
+ 				maybe_deliver_addr(lport, skb, p->eth_addr,
+ 						   local_orig);
+ 				goto delivered;
+--- a/net/bridge/netfilter/nf_conntrack_bridge.c
++++ b/net/bridge/netfilter/nf_conntrack_bridge.c
+@@ -424,6 +424,7 @@
+ 	},
+ 	{
+ 		.hook		= nf_ct_bridge_post,
++		.hook_ops_type	= NF_HOOK_OP_BRIDGE_CT_GUARDED,
+ 		.pf		= NFPROTO_BRIDGE,
+ 		.hooknum	= NF_BR_POST_ROUTING,
+ 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,

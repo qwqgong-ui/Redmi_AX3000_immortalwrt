@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=qca-nss-drv
-PKG_RELEASE:=22
+PKG_RELEASE:=38
 
 # Source: https://git.codelinaro.org/clo/qsdk/oss/lklm/nss-drv.git @ d7ef98b1d3d31346981d3a1abff5152a206374af
 # (tag NHSS.QSDK.14.0.r9-00025-O, the newest QSDK tag; pre-generated 'git archive' of the commit).
@@ -127,7 +127,12 @@ endef
 
 EXTRA_CFLAGS+= -I$(STAGING_DIR)/usr/include/qca-nss-dp \
 			   -Wno-missing-declarations -Wno-missing-prototypes \
-			   -Wno-empty-body -Wno-unused-variable
+				   -Wno-empty-body -Wno-unused-variable
+
+# The IPQ5018 MP firmware needs a QoS pool before FQ-CoDel can allocate flows.
+ifdef CONFIG_NSS_DRV_SHAPER_ENABLE
+  EXTRA_CFLAGS += -DNSS_QOS_MEM_SIZE_DEFAULT=1
+endif
 
 ifdef CONFIG_NSS_MEM_PROFILE_MEDIUM
   EXTRA_CFLAGS += -DNSS_MEM_PROFILE_MEDIUM

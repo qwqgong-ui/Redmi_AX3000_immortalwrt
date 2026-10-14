@@ -1,0 +1,186 @@
+--- a/bridge/nss_bridge_mgr.c
++++ b/bridge/nss_bridge_mgr.c
+@@ -27,8 +27,10 @@
+ #include <linux/of.h>
+ #include <linux/if_bridge.h>
+ #include <linux/workqueue.h>
++#include <linux/sysfs.h>
+ #include <net/net_namespace.h>
+ #include <net/bonding.h>
++#include <net/cfg80211.h>
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ #include <ref/ref_vsi.h>
+ #include <nss_vlan_mgr.h>
+@@ -93,6 +95,108 @@
+ 	kfree(member);
+ }
+ 
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++static bool nss_bridge_mgr_ap_host_port(struct net_device *dev)
++{
++	struct wireless_dev *wdev = dev->ieee80211_ptr;
++	enum nl80211_iftype type;
++
++	ASSERT_RTNL();
++	if (!wdev)
++		return false;
++	type = READ_ONCE(wdev->iftype);
++	return type == NL80211_IFTYPE_AP || type == NL80211_IFTYPE_AP_VLAN;
++}
++
++static int nss_bridge_mgr_revoke_member(struct nss_bridge_pvt *br,
++				      struct nss_bridge_member *member)
++{
++	struct nss_bridge_msg msg;
++
++	ASSERT_RTNL();
++	/* Only an interface owner keeping this instance registered may call here.
++	 * Keep its recorded ownership until LEAVE is acknowledged. A current
++	 * numeric lookup cannot prove an old interface generation is still alive.
++	 */
++	memset(&msg, 0, sizeof(msg));
++	msg.msg.br_leave.if_num = member->ifnum;
++	nss_bridge_msg_init(&msg, br->ifnum, NSS_BRIDGE_MSG_LEAVE,
++			    sizeof(struct nss_bridge_leave_msg), NULL, NULL);
++	if (nss_bridge_tx_msg_sync(nss_bridge_get_context(), &msg) != NSS_TX_SUCCESS) {
++		member->leaving = true;
++		member->uncertain = true;
++		return -EIO;
++	}
++	nss_bridge_mgr_delete_member(member);
++	return 0;
++}
++
++/* 1 means the AP is deliberately host-only; 0 means the usual JOIN applies.
++ * A pre-existing membership requires the owning interface's explicit revoke
++ * before this function can succeed. This discovery path cannot prove a saved
++ * ifnum was not recycled, so it never sends LEAVE from that number alone.
++ * New AP VDEVs never enter the NSS bridge from cold boot.
++ */
++static int nss_bridge_mgr_keep_ap_on_host(struct net_device *dev)
++{
++	struct nss_bridge_pvt *br;
++	struct nss_bridge_member *member;
++
++	ASSERT_RTNL();
++	if (!nss_bridge_mgr_ap_host_port(dev))
++		return 0;
++	list_for_each_entry(br, &br_mgr_ctx.list, list) {
++		member = nss_bridge_mgr_find_member(br, dev);
++		if (!member)
++			continue;
++		member->leaving = true;
++		member->uncertain = true;
++		nss_bridge_mgr_schedule_reconcile();
++		return -EAGAIN;
++	}
++	return 1;
++}
++
++static int nss_bridge_mgr_ap_host_ports_get(char *buffer,
++					  const struct kernel_param *param)
++{
++	struct net_device *dev;
++	struct nss_bridge_pvt *br;
++	struct nss_bridge_member *member;
++	unsigned int count, uncertain;
++	int used = 0;
++
++	(void)param;
++	rtnl_lock();
++	for_each_netdev(&init_net, dev) {
++		if (!nss_bridge_mgr_ap_host_port(dev))
++			continue;
++		count = uncertain = 0;
++		list_for_each_entry(br, &br_mgr_ctx.list, list) {
++			member = nss_bridge_mgr_find_member(br, dev);
++			if (!member)
++				continue;
++			count++;
++			uncertain += member->leaving || member->uncertain;
++		}
++		if (used > PAGE_SIZE - 128)
++			break;
++		used += sysfs_emit_at(buffer, used,
++			"dev=%s ifnum=%d memberships=%u uncertain=%u host_only=%u\n",
++			dev->name, nss_cmn_get_interface_number_by_dev(dev),
++			count, uncertain, !count);
++	}
++	rtnl_unlock();
++	return used;
++}
++
++static const struct kernel_param_ops nss_bridge_mgr_ap_host_ports_ops = {
++	.get = nss_bridge_mgr_ap_host_ports_get,
++};
++module_param_cb(ap_host_ports, &nss_bridge_mgr_ap_host_ports_ops, NULL, 0444);
++MODULE_PARM_DESC(ap_host_ports, "Read-only AP host policy and retained bridge membership owners");
++#endif
++
+ /*
+  * Module parameter to enable/disable FDB learning.
+  */
+@@ -824,6 +928,10 @@
+ #if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	struct nss_bridge_member *member;
+ 	struct nss_bridge_pvt *owner;
++	int ret = nss_bridge_mgr_keep_ap_on_host(dev);
++
++	if (ret)
++		return ret < 0 ? ret : 0;
+ #endif
+ 
+ 	ifnum = nss_cmn_get_interface_number_by_dev(dev);
+@@ -1489,7 +1597,14 @@
+ 			}
+ 		}
+ 		list_for_each_entry_safe(member, next, &br->members, list) {
+-			if (member->leaving || !netif_running(member->dev) ||
++			if (nss_bridge_mgr_ap_host_port(member->dev)) {
++				/* Do not revoke an unproven, possibly recycled VDEV number.
++				 * Its interface owner must detach it before publication.
++				 */
++				member->leaving = true;
++				member->uncertain = true;
++				pending = true;
++			} else if (member->leaving || !netif_running(member->dev) ||
+ 			    netdev_master_upper_dev_get(member->dev) != dev ||
+ 			    nss_cmn_get_interface_number_by_dev(member->dev) != member->ifnum) {
+ 				if (nss_bridge_mgr_leave_bridge(member->dev, br))
+@@ -1497,7 +1612,7 @@
+ 			}
+ 		}
+ 		netdev_for_each_lower_dev(dev, lower, iter) {
+-			if (!netif_running(lower))
++			if (!netif_running(lower) || nss_bridge_mgr_ap_host_port(lower))
+ 				continue;
+ 			if (nss_cmn_get_interface_number_by_dev(lower) < 0) {
+ 				/* DSA/host-only members are left to Linux. A wireless
+@@ -1924,7 +2039,6 @@
+ #if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	struct nss_bridge_pvt *br;
+ 	struct nss_bridge_member *member;
+-	struct nss_bridge_msg msg;
+ 
+ 	ASSERT_RTNL();
+ 	list_for_each_entry(br, &br_mgr_ctx.list, list) {
+@@ -1933,17 +2047,10 @@
+ 			continue;
+ 		if (member->ifnum != ifnum)
+ 			return -EBUSY;
+-		/* Use recorded ownership, never a potentially changed lookup. */
+-		memset(&msg, 0, sizeof(msg));
+-		msg.msg.br_leave.if_num = ifnum;
+-		nss_bridge_msg_init(&msg, br->ifnum, NSS_BRIDGE_MSG_LEAVE,
+-				    sizeof(struct nss_bridge_leave_msg), NULL, NULL);
+-		if (nss_bridge_tx_msg_sync(nss_bridge_get_context(), &msg) != NSS_TX_SUCCESS) {
+-			member->leaving = true;
+-			member->uncertain = true;
++		if (nss_bridge_mgr_revoke_member(br, member)) {
++			nss_bridge_mgr_schedule_reconcile();
+ 			return -EIO;
+ 		}
+-		nss_bridge_mgr_delete_member(member);
+ 	}
+ 	return 0;
+ #else

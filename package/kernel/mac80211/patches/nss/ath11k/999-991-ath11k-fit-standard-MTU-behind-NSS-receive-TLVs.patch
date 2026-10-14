@@ -1,0 +1,30 @@
+Subject: [PATCH] ath11k: fit standard MTU frames behind compact NSS TLVs
+
+The small-memory profile budgets 1816 bytes for a 256-byte descriptor,
+but IPQ5018 and QCN6122 retain a 384-byte packet offset in both the HTT
+ring filter and NSS SOC_INIT. Only 1432 bytes are left, so normal MTU
+traffic consumes two receive buffers and REO descriptors per packet.
+
+Use the firmware-supported 2048-byte buffer size already used by the
+larger profile. Keep the hardware TLV offsets, ring depths and pool counts
+unchanged. Both HTT and SOC_INIT share this value. On the target AArch64
+profile the NSS EMPTY/reusable buffer DMA region covers at least 2048
+bytes (1984-byte minimum plus 64-byte NET_SKB_PAD).
+
+Apply after the 256M ring-depth patch, which retains the old budget comment
+as context; this changes buffer bytes while preserving that ring sizing.
+
+--- a/drivers/net/wireless/ath/ath11k/hw.h
++++ b/drivers/net/wireless/ath/ath11k/hw.h
+@@ -30,7 +30,8 @@
+-/* 256b desc TLV + 4b(rounded) Pad + 30byte max nwifi header +
+- * 18byte mesh hdr + 8byte snap + 1500 eth payload
++/* Buffer bytes, not ring entries. A 384-byte descriptor plus padding,
++ * native Wi-Fi/mesh/SNAP headers and a standard MTU frame must fit.
++ * HTT and NSS SOC_INIT use the same firmware-supported 2K buffer.
+  */
+-#define ATH11K_DP_RXDMA_NSS_REFILL_RING_SIZE	1816
++#define ATH11K_DP_RXDMA_NSS_REFILL_RING_SIZE	2048
+ #else
+ /* Num VDEVS per radio */
+ #define TARGET_NUM_VDEVS(ab)	(ab->hw_params.num_vdevs_peers[ab->qmi.target_mem_mode].num_vdevs)

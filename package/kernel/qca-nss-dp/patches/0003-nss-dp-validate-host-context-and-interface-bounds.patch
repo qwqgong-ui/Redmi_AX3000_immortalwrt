@@ -1,0 +1,25 @@
+Subject: [PATCH] nss-dp: validate host context and physical interface bounds
+
+--- a/nss_dp_attach.c
++++ b/nss_dp_attach.c
+@@ -218,7 +218,7 @@
+ {
+ 	struct nss_dp_dev *dp_dev;
+ 
+-	if ((if_num > NSS_DP_HAL_MAX_PORTS) || (if_num < NSS_DP_START_IFNUM)) {
++	if (if_num < NSS_DP_START_IFNUM || if_num >= NSS_DP_MAX_INTERFACES) {
+ 		pr_err("Invalid if_num %d\n", if_num);
+ 		return NULL;
+ 	}
+@@ -237,6 +237,11 @@
+     ASSERT_RTNL();
+     if (!host->quiesce_dma)
+         return -EOPNOTSUPP;
++    /* GMAC macid is one-based; the NSS interface numbering is separate.
++     * Refuse a missing/mismatched host context before touching any DMA.
++     */
++    if (dp_global_data_plane_ctx[nss_dp_get_idx_from_macid(dp_dev->macid)].dev != netdev)
++        return -ENODEV;
+     netif_tx_disable(netdev);
+     netif_carrier_off(netdev);
+     return host->quiesce_dma(

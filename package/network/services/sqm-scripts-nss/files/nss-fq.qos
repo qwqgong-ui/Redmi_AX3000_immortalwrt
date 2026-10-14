@@ -1,0 +1,23 @@
+#!/bin/sh
+# NSS per-flow AQM with no rate limiter, on supported physical or Wi-Fi devices.
+# This is NSS FQ-CoDel, not mac80211 AQL. Only packet depth is bounded.
+. "${SQM_LIB_DIR}/defaults.sh"
+
+sqm_start() {
+	[ -e "/sys/class/net/$IFACE" ] || return 1
+	[ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" = 1 ] || return 1
+	modprobe qca-nss-qdisc || return 1
+	$TC qdisc replace dev "$IFACE" root handle 10: nssfq_codel \
+		limit "${ELIMIT:-128}" flows 128 quantum 1514 target "${ETARGET:-5ms}" \
+		interval 100ms set_default accel_mode 0 || return 1
+	tc qdisc show dev "$IFACE" | grep -q '^qdisc nssfq_codel 10: root'
+}
+
+sqm_stop() {
+	case "$(tc qdisc show dev "$IFACE" 2>/dev/null)" in
+	"qdisc nssfq_codel 10: root"*) SILENT=1 $TC qdisc del dev "$IFACE" root ;;
+	esac
+	return 0
+}
+
+sqm_cleanup() { sqm_stop; }

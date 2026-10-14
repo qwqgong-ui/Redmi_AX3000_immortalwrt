@@ -1,0 +1,70 @@
+Subject: [PATCH] ath11k: retain NSS MCBC crypto and replay classification
+
+Use the NSS exception classification rather than clearing it when NSS is
+enabled.  Keep ordinary host RX descriptor handling, clear per-MPDU PN
+validation and let mac80211 validate multicast duplicates.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -2972,7 +2972,7 @@
+ 				struct sk_buff *msdu,
+ 				struct hal_rx_desc *rx_desc,
+ 				struct ieee80211_rx_status *rx_status,
+-				bool *fast_rx)
++				bool *fast_rx, bool from_nss)
+ {
+ 	bool fill_crypto_hdr = 0;
+ 	enum hal_encrypt_type enctype;
+@@ -2988,8 +2988,11 @@
+ 
+ 	/* PN for multicast packets will be checked in mac80211 */
+ 	rxcb = ATH11K_SKB_RXCB(msdu);
+-	if (!ar->ab->nss.enabled)
+-		fill_crypto_hdr = ath11k_dp_rx_h_attn_is_mcbc(ar->ab, rx_desc);
++	/* NSS MCBC exceptions explicitly carry this classification.  Ordinary
++	 * host RX uses its descriptor even while the NSS datapath is enabled.
++	 */
++	fill_crypto_hdr = from_nss ? rxcb->is_mcbc :
++		ath11k_dp_rx_h_attn_is_mcbc(ar->ab, rx_desc);
+ 	rxcb->is_mcbc = fill_crypto_hdr;
+ 
+ 	if (rxcb->is_mcbc) {
+@@ -3040,6 +3043,7 @@
+ 			     RX_FLAG_MMIC_ERROR |
+ 			     RX_FLAG_DECRYPTED |
+ 			     RX_FLAG_IV_STRIPPED |
++			     RX_FLAG_PN_VALIDATED |
+ 			     RX_FLAG_MMIC_STRIPPED);
+ 
+ 	if (err_bitmap & DP_RX_MPDU_ERR_FCS)
+@@ -3361,7 +3365,7 @@
+ 		}
+ 	}
+ 
+-	ath11k_dp_rx_h_mpdu(ar, msdu, rx_desc, rx_status, fast_rx);
++	ath11k_dp_rx_h_mpdu(ar, msdu, rx_desc, rx_status, fast_rx, false);
+ 	if (*fast_rx) {
+ 		ab->soc_stats.invalid_rbm++;
+ 		return 0;
+@@ -3434,9 +3438,11 @@
+ 	rxcb = ATH11K_SKB_RXCB(msdu);
+ 
+ 	ath11k_dp_rx_h_ppdu(ar, rxcb->rx_desc, &rx_status);
+-	ath11k_dp_rx_h_mpdu(ar, msdu, rxcb->rx_desc, &rx_status, &fast_rx);
++	ath11k_dp_rx_h_mpdu(ar, msdu, rxcb->rx_desc, &rx_status, &fast_rx, true);
+ 
+-	rx_status.flag |= RX_FLAG_SKIP_MONITOR | RX_FLAG_DUP_VALIDATED;
++	rx_status.flag |= RX_FLAG_SKIP_MONITOR;
++	if (!rxcb->is_mcbc)
++		rx_status.flag |= RX_FLAG_DUP_VALIDATED;
+ 
+ 	ath11k_dp_rx_deliver_msdu(ar, napi, msdu, &rx_status);
+ }
+@@ -5029,7 +5035,7 @@
+ 	ath11k_dp_rx_h_ppdu(ar, desc, status);
+ 
+ 	fast_rx = false;
+-	ath11k_dp_rx_h_mpdu(ar, msdu, desc, status, &fast_rx);
++	ath11k_dp_rx_h_mpdu(ar, msdu, desc, status, &fast_rx, false);
+ 
+ 	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, desc);

@@ -1,0 +1,344 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] clients: drain 12.2 statistics lifetimes
+
+Bound 12.2 stats retries and track callbacks. Close per-root submissions,
+drain local workers and callbacks before freeing stats or children, and
+make teardown independent of a firmware ACK.
+
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -221,11 +221,6 @@
+ 	spin_lock_bh(&nss_qdisc_stats_list_lock);
+ 
+ 	/*
+-	 * Stats message is processed
+-	 */
+-	atomic_sub(1, &nqsw->pending_stat_work);
+-
+-	/*
+ 	 * If this qdisc's stats polling is stopped don't enqueue to work
+ 	 */
+ 	if (nqsw->stats_polling_stopped) {
+@@ -244,7 +239,8 @@
+ 	/*
+ 	 * Add the work for this root node to the tail of the queue
+ 	 */
+-	list_add_tail(&nqsw->stats_list, &nss_qdisc_stats_list);
++	if (list_empty(&nqsw->stats_list))
++		list_add_tail(&nqsw->stats_list, &nss_qdisc_stats_list);
+ 	spin_unlock_bh(&nss_qdisc_stats_list_lock);
+ 
+ 	if (restart_work) {
+@@ -459,6 +455,8 @@
+ 	 */
+ 	atomic_set(&nqsw->pending_stat_resp, 0);
+ 	wake_up(&nqsw->stats_resp_waitqueue);
++	if (READ_ONCE(nqsw->stats_polling_stopped))
++		return;
+ 
+ 	if (nim->cm.response == NSS_CMN_RESPONSE_ACK) {
+ 		/*
+@@ -532,51 +530,55 @@
+  */
+ static void nss_qdisc_stats_sync_msg_tx(struct nss_qdisc_stats_wq *nqsw)
+ {
+-
+ 	struct nss_qdisc *nq = nqsw->nq;
+ 	struct nss_if_msg *nim = &nqsw->stats_sync_req_msg;
+-
+-	/*
+-	 * Prepare a SYNC_MANY request
+-	 */
+-	struct nss_shaper_node_stats_sync_many *nsnsm = &nim->msg.shaper_configure.config.msg.stats_get;
+-	nss_tx_status_t nss_tx_status;
+-	int retry = 3;
+-
+-	while (retry) {
++	struct nss_shaper_node_stats_sync_many *stats = &nim->msg.shaper_configure.config.msg.stats_get;
++	int retry;
++
++	for (retry = 0; retry < 3; retry++) {
++		nss_tx_status_t status;
++		u32 cookie;
++
++		/* Publishing a request and closing this root's submission gate use
++		 * the same lock. The driver send is nonblocking/GFP_ATOMIC.
++		 */
++		spin_lock_bh(&nss_qdisc_stats_list_lock);
++		if (nqsw->stats_polling_stopped) {
++			spin_unlock_bh(&nss_qdisc_stats_list_lock);
++			return;
++		}
+ 		atomic_set(&nqsw->pending_stat_resp, 1);
+-		nss_tx_status = nss_if_tx_msg_with_size(nq->nss_shaping_ctx, nim, PAGE_SIZE);
+-		if (nss_tx_status != NSS_TX_SUCCESS) {
++		status = nss_if_tx_msg_with_size_tracked(nq->nss_shaping_ctx, nim,
++				PAGE_SIZE, &nqsw->stats_cookie);
++		spin_unlock_bh(&nss_qdisc_stats_list_lock);
++		if (status != NSS_TX_SUCCESS) {
+ 			atomic_set(&nqsw->pending_stat_resp, 0);
+ 			nqsw->stats_request_fail++;
+-			retry--;
+-			nss_qdisc_info("TX_NOT_OKAY, try again later\n");
+ 			usleep_range(100, 200);
+ 			continue;
+ 		}
+-
+ 		nqsw->stats_request_success++;
+-
+-		/*
+-		 * Wait on this thread until response is received by fw.
++		wait_event_timeout(nqsw->stats_resp_waitqueue,
++			READ_ONCE(nqsw->stats_polling_stopped) ||
++			!atomic_read(&nqsw->pending_stat_resp), NSS_QDISC_COMMAND_TIMEOUT);
++		spin_lock_bh(&nss_qdisc_stats_list_lock);
++		cookie = xchg(&nqsw->stats_cookie, 0);
++		spin_unlock_bh(&nss_qdisc_stats_list_lock);
++		/* An ACK wakes the worker before its callback finishes processing
++		 * the htable. Drain on success as well as timeout or stop.
+ 		 */
+-		if (!wait_event_timeout(nqsw->stats_resp_waitqueue, atomic_read(&nqsw->pending_stat_resp) == 0,
+-					NSS_QDISC_COMMAND_TIMEOUT)) {
+-			nss_qdisc_error("Stats request command for %x timedout!\n", nq->qos_tag);
+-		} else {
+-
+-			nss_qdisc_info("Qdisc %px nq:%p no more pending stat response  %d", nq->qdisc,
+-					nq, atomic_read(&nqsw->pending_stat_resp));
++		nss_if_cancel_msg(cookie);
++		if (READ_ONCE(nqsw->stats_polling_stopped) ||
++		    !atomic_read(&nqsw->pending_stat_resp))
+ 			return;
+-		}
+-	}
+-
+-	/*
+-	 * TX failed after retries, reschedule ourselves with fresh start
+-	 */
+-	nsnsm->count = 0;
+-	nsnsm->last_qos_tag = 0;
+-	nss_qdisc_stats_queue_delayed_work(nq);
++		atomic_set(&nqsw->pending_stat_resp, 0);
++		nqsw->stats_request_fail++;
++	}
++	if (!READ_ONCE(nqsw->stats_polling_stopped)) {
++		stats->count = 0;
++		stats->last_qos_tag = 0;
++		nss_qdisc_stats_queue_delayed_work(nq);
++	}
+ }
+ 
+ 
+@@ -604,11 +606,15 @@
+ 	 * Dequeue the work from the head of the list and process the statistics sync for it
+ 	 */
+ 	nqsw = list_first_entry(&nss_qdisc_stats_list, struct nss_qdisc_stats_wq, stats_list);
+-	list_del(&nqsw->stats_list);
++	list_del_init(&nqsw->stats_list);
+ 	atomic_add(1, &nqsw->pending_stat_work);
+ 	spin_unlock_bh(&nss_qdisc_stats_list_lock);
+ 
+ 	nss_qdisc_stats_sync_msg_tx(nqsw);
++	spin_lock_bh(&nss_qdisc_stats_list_lock);
++	atomic_sub(1, &nqsw->pending_stat_work);
++	wake_up(&nqsw->stats_work_waitqueue);
++	spin_unlock_bh(&nss_qdisc_stats_list_lock);
+ 
+ 	/*
+ 	 * Schedule work again for processing next stats request
+@@ -651,71 +657,31 @@
+ void nss_qdisc_stats_sync_many_exit(struct nss_qdisc *nq)
+ {
+ 	struct nss_qdisc_stats_wq *nqsw = nq->stats_wq;
+-	struct nss_qdisc_stats_wq *cursor, *next;
+-
++	u32 cookie;
++
++	if (!nqsw)
++		return;
+ 	spin_lock_bh(&nss_qdisc_stats_list_lock);
+-
+-	/*
+-	 * Stop further queuing to work function
+-	 */
+-	nqsw->stats_polling_stopped = true;
+-
+-	/*
+-	 * if list is already empty then stats sync message may be in progress,
+-	 * wait for pending stats processing.
+-	 */
+-	if (list_empty(&nss_qdisc_stats_list)) {
+-		spin_unlock_bh(&nss_qdisc_stats_list_lock);
+-		nss_qdisc_info("Qdisc %px nq:%p list is empty", nq->qdisc, nq);
+-		goto cleanup;
+-	}
+-
+-	/*
+-	 * Check if stats sync for this root node is queued in the list. If so,
+-	 * remove it from the list.
+-	 */
+-	list_for_each_entry_safe(cursor, next, &nss_qdisc_stats_list, stats_list) {
+-		if (nqsw == cursor) {
+-			list_del(&nqsw->stats_list);
+-			spin_unlock_bh(&nss_qdisc_stats_list_lock);
+-			nss_qdisc_info("Qdisc %px nq:%p found work queue %p", nq->qdisc, nq, nqsw);
+-			goto free_mem;
+-		}
+-	}
+-
++	WRITE_ONCE(nqsw->stats_polling_stopped, true);
++	if (!list_empty(&nqsw->stats_list))
++		list_del_init(&nqsw->stats_list);
++	cookie = xchg(&nqsw->stats_cookie, 0);
+ 	spin_unlock_bh(&nss_qdisc_stats_list_lock);
+-
+-	/*
+-	 * The timer has already fired, which means we have a pending stat response.
+-	 * We will have to wait until we have received the pending response.
+-	 */
+-cleanup:
+-	if (timer_delete(&nqsw->stats_get_timer) > 0) {
+-		/*
+-		 * The timer was still active (counting down) when it was deleted.
+-		 * Therefore we are sure that there are no pending stats request
+-		 * for which we need to wait for. We can therefore return.
+-		 */
+-		goto free_mem;
+-	}
+-
+-	nss_qdisc_info("Qdisc %px nq:%p waiting for nqsw->pending_stat_work to be zero %d", nq->qdisc, nq, atomic_read(&nqsw->pending_stat_work));
+-
+-	/*
+-	 * A sync is in progress. Make sure we wait for the completion before cleaning
+-	 * up the stats sync framework
+-	 */
+-	if (!wait_event_timeout(nqsw->stats_work_waitqueue, atomic_read(&nqsw->pending_stat_work) == 0,
+-				NSS_QDISC_COMMAND_TIMEOUT)) {
+-		nss_qdisc_error("Stats request command for %x timedout!\n", nq->qos_tag);
+-	}
+-
+-	nss_qdisc_info("Qdisc %px nq:%p no more pending_stat_work  %d", nq->qdisc, nq, atomic_read(&nqsw->pending_stat_work));
+-
+-free_mem:
+-	/*
+-	 * Free the qdisc stats hash table for this root node
+-	 */
++	del_timer_sync(&nqsw->stats_get_timer);
++	atomic_set(&nqsw->pending_stat_resp, 0);
++	wake_up(&nqsw->stats_resp_waitqueue);
++	nss_if_cancel_msg(cookie);
++	/* Local, stop-aware workers have no dependency on a firmware ACK.
++	 * Never free their context merely because a timeout elapsed.
++	 */
++	wait_event(nqsw->stats_work_waitqueue,
++			!atomic_read(&nqsw->pending_stat_work));
++	spin_lock_bh(&nss_qdisc_stats_list_lock);
++	cookie = xchg(&nqsw->stats_cookie, 0);
++	spin_unlock_bh(&nss_qdisc_stats_list_lock);
++	nss_if_cancel_msg(cookie);
++	/* Drain a callback/timer that passed its stop check before gate closure. */
++	del_timer_sync(&nqsw->stats_get_timer);
+ 	nss_qdisc_htable_dealloc(&nqsw->nqt);
+ 	nq->stats_wq = NULL;
+ 	kfree(nqsw);
+@@ -749,6 +715,7 @@
+ 	}
+ 	nq->stats_wq = nqsw;
+ 	nqsw->nq = nq;
++	INIT_LIST_HEAD(&nqsw->stats_list);
+ 	init_waitqueue_head(&nqsw->stats_work_waitqueue);
+ 	init_waitqueue_head(&nqsw->stats_resp_waitqueue);
+ 
+@@ -805,7 +772,6 @@
+ {
+ 	nss_qdisc_assert(nq->is_root, "Stats polling started on non-root qdisc:%p with qos_tag%x", nq, nq->qos_tag);
+ 
+-	atomic_set(&nq->stats_wq->pending_stat_work, 1);
+ 	nss_qdisc_stats_queue_delayed_work(nq);
+ 	nss_qdisc_info("%p Started delayed work queue for root %x\n", nq, nq->qos_tag);
+ }
+@@ -904,6 +870,10 @@
+ 	}
+ 
+ 	nss_qdisc_htable_entry_del(&rnq->stats_wq->nqt, nq);
++	/* Lookup drops its htable lock before using the node. Drain any response
++	 * that fetched this node before removal, before its qdisc can be freed.
++	 */
++	synchronize_net();
+ }
+ 
+ #endif /* !NSS_FIRMWARE_VERSION_11_4 */
+--- a/nss_qdisc/nss_qdisc.h
++++ b/nss_qdisc/nss_qdisc.h
+@@ -160,6 +160,7 @@
+ 	atomic_t pending_stat_work;		/* Pending work queue status */
+ 	atomic_t pending_stat_resp;		/* Pending statistics response from FW */
+ 	bool stats_polling_stopped;		/* True when polling is stopped due to qdisc delete */
++	u32 stats_cookie;			/* Driver-owned stats-many callback request */
+ 	wait_queue_head_t stats_work_waitqueue;	/* Wait queue to wait on work queue processing */
+ 	wait_queue_head_t stats_resp_waitqueue;	/* Wait queue used to wait on response from the NSS */
+ 	struct nss_qdisc_htable nqt;		/* Struct to manage hash table of Qdiscs for stats */
+--- a/nss_qdisc/nss_tbl.c
++++ b/nss_qdisc/nss_tbl.c
+@@ -71,6 +71,10 @@
+ 	struct nss_qdisc *nq_child = (struct nss_qdisc *)qdisc_priv(q->qdisc);
+ 	struct nss_if_msg nim;
+ 
++	/* Drain parent stats before its htable can reference freed children. */
++	if (q->nq.stats_wq)
++		nss_qdisc_stats_stop_polling(&q->nq);
++
+ 	/*
+ 	 * We must always detach our child node in NSS before destroying it.
+ 	 * Also, we make sure we dont send down the command for noop qdiscs.
+--- a/nss_qdisc/nss_prio.c
++++ b/nss_qdisc/nss_prio.c
+@@ -102,6 +102,10 @@
+ 	int i;
+ 
+ 	nss_qdisc_info("Destroying prio");
++
++	/* Drain parent stats before its htable can reference freed children. */
++	if (q->nq.stats_wq)
++		nss_qdisc_stats_stop_polling(&q->nq);
+ 
+ 	/*
+ 	 * Destroy all attached child nodes before destroying prio
+--- a/nss_qdisc/nss_bf.c
++++ b/nss_qdisc/nss_bf.c
+@@ -686,6 +686,10 @@
+ 	struct nss_if_msg nim;
+ 	unsigned int i;
+ 
++	/* Drain parent stats before its htable can reference freed children. */
++	if (q->nq.stats_wq)
++		nss_qdisc_stats_stop_polling(&q->nq);
++
+ 	/*
+ 	 * Destroy all the classes before the root qdisc is destroyed.
+ 	 */
+--- a/nss_qdisc/nss_wrr.c
++++ b/nss_qdisc/nss_wrr.c
+@@ -803,6 +803,10 @@
+ 	struct nss_if_msg nim;
+ 	unsigned int i;
+ 
++	/* Drain parent stats before its htable can reference freed children. */
++	if (q->nq.stats_wq)
++		nss_qdisc_stats_stop_polling(&q->nq);
++
+ 	/*
+ 	 * Destroy all the classes before the root qdisc is destroyed.
+ 	 */
+--- a/nss_qdisc/nss_htb.c
++++ b/nss_qdisc/nss_htb.c
+@@ -953,6 +953,10 @@
+ 	struct nss_htb_class_data *cl;
+ 	unsigned int i = 0;
+ 
++	/* Drain parent stats before its htable can reference freed children. */
++	if (q->nq.stats_wq)
++		nss_qdisc_stats_stop_polling(&q->nq);
++
+ 	/*
+ 	 * Destroy all the child classes before the parent is destroyed.
+ 	 */

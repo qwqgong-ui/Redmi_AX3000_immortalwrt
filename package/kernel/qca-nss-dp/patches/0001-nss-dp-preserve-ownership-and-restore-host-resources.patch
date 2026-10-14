@@ -1,0 +1,274 @@
+Subject: [PATCH] nss-dp: preserve ownership and restore host resources
+
+Propagate open/close errors, avoid a false UP flag, and rebuild host
+resources only after the overlay confirms its DMA ownership is released.
+
+--- a/nss_dp_attach.c
++++ b/nss_dp_attach.c
+@@ -18,6 +18,8 @@
+  */
+ 
+ #include <linux/version.h>
++#include <linux/rtnetlink.h>
++#include <linux/phy.h>
+ #include "nss_dp_hal.h"
+ 
+ /*
+@@ -80,56 +82,51 @@
+  *	API to allow overlay drivers to override the data plane
+  */
+ int nss_dp_override_data_plane(struct net_device *netdev,
+-				struct nss_dp_data_plane_ops *dp_ops,
+-				struct nss_dp_data_plane_ctx *dpc)
+-{
+-	struct nss_dp_dev *dp_dev = (struct nss_dp_dev *)netdev_priv(netdev);
+-
+-	if (!dp_ops->open || !dp_ops->close || !dp_ops->link_state
+-		|| !dp_ops->mac_addr || !dp_ops->change_mtu || !dp_ops->xmit
+-		|| !dp_ops->set_features || !dp_ops->pause_on_off || !dp_ops->deinit) {
+-		netdev_dbg(netdev, "All the op functions must be present, reject this registeration\n");
+-		return NSS_DP_FAILURE;
+-	}
+-
+-	/*
+-	 * If this data plane is up, close the netdev to force TX/RX stop, and
+-	 * also reset the features
+-	 */
+-	if (test_bit(__NSS_DP_UP, &dp_dev->flags)) {
+-		netdev->netdev_ops->ndo_stop(netdev);
+-		nss_dp_reset_netdev_features(netdev);
+-	}
+-
+-	/*
+-	 * Free up the resources used by the data plane
+-	 */
+-	if (dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_DONE)) {
+-		if (dp_dev->data_plane_ops->deinit(dpc)) {
+-			netdev_dbg(netdev, "Data plane de-init failed\n");
+-			return -ENOMEM;
+-		}
+-
+-		dp_dev->drv_flags &= ~NSS_DP_PRIV_FLAG(INIT_DONE);
+-	}
+-
+-	/*
+-	 * Override the data_plane_ctx, data_plane_ops
+-	 */
+-	dp_dev->drv_flags |= NSS_DP_PRIV_FLAG(INIT_OVERRIDE);
+-	dp_dev->dpc = dpc;
+-	dp_dev->data_plane_ops = dp_ops;
+-
+-	/*
+-	 * Initialize the updated data plane
+-	 */
+-	if (dp_dev->data_plane_ops->init(dpc)) {
+-		netdev_dbg(netdev, "Data Plane init failed\n");
+-		return -EFAULT;
+-	}
+-	dp_dev->drv_flags |= NSS_DP_PRIV_FLAG(INIT_DONE);
+-
+-	return NSS_DP_SUCCESS;
++                              struct nss_dp_data_plane_ops *dp_ops,
++                              struct nss_dp_data_plane_ctx *dpc)
++{
++    struct nss_dp_dev *dp_dev = netdev_priv(netdev);
++    bool was_up = test_bit(__NSS_DP_UP, &dp_dev->flags);
++    int ret;
++
++    ASSERT_RTNL();
++    if (!dp_ops || !dpc || !dp_ops->init || !dp_ops->open || !dp_ops->close ||
++        !dp_ops->link_state || !dp_ops->mac_addr || !dp_ops->change_mtu ||
++        !dp_ops->xmit || !dp_ops->set_features || !dp_ops->pause_on_off ||
++        !dp_ops->deinit || dpc->dev != netdev)
++        return -EINVAL;
++    if (dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE))
++        return -EBUSY;
++
++    netif_tx_disable(netdev);
++    if (was_up) {
++        ret = netdev->netdev_ops->ndo_stop(netdev);
++        if (ret)
++            return ret;
++    }
++    if (dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_DONE)) {
++        /* The old owner's context, not the new driver's cookie. */
++        ret = dp_dev->data_plane_ops->deinit(dp_dev->dpc);
++        if (ret) {
++            return ret < 0 ? ret : -EIO;
++        }
++        dp_dev->drv_flags &= ~NSS_DP_PRIV_FLAG(INIT_DONE);
++    }
++
++    nss_dp_reset_netdev_features(netdev);
++    dp_dev->drv_flags |= NSS_DP_PRIV_FLAG(INIT_OVERRIDE);
++    dp_dev->dpc = dpc;
++    dp_dev->data_plane_ops = dp_ops;
++    ret = dp_ops->init(dpc);
++    if (ret) {
++        int restored = nss_dp_restore_data_plane(netdev);
++
++        if (restored)
++            netdev_err(netdev, "dataplane init failed; host restoration failed: %d\n", restored);
++        return ret < 0 ? ret : -EIO;
++    }
++    dp_dev->drv_flags |= NSS_DP_PRIV_FLAG(INIT_DONE);
++    return NSS_DP_SUCCESS;
+ }
+ EXPORT_SYMBOL(nss_dp_override_data_plane);
+ 
+@@ -137,22 +133,17 @@
+  * nss_dp_start_data_plane()
+  *	Data plane to inform netdev it is ready to start
+  */
+-void nss_dp_start_data_plane(struct net_device *netdev,
+-			     struct nss_dp_data_plane_ctx *dpc)
+-{
+-	struct nss_dp_dev *dp_dev = (struct nss_dp_dev *)netdev_priv(netdev);
+-
+-	if (test_bit(__NSS_DP_UP, &dp_dev->flags)) {
+-		netdev_dbg(netdev, "This netdev already up, something is wrong\n");
+-		return;
+-	}
+-
+-	if (dp_dev->dpc != dpc) {
+-		netdev_dbg(netdev, "Cookie %px does not match, reject\n", dpc);
+-		return;
+-	}
+-
+-	netdev->netdev_ops->ndo_open(dp_dev->netdev);
++int nss_dp_start_data_plane(struct net_device *netdev,
++                            struct nss_dp_data_plane_ctx *dpc)
++{
++    struct nss_dp_dev *dp_dev = netdev_priv(netdev);
++
++    ASSERT_RTNL();
++    if (dp_dev->dpc != dpc)
++        return -EINVAL;
++    if (test_bit(__NSS_DP_UP, &dp_dev->flags))
++        return 0;
++    return netdev->netdev_ops->ndo_open(netdev);
+ }
+ EXPORT_SYMBOL(nss_dp_start_data_plane);
+ 
+@@ -160,25 +151,49 @@
+  * nss_dp_restore_data_plane()
+  *	Called by overlay drivers to detach itself from nss-dp
+  */
+-void nss_dp_restore_data_plane(struct net_device *netdev)
+-{
+-	struct nss_dp_dev *dp_dev = (struct nss_dp_dev *)netdev_priv(netdev);
+-
+-	/*
+-	 * If this data plane is up, close the netdev to force TX/RX stop, and
+-	 * also reset the features
+-	 */
+-	if (test_bit(__NSS_DP_UP, &dp_dev->flags)) {
+-		netdev->netdev_ops->ndo_stop(netdev);
+-		nss_dp_reset_netdev_features(netdev);
+-	}
+-
+-	dp_dev->data_plane_ops = nss_dp_hal_get_data_plane_ops();
+-	dp_dev->dpc = &dp_global_data_plane_ctx[dp_dev->macid - NSS_DP_START_IFNUM];
+-
+-	/*
+-	 * TODO: Re-initialize EDMA dataplane
+-	 */
++int nss_dp_restore_data_plane(struct net_device *netdev)
++{
++    struct nss_dp_dev *dp_dev = netdev_priv(netdev);
++    bool restart = netif_running(netdev);
++    int ret;
++
++    ASSERT_RTNL();
++    if (!(dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE))) {
++        if (restart && !test_bit(__NSS_DP_UP, &dp_dev->flags))
++            return netdev->netdev_ops->ndo_open(netdev);
++        return 0;
++    }
++
++    netif_tx_disable(netdev);
++    netif_carrier_off(netdev);
++    /* An open timeout may own DMA even though the UP shadow is clear.
++     * The overlay must confirm CLOSED before host rings can be rebuilt.
++     */
++    ret = dp_dev->data_plane_ops->close(dp_dev->dpc);
++    if (ret)
++        return ret < 0 ? ret : -EIO;
++    if (dp_dev->gmac_hal_ops->stop) {
++        ret = dp_dev->gmac_hal_ops->stop(dp_dev->gmac_hal_ctx);
++        if (ret)
++            return ret < 0 ? ret : -EIO;
++    }
++    if (dp_dev->phydev)
++        phy_stop(dp_dev->phydev);
++    dp_dev->link_state = __NSS_DP_LINK_DOWN;
++    ret = dp_dev->data_plane_ops->deinit(dp_dev->dpc);
++    if (ret)
++        return ret < 0 ? ret : -EIO;
++
++    clear_bit(__NSS_DP_UP, &dp_dev->flags);
++    dp_dev->drv_flags &= ~(NSS_DP_PRIV_FLAG(INIT_DONE) |
++                           NSS_DP_PRIV_FLAG(INIT_OVERRIDE));
++    dp_dev->data_plane_ops = nss_dp_hal_get_data_plane_ops();
++    dp_dev->dpc = &dp_global_data_plane_ctx[nss_dp_get_idx_from_macid(dp_dev->macid)];
++    nss_dp_reset_netdev_features(netdev);
++    dp_dev->data_plane_ops->set_features(dp_dev->dpc);
++    if (restart)
++        return netdev->netdev_ops->ndo_open(netdev);
++    return 0;
+ }
+ EXPORT_SYMBOL(nss_dp_restore_data_plane);
+ 
+--- a/nss_dp_main.c
++++ b/nss_dp_main.c
+@@ -423,7 +423,6 @@
+ 	 */
+ 	dp_priv->data_plane_ops->set_features(dp_priv->dpc);
+ 
+-	set_bit(__NSS_DP_UP, &dp_priv->flags);
+ 
+ #if defined(NSS_DP_PPE_SUPPORT)
+ 	/*
+@@ -467,7 +466,6 @@
+ 		}
+ 	}
+ 
+-	netif_start_queue(netdev);
+ 
+ 	if (!dp_priv->phydev) {
+ 		/* Notify data plane link is up */
+@@ -478,11 +476,14 @@
+ 		dp_priv->link_state = __NSS_DP_LINK_UP;
++		set_bit(__NSS_DP_UP, &dp_priv->flags);
+ 		netif_carrier_on(netdev);
+ 	} else {
+ 		dp_priv->link_state = __NSS_DP_LINK_DOWN;
++		set_bit(__NSS_DP_UP, &dp_priv->flags);
+ 		phy_start(dp_priv->phydev);
+ 		phy_start_aneg(dp_priv->phydev);
+ 	}
+ 
++	netif_start_queue(netdev);
+ 	return 0;
+ }
+ 
+--- a/exports/nss_dp_api_if.h
++++ b/exports/nss_dp_api_if.h
+@@ -179,7 +179,7 @@
+  * @param[in] netdev Pointer to netdev structure.
+  * @param[in] dpc Pointer to data plane context.
+  */
+-void nss_dp_start_data_plane(struct net_device *netdev,
++int nss_dp_start_data_plane(struct net_device *netdev,
+ 			     struct nss_dp_data_plane_ctx *dpc);
+ 
+ /**
+@@ -191,7 +191,7 @@
+  *
+  * @param[in] netdev Pointer to netdev structure.
+  */
+-void nss_dp_restore_data_plane(struct net_device *netdev);
++int nss_dp_restore_data_plane(struct net_device *netdev);
+ 
+ /**
+  * nss_dp_get_netdev_by_nss_if_num

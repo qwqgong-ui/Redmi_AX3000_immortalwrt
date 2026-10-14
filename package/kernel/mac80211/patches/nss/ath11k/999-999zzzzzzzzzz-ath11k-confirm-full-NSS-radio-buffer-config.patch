@@ -1,0 +1,148 @@
+From: Redmi AX3000 NSS radio configuration
+Subject: [PATCH] ath11k: send the full radio buffer payload and confirm ACK
+
+Include the outer radio interface id in the declared payload length. Track
+the private waiter in the NSS driver and drain replies before freeing it.
+Validate full echoes or report header-only acceptance; preserve the existing
+8192/range0..3 defaults and retain initialized radios on an unconfirmed reply.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -5286,17 +5286,76 @@
+ 
+ /*-------------------------------INIT/DEINIT---------------------------------*/
+ 
++struct ath11k_nss_radio_buf_request {
++	struct completion complete;
++	u32 if_num;
++	u32 radio_if_num;
++	u32 buf_cnt;
++	u32 range;
++	u32 response;
++	u32 error;
++	u32 len;
++	int result;
++	bool echo_verified;
++};
++
++static void ath11k_nss_radio_buf_response(void *context, struct nss_wifili_msg *msg)
++{
++	struct ath11k_nss_radio_buf_request *request = (void *)(uintptr_t)msg->cm.app_data;
++	struct nss_wifili_radio_cfg_msg *config = &msg->msg.radiocfgmsg;
++
++	(void)context;
++	if (!request || msg->cm.type != NSS_WIFILI_RADIO_BUF_CFG ||
++	    msg->cm.interface != request->if_num ||
++	    msg->cm.response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++	request->response = msg->cm.response;
++	request->error = msg->cm.error;
++	request->len = msg->cm.len;
++	request->result = -EREMOTEIO;
++	if (msg->cm.response == NSS_CMN_RESPONSE_ACK && !msg->cm.error) {
++		/* Some firmware returns a header-only ACK. That confirms command
++		 * acceptance, not a readback of the current buffer allocation.
++		 */
++		if (!msg->cm.len) {
++			request->result = 0;
++		} else if (msg->cm.len != sizeof(*config)) {
++			request->result = -EMSGSIZE;
++		} else if (config->radio_if_num != request->radio_if_num ||
++			   config->radiomsg.radiobufcfgmsg.buf_cnt != request->buf_cnt ||
++			   config->radiomsg.radiobufcfgmsg.range != request->range) {
++			request->result = -EPROTO;
++		} else {
++			request->echo_verified = true;
++			request->result = 0;
++		}
++	}
++	complete(&request->complete);
++}
++
+ static int ath11k_nss_radio_buf_cfg(struct ath11k *ar, int range, int buf_sz)
+ {
+ 	struct nss_wifili_radio_buf_cfg_msg *buf_cfg;
+ 	struct nss_wifili_radio_cfg_msg *radio_buf_cfg_msg;
+ 	struct nss_wifili_msg *wlmsg = NULL;
++	struct ath11k_nss_radio_buf_request *request;
+ 	nss_tx_status_t status;
++	u32 cookie = 0;
++	unsigned long waited = 0;
+ 	int ret = 0;
+ 
+-	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_ATOMIC);
++	request = kzalloc(sizeof(*request), GFP_KERNEL);
++	if (!request)
++		return -ENOMEM;
++	init_completion(&request->complete);
++	request->if_num = ar->ab->nss.if_num;
++	request->radio_if_num = ar->nss.if_num;
++	request->buf_cnt = buf_sz;
++	request->range = range;
++	request->result = -ETIMEDOUT;
++	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_KERNEL);
+ 	if (!wlmsg)
+-		return -ENOMEM;
++		goto free_request;
+ 
+ 	radio_buf_cfg_msg = &wlmsg->msg.radiocfgmsg;
+ 
+@@ -5307,21 +5366,29 @@
+ 
+ 	nss_cmn_msg_init(&wlmsg->cm, ar->ab->nss.if_num,
+ 			 NSS_WIFILI_RADIO_BUF_CFG,
+-			 sizeof(struct nss_wifili_radio_buf_cfg_msg),
++			 sizeof(wlmsg->msg.radiocfgmsg),
+ 			 NULL, NULL);
+-
+-	status = nss_wifili_tx_msg(ar->nss.ctx, wlmsg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss radio buf cfg send failed %d\n", status);
+-		ret = -EINVAL;
+-	} else {
+-		ath11k_dbg(ar->ab, ATH11K_DBG_NSS,
+-			   "nss radio cfg message range:%d buf_sz:%d if_num:%d ctx:%p\n",
+-			   range, buf_sz, ar->nss.if_num, ar->nss.ctx);
+-	}
+-
++	wlmsg->cm.cb = (nss_ptr_t)(uintptr_t)ath11k_nss_radio_buf_response;
++	wlmsg->cm.app_data = (nss_ptr_t)(uintptr_t)request;
++	status = nss_wifili_tx_msg_tracked(ar->nss.ctx, wlmsg, &cookie);
++	if (status == NSS_TX_SUCCESS)
++		waited = wait_for_completion_timeout(&request->complete,
++			msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	/* Drain a claimed callback before reading its report or freeing the waiter. */
++	nss_wifili_cancel_msg(cookie);
++	ret = status != NSS_TX_SUCCESS ? -EIO :
++		(waited || completion_done(&request->complete) ? request->result : -ETIMEDOUT);
++	ath11k_info(ar->ab,
++		    "NSS radio buffers if=%u range=%u count=%u payload=%zu result=%d response=%u error=%u rxlen=%u echo=%u\n",
++		    request->radio_if_num, request->range, request->buf_cnt,
++		    sizeof(wlmsg->msg.radiocfgmsg), ret, request->response,
++		    request->error, request->len, request->echo_verified);
+ 	kfree(wlmsg);
++	kfree(request);
+ 	return ret;
++free_request:
++	kfree(request);
++	return -ENOMEM;
+ }
+ 
+ static void ath11k_nss_fill_srng_info(struct ath11k_base *ab, int ring_id,
+@@ -5914,8 +5981,14 @@
+ 	 * similar to tx desc cfg at soc init per radio
+ 	 */
+ 
+-	for (i = 0; i < ATH11K_NSS_RADIO_TX_LIMIT_RANGE; i++)
+-		ath11k_nss_radio_buf_cfg(ar, i, ATH11K_NSS_RADIO_TX_LIMIT_RANGE3);
++	for (i = 0; i < ATH11K_NSS_RADIO_TX_LIMIT_RANGE; i++) {
++		ret = ath11k_nss_radio_buf_cfg(ar, i, ATH11K_NSS_RADIO_TX_LIMIT_RANGE3);
++		if (ret)
++			/* PDEV initialization already committed. Do not release its DMA
++			 * resources through the pre-init failure labels below.
++			 */
++			ath11k_warn(ab, "NSS radio buffer config unconfirmed range=%d result=%d; keeping initialized radio\n", i, ret);
++	}
+ 
+ 	return 0;
+ 

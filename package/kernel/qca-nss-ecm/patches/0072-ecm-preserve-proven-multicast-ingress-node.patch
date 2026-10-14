@@ -1,0 +1,102 @@
+Subject: [PATCH] ecm: preserve the proven multicast ingress Ethernet node
+
+An MFC source may not answer reverse ARP/ND.  Use its existing ingress
+Ethernet source only for a native default-table MFC packet on the same
+resolved interface, with a complete untagged header and valid unicast MAC.
+
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -9080,6 +9080,45 @@
+ #endif
+ 
+ #if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
++/* A native MFC packet already carries its real ingress Ethernet node.  The
++ * sender need not answer reverse ARP/ND (e.g. an isolated upstream WLAN).
++ * Never reuse an output header, a different route interface or bridge cb.
++ */
++bool ecm_interface_multicast_ingress_mac_get(struct net_device *dev,
++		struct sk_buff *skb, int interface_ifindex, bool is_v4,
++		uint8_t node_addr[ETH_ALEN])
++{
++	const struct ethhdr *eth;
++	unsigned char *mac, *tail;
++
++	if (!dev || !skb || dev->type != ARPHRD_ETHER ||
++	    dev->ifindex != interface_ifindex || skb->skb_iif != dev->ifindex ||
++	    !net_eq(dev_net(dev), &init_net) || !skb_mac_header_was_set(skb))
++		return false;
++	if (is_v4) {
++		if (!ipmr_mfc_offload_eligible(&init_net, skb))
++			return false;
++	} else {
++#ifdef ECM_IPV6_ENABLE
++		if (!ip6mr_mfc_offload_eligible(&init_net, skb))
++			return false;
++#else
++		return false;
++#endif
++	}
++	mac = skb_mac_header(skb);
++	tail = skb_tail_pointer(skb);
++	if (mac < skb->head || mac > tail || tail - mac < ETH_HLEN ||
++	    skb_network_header(skb) != mac + ETH_HLEN)
++		return false;
++	eth = (const struct ethhdr *)mac;
++	if (eth->h_proto != htons(is_v4 ? ETH_P_IP : ETH_P_IPV6) ||
++	    !is_valid_ether_addr(eth->h_source))
++		return false;
++	ether_addr_copy(node_addr, eth->h_source);
++	return true;
++}
++
+ /*
+  * The bridge owns its MDB, source filters and multicast lock.  Obtain one
+  * complete public snapshot instead of walking private bridge structures.
+--- a/ecm_interface.h
++++ b/ecm_interface.h
+@@ -120,6 +120,9 @@
+ 					unsigned long request, u64 *route_cookie);
+ 
+ #ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++bool ecm_interface_multicast_ingress_mac_get(struct net_device *dev,
++		struct sk_buff *skb, int interface_ifindex, bool is_v4,
++		uint8_t node_addr[ETH_ALEN]);
+ int ecm_interface_linux_mcs_bridge_get_if(struct net_device *brdev, ip_addr_t origin, ip_addr_t group, uint32_t max_dst, uint32_t *dst_dev, bool is_v4);
+ #endif
+ 
+--- a/frontends/cmn/ecm_multicast_ipv4.c
++++ b/frontends/cmn/ecm_multicast_ipv4.c
+@@ -430,6 +430,15 @@
+ 		case ECM_DB_IFACE_TYPE_OVS_BRIDGE:
+ #endif
+ 			if (!ecm_interface_mac_addr_get(addr, node_addr, &on_link, gw_addr, skb->mark)) {
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++				if (type == ECM_DB_IFACE_TYPE_ETHERNET &&
++				    ecm_interface_multicast_ingress_mac_get(dev, skb,
++					    ecm_db_iface_interface_identifier_get(interface_list[i]),
++					    true, node_addr)) {
++					done = true;
++					break;
++				}
++#endif
+ 				DEBUG_TRACE("failed to obtain node address for host " ECM_IP_ADDR_DOT_FMT "\n", ECM_IP_ADDR_TO_DOT(addr));
+ 				ecm_interface_send_arp_request(dev, addr, on_link, gw_addr);
+ 
+--- a/frontends/cmn/ecm_multicast_ipv6.c
++++ b/frontends/cmn/ecm_multicast_ipv6.c
+@@ -390,6 +390,15 @@
+ 		case ECM_DB_IFACE_TYPE_OVS_BRIDGE:
+ #endif
+ 			if (!ecm_interface_mac_addr_get(addr, node_addr, &on_link, gw_addr, skb->mark)) {
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++				if (type == ECM_DB_IFACE_TYPE_ETHERNET &&
++				    ecm_interface_multicast_ingress_mac_get(dev, skb,
++					    ecm_db_iface_interface_identifier_get(interface_list[i]),
++					    false, node_addr)) {
++					done = true;
++					break;
++				}
++#endif
+ 				DEBUG_TRACE("Failed to obtain mac for host " ECM_IP_ADDR_OCTAL_FMT "\n", ECM_IP_ADDR_TO_OCTAL(addr));
+ 
+ 				/*

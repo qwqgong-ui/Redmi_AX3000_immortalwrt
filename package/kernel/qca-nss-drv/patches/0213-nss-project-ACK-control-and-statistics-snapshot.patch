@@ -1,0 +1,525 @@
+Subject: [PATCH] nss: validate and acknowledge worker statistics control
+
+--- a/nss_control.h
++++ b/nss_control.h
+@@ -5,6 +5,7 @@
+ enum nss_control_family {
+ 	NSS_CONTROL_DYNAMIC,
+ 	NSS_CONTROL_WIFI_VDEV,
++	NSS_CONTROL_PROJECT,
+ 	NSS_CONTROL_FAMILY_MAX,
+ };
+ 
+--- a/exports/nss_project.h
++++ b/exports/nss_project.h
+@@ -37,6 +37,18 @@
+   */
+ #define NSS_PROJECT_IRQS_PER_MESSAGE 32
+ 
++/* UBI32 has 12 contexts and a 128-entry IRQ number space. The MP12.2
++ * PROJECT ACK reports these bounds; active callbacks occupy fewer slots.
++ */
++#define NSS_PROJECT_MAX_WORKER_THREADS 12
++#define NSS_PROJECT_MAX_IRQS 128
++
++static inline bool nss_project_wt_counts_valid(uint32_t threads, uint32_t irqs)
++{
++	return threads && threads <= NSS_PROJECT_MAX_WORKER_THREADS &&
++	       irqs && irqs <= NSS_PROJECT_MAX_IRQS;
++}
++
+ /**
+  *  Maximum possible value of priority after classification
+  *  at an ingress interface.
+--- a/nss_project.c
++++ b/nss_project.c
+@@ -22,8 +22,23 @@
+  *	NSS project APIs.
+  */
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ 
+ static int nss_project_wt_stats_enable;
++static int nss_project_wt_state[NSS_CORE_MAX];
++static DEFINE_MUTEX(nss_project_wt_mutex);
++static int nss_project_zero;
++static int nss_project_one = 1;
++
++struct nss_project_wt_request {
++	struct completion complete;
++	bool enable;
++	int result;
++	uint32_t threads;
++	uint32_t irqs;
++};
++
++#define NSS_PROJECT_WT_TIMEOUT 1000
+ static uint8_t nss_project_pri_mq_map[NSS_PROJECT_PRI_MQ_MAP_MAX_SIZE] = {0, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3};
+ module_param_array(nss_project_pri_mq_map, byte, NULL, 0);
+ MODULE_PARM_DESC(nss_project_pri_mq_map, "Priority to multi-queue mapping");
+@@ -55,14 +70,17 @@
+ 	struct nss_worker_thread_stats *wt_stats;
+ 	int i;
+ 
+-	wt_stats = kzalloc(thread_count * sizeof(struct nss_worker_thread_stats), GFP_ATOMIC);
++	if (!nss_project_wt_counts_valid(thread_count, irq_count))
++		return NULL;
++
++	wt_stats = kcalloc(thread_count, sizeof(*wt_stats), GFP_KERNEL);
+ 	if (unlikely(!wt_stats)) {
+ 		return NULL;
+ 	}
+ 
+ 	for (i = 0; i < thread_count; i++) {
+ 		wt_stats[i].irq_stats =
+-			kzalloc(irq_count * sizeof(struct nss_project_irq_stats), GFP_ATOMIC);
++			kcalloc(irq_count, sizeof(struct nss_project_irq_stats), GFP_KERNEL);
+ 		if (unlikely(!wt_stats[i].irq_stats)) {
+ 			nss_project_free_wt_stats(wt_stats, i);
+ 			return NULL;
+@@ -78,52 +96,43 @@
+  */
+ static void nss_project_wt_stats_enable_callback(void *app_data, struct nss_project_msg *msg)
+ {
+-	struct nss_ctx_instance *nss_ctx = (struct nss_ctx_instance *)app_data;
++	struct nss_project_wt_request *request = app_data;
+ 	struct nss_project_msg_wt_stats_enable *stats_enable = &msg->msg.wt_stats_enable;
+-	struct nss_worker_thread_stats *stats_temp;
+-
+-	NSS_VERIFY_CTX_MAGIC(nss_ctx);
+-	if (msg->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		return;
+-	}
+-
+-	nss_info("%px: Received response ACK for worker thread stats enable msg.\n", nss_ctx);
+ 
+-	/*
+-	 * If statistics have already been allocated, nothing else to do.
+-	 */
+-	if (nss_ctx->wt_stats) {
+-		return;
+-	}
+-
+-	stats_temp = nss_project_alloc_wt_stats(stats_enable->worker_thread_count,
+-						stats_enable->irq_count);
+-	if (unlikely(!stats_temp)) {
+-		nss_warning("%px: Unable to allocate worker thread statistics.\n", nss_ctx);
+-		return;
++	request->result = -EIO;
++	if (msg->cm.response == NSS_CMN_RESPONSE_ACK && !msg->cm.error) {
++		request->result = -EPROTO;
++		if (msg->cm.len == sizeof(*stats_enable) &&
++		    stats_enable->enable == request->enable &&
++		    nss_project_wt_counts_valid(stats_enable->worker_thread_count,
++					       stats_enable->irq_count)) {
++			request->threads = stats_enable->worker_thread_count;
++			request->irqs = stats_enable->irq_count;
++			request->result = 0;
++		}
+ 	}
+-
+-	spin_lock_bh(&nss_ctx->nss_top->stats_lock);
+-	nss_ctx->wt_stats = stats_temp;
+-	nss_ctx->worker_thread_count = stats_enable->worker_thread_count;
+-	nss_ctx->irq_count = stats_enable->irq_count;
+-	spin_unlock_bh(&nss_ctx->nss_top->stats_lock);
++	complete(&request->complete);
+ }
+ 
+ /*
+  * nss_project_wt_stats_send_enable()
+  *	Sends message to firmware to enable or disable worker_thread statistics collection.
+  */
+-static nss_tx_status_t nss_project_wt_stats_send_enable(struct nss_ctx_instance *nss_ctx, bool enable)
++static int nss_project_wt_stats_send_enable(struct nss_ctx_instance *nss_ctx, bool enable)
+ {
+ 	struct nss_project_msg *npm;
+ 	struct nss_cmn_msg *ncm;
+-	nss_tx_status_t ret;
++	struct nss_project_wt_request request = { .enable = enable, .result = -ETIMEDOUT };
++	struct nss_worker_thread_stats *stats = NULL, *old;
++	uint32_t cookie, old_threads;
++	nss_tx_status_t status;
++	unsigned long waited;
++	int ret;
+ 
+ 	npm = kzalloc(sizeof(*npm), GFP_KERNEL);
+ 	if (!npm) {
+ 		nss_warning("%px: Failed to allocate buffer for message\n", nss_ctx);
+-		return NSS_TX_FAILURE;
++		return -ENOMEM;
+ 	}
+ 
+ 	/*
+@@ -134,12 +143,47 @@
+ 		NSS_PROJECT_MSG_WT_STATS_ENABLE,
+ 		sizeof(struct nss_project_msg_wt_stats_enable),
+ 		(void *)nss_project_wt_stats_enable_callback,
+-		(void *)nss_ctx);
++		(void *)&request);
+ 	npm->msg.wt_stats_enable.enable = enable;
+ 
+-	ret = nss_core_send_cmd(nss_ctx, npm, sizeof(*npm), NSS_NBUF_PAYLOAD_SIZE);
++	init_completion(&request.complete);
++	status = nss_control_send(nss_ctx, npm, sizeof(*npm), NSS_NBUF_PAYLOAD_SIZE,
++				  NSS_CONTROL_PROJECT, &cookie);
+ 	kfree(npm);
+-	return ret;
++	if (status != NSS_TX_SUCCESS)
++		return -EIO;
++
++	waited = wait_for_completion_timeout(&request.complete,
++					     msecs_to_jiffies(NSS_PROJECT_WT_TIMEOUT));
++	/* A callback already claimed by RX owns request until cancel drains it.
++	 * Accept an ACK at the timeout boundary, never a late reply to a new request.
++	 */
++	nss_control_cancel(cookie);
++	ret = !waited && !completion_done(&request.complete) ? -ETIMEDOUT : request.result;
++	if (ret)
++		return ret;
++
++	if (enable) {
++		stats = nss_project_alloc_wt_stats(request.threads, request.irqs);
++		if (!stats)
++			return -ENOMEM;
++	}
++
++	spin_lock_bh(&nss_top_main.stats_lock);
++	nss_project_wt_state[nss_ctx->id] = enable;
++	if (enable) {
++		old = nss_ctx->wt_stats;
++		old_threads = nss_ctx->worker_thread_count;
++		nss_ctx->wt_stats = stats;
++		nss_ctx->worker_thread_count = request.threads;
++		nss_ctx->irq_count = request.irqs;
++	} else {
++		old = NULL;
++		old_threads = 0;
++	}
++	spin_unlock_bh(&nss_top_main.stats_lock);
++	nss_project_free_wt_stats(old, old_threads);
++	return 0;
+ }
+ 
+ /*
+@@ -152,31 +196,22 @@
+ 	struct nss_worker_thread_stats *wt_stats;
+ 	int i;
+ 
+-	if (unlikely(!nss_ctx->wt_stats)) {
+-		nss_warning("%px: Worker thread statistics not yet allocated.\n", nss_ctx);
+-		return;
+-	}
+-
+-	if (unlikely(stats_notify->threadno >= nss_ctx->worker_thread_count)) {
+-		nss_warning("%px: Invalid WT number %d\n", nss_ctx, stats_notify->threadno);
+-		return;
+-	}
+-
+ 	if (unlikely(stats_notify->stats_written > NSS_PROJECT_IRQS_PER_MESSAGE)) {
+ 		nss_warning("%px: Invalid worker thread stats written count %d\n",
+ 				nss_ctx, stats_notify->stats_written);
+ 		return;
+ 	}
+ 
+-	wt_stats = &(nss_ctx->wt_stats[stats_notify->threadno]);
+-
+-	if (unlikely(!wt_stats->irq_stats)) {
+-		nss_warning("%px: Worker thread statistics not allocated for thread %d\n",
+-				nss_ctx, stats_notify->threadno);
++	spin_lock_bh(&nss_top_main.stats_lock);
++	/* Disable ACK clears the collection flag, but an older N2H notification
++	 * may still arrive. Ignore it without changing the retained final snapshot.
++	 */
++	if (nss_project_wt_state[nss_ctx->id] != 1 || !nss_ctx->wt_stats ||
++	    stats_notify->threadno >= nss_ctx->worker_thread_count) {
++		spin_unlock_bh(&nss_top_main.stats_lock);
+ 		return;
+ 	}
+-
+-	spin_lock_bh(&nss_ctx->nss_top->stats_lock);
++	wt_stats = &nss_ctx->wt_stats[stats_notify->threadno];
+ 	for (i = 0; i < stats_notify->stats_written; ++i) {
+ 		int irq = stats_notify->stats[i].irq;
+ 		if (unlikely(irq >= nss_ctx->irq_count)) {
+@@ -186,7 +221,7 @@
+ 
+ 		wt_stats->irq_stats[irq] = stats_notify->stats[i];
+ 	}
+-	spin_unlock_bh(&nss_ctx->nss_top->stats_lock);
++	spin_unlock_bh(&nss_top_main.stats_lock);
+ }
+ 
+ /*
+@@ -197,35 +232,37 @@
+ 	struct nss_cmn_msg *ncm, __attribute__((unused))void *app_data)
+ {
+ 	struct nss_project_msg *npm = (struct nss_project_msg *)ncm;
+-	nss_project_msg_callback_t cb;
++	uint32_t len = ncm->len;
++	uint32_t base = offsetof(struct nss_project_msg_wt_stats_notify, stats);
+ 
+ 	/*
+ 	 * Sanity checks on message
+ 	 */
+-	if (npm->cm.type >= NSS_PROJECT_MSG_MAX) {
++	if (nss_ctx->id >= NSS_CORE_MAX || npm->cm.interface != NSS_PROJECT_INTERFACE ||
++	    npm->cm.type >= NSS_PROJECT_MSG_MAX) {
+ 		nss_warning("%px: message type out of range: %d\n", nss_ctx, npm->cm.type);
+ 		return;
+ 	}
+ 
+-	if (nss_cmn_get_msg_len(&(npm->cm)) > sizeof(struct nss_project_msg)) {
++	if (len > sizeof(npm->msg)) {
+ 		nss_warning("%px: message length is invalid: %d\n", nss_ctx, nss_cmn_get_msg_len(&(npm->cm)));
+ 		return;
+ 	}
+ 
+ 	switch (npm->cm.type) {
+ 	case NSS_PROJECT_MSG_WT_STATS_NOTIFY:
++		if (ncm->response != NSS_CMN_RESPONSE_NOTIFY || len < base ||
++		    npm->msg.wt_stats_notify.stats_written > NSS_PROJECT_IRQS_PER_MESSAGE ||
++		    len < base + npm->msg.wt_stats_notify.stats_written *
++				 sizeof(struct nss_project_irq_stats))
++			return;
+ 		nss_project_wt_stats_update(nss_ctx, &(npm->msg.wt_stats_notify));
+ 		return;
+ 	}
+ 
+ 	nss_core_log_msg_failures(nss_ctx, ncm);
+ 
+-	if (!ncm->cb) {
+-		return;
+-	}
+-
+-	cb = (nss_project_msg_callback_t)ncm->cb;
+-	cb((void *)nss_ctx, npm);
++	nss_control_receive(nss_ctx, ncm, NSS_CONTROL_PROJECT, NULL);
+ }
+ 
+ /*
+@@ -238,35 +275,58 @@
+ static int nss_project_wt_stats_handler(compat_const struct ctl_table *ctl, int write,
+ 	void __user *buffer, size_t *lenp, loff_t *ppos)
+ {
+-	int ret;
+-	int i;
+-
+-	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
+-
+-	/*
+-	 * In case of error, stop now.
+-	 */
+-	if (ret) {
+-		return ret;
+-	}
++	struct ctl_table local = *ctl;
++	int requested, ret = 0, first_error = 0, i;
+ 
+-	/*
+-	 * No additional behavior necessary for a read operation.
+-	 */
++	mutex_lock(&nss_project_wt_mutex);
+ 	if (!write) {
+-		return ret;
++		ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
++		goto unlock;
+ 	}
+-
+-	/*
+-	 * If a value was written, send a message containing that value to each
+-	 * NSS core.
+-	 */
+-	for (i = 0; i < nss_top_main.num_nss; ++i) {
+-		nss_project_wt_stats_send_enable(&(nss_top_main.nss[i]),
+-			nss_project_wt_stats_enable);
++	requested = nss_project_wt_stats_enable;
++	local.data = &requested;
++	ret = proc_dointvec_minmax(&local, write, buffer, lenp, ppos);
++	if (ret)
++		goto unlock;
++	if (!nss_top_main.num_nss) {
++		ret = -ENODEV;
++		goto unlock;
+ 	}
++	for (i = 0; i < nss_top_main.num_nss; i++) {
++		if (requested && nss_project_wt_state[i] == 1)
++			continue;
++		spin_lock_bh(&nss_top_main.stats_lock);
++		nss_project_wt_state[i] = -1;
++		spin_unlock_bh(&nss_top_main.stats_lock);
++		ret = nss_project_wt_stats_send_enable(&nss_top_main.nss[i], requested);
++		if (ret && !first_error)
++			first_error = ret;
++		/* Still try every core when disabling, including after a timeout. */
++		if (ret && requested)
++			break;
++	}
++	if (first_error && requested) {
++		/* A timeout or allocation failure can follow firmware accepting ENABLE.
++		 * Explicitly disable every core, including the failed one, to converge.
++		 */
++		for (i = 0; i < nss_top_main.num_nss; i++) {
++			spin_lock_bh(&nss_top_main.stats_lock);
++			nss_project_wt_state[i] = -1;
++			spin_unlock_bh(&nss_top_main.stats_lock);
++			nss_project_wt_stats_send_enable(&nss_top_main.nss[i], false);
++		}
++	}
++	/* -1 reports a mixed or unconfirmed state. Never publish a requested
++	 * integer as proof of firmware completion.
++	 */
++	nss_project_wt_stats_enable = nss_project_wt_state[0];
++	for (i = 1; i < nss_top_main.num_nss; i++)
++		if (nss_project_wt_state[i] != nss_project_wt_stats_enable)
++			nss_project_wt_stats_enable = -1;
++	ret = first_error;
++unlock:
++	mutex_unlock(&nss_project_wt_mutex);
+ 	return ret;
+-
+ }
+ 
+ /*
+@@ -332,6 +392,8 @@
+ 		.maxlen			= sizeof(int),
+ 		.mode			= 0644,
+ 		.proc_handler		= &nss_project_wt_stats_handler,
++		.extra1			= &nss_project_zero,
++		.extra2			= &nss_project_one,
+ 	}
+ };
+ 
+@@ -385,9 +447,30 @@
+  */
+ void nss_project_unregister_sysctl(void)
+ {
++	struct nss_worker_thread_stats *stats;
++	uint32_t threads;
++	int i;
++
+ 	if (nss_project_header) {
+ 		unregister_sysctl_table(nss_project_header);
++		nss_project_header = NULL;
++	}
++	mutex_lock(&nss_project_wt_mutex);
++	for (i = 0; i < nss_top_main.num_nss; i++) {
++		struct nss_ctx_instance *ctx = &nss_top_main.nss[i];
++
++		nss_control_close(ctx, NSS_CONTROL_PROJECT, NSS_PROJECT_INTERFACE);
++		spin_lock_bh(&nss_top_main.stats_lock);
++		nss_project_wt_state[i] = -1;
++		stats = ctx->wt_stats;
++		threads = ctx->worker_thread_count;
++		ctx->wt_stats = NULL;
++		ctx->worker_thread_count = ctx->irq_count = 0;
++		spin_unlock_bh(&nss_top_main.stats_lock);
++		/* NOTIFY only accesses the table while holding the same lock. */
++		nss_project_free_wt_stats(stats, threads);
+ 	}
++	mutex_unlock(&nss_project_wt_mutex);
+ }
+ 
+ /*
+@@ -396,5 +479,9 @@
+  */
+ void nss_project_register_handler(struct nss_ctx_instance *nss_ctx)
+ {
+-	nss_core_register_handler(nss_ctx, NSS_PROJECT_INTERFACE, nss_project_msg_handler, NULL);
++	if (nss_core_register_handler(nss_ctx, NSS_PROJECT_INTERFACE,
++				      nss_project_msg_handler, NULL) != NSS_CORE_STATUS_SUCCESS)
++		return;
++	if (!nss_control_open(nss_ctx, NSS_CONTROL_PROJECT, NSS_PROJECT_INTERFACE))
++		nss_core_unregister_handler(nss_ctx, NSS_PROJECT_INTERFACE);
+ }
+--- a/nss_drv_stats.c
++++ b/nss_drv_stats.c
+@@ -124,39 +124,37 @@
+ 	struct nss_stats_data *data = fp->private_data;
+ 	struct nss_ctx_instance *nss_ctx = data->nss_ctx;
+ 	struct nss_project_irq_stats *shadow;
+-	uint32_t thread_count = nss_ctx->worker_thread_count;
+-	uint32_t irq_count = nss_ctx->irq_count;
+-
+-	/*
+-	 * Three lines for each IRQ
+-	 */
+-	uint32_t max_output_lines = thread_count * 3 * irq_count;
+-	size_t size_al = max_output_lines * NSS_STATS_MAX_STR_LENGTH;
++	struct nss_worker_thread_stats *table;
++	uint32_t thread_count, irq_count, active = 0;
++	size_t size_al;
+ 	size_t size_wr = 0;
+ 	ssize_t bytes_read = 0;
+ 	char *lbuf;
+ 	int i;
+ 	int j;
+ 
+-	lbuf = kzalloc(size_al, GFP_KERNEL);
+-	if (unlikely(!lbuf)) {
+-		nss_warning("Could not allocate memory for local statistics buffer\n");
++	/* The first ENABLE ACK can publish the table while this read starts.
++	 * Snapshot pointer and geometry together before any size calculation.
++	 */
++	spin_lock_bh(&nss_top_main.stats_lock);
++	table = nss_ctx->wt_stats;
++	thread_count = nss_ctx->worker_thread_count;
++	irq_count = nss_ctx->irq_count;
++	spin_unlock_bh(&nss_top_main.stats_lock);
++	if (!table || !nss_project_wt_counts_valid(thread_count, irq_count))
+ 		return 0;
+-	}
+ 
+-	shadow = kzalloc(thread_count * irq_count * sizeof(struct nss_project_irq_stats), GFP_KERNEL);
++	shadow = kvcalloc(thread_count * irq_count, sizeof(*shadow), GFP_KERNEL);
+ 	if (unlikely(!shadow)) {
+ 		nss_warning("Could not allocate memory for stats shadow\n");
+-		kfree(lbuf);
+ 		return 0;
+ 	}
+ 
+ 	spin_lock_bh(&nss_top_main.stats_lock);
+-	if (unlikely(!nss_ctx->wt_stats)) {
++	if (table != nss_ctx->wt_stats || thread_count != nss_ctx->worker_thread_count ||
++	    irq_count != nss_ctx->irq_count) {
+ 		spin_unlock_bh(&nss_top_main.stats_lock);
+-		nss_warning("Worker thread statistics not allocated\n");
+-		kfree(lbuf);
+-		kfree(shadow);
++		kvfree(shadow);
+ 		return 0;
+ 	}
+ 	for (i = 0; i < thread_count; ++i) {
+@@ -173,6 +171,19 @@
+ 	}
+ 	spin_unlock_bh(&nss_top_main.stats_lock);
+ 
++	for (i = 0; i < thread_count * irq_count; i++)
++		if (shadow[i].count)
++			active++;
++	/* Reserve banner space even when all counters are zero. Size only active
++	 * IRQs, rather than allocating a large contiguous text buffer for 1536 slots.
++	 */
++	size_al = (active * 3 + 8) * NSS_STATS_MAX_STR_LENGTH;
++	lbuf = kvzalloc(size_al, GFP_KERNEL);
++	if (!lbuf) {
++		kvfree(shadow);
++		return 0;
++	}
++
+ 	size_wr += nss_stats_banner(lbuf, size_wr, size_al, "worker thread", NSS_STATS_SINGLE_CORE);
+ 	for (i = 0; i < thread_count; ++i) {
+ 		for (j = 0; j < irq_count; ++j) {
+@@ -192,9 +203,9 @@
+ 				i, j, is->insn_min, is->insn_avg, is->insn_max);
+ 		}
+ 	}
+-	bytes_read = simple_read_from_buffer(ubuf, sz, ppos, lbuf, strlen(lbuf));
+-	kfree(lbuf);
+-	kfree(shadow);
++	bytes_read = simple_read_from_buffer(ubuf, sz, ppos, lbuf, size_wr);
++	kvfree(lbuf);
++	kvfree(shadow);
+ 
+ 	return bytes_read;
+ }

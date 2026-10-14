@@ -10,10 +10,10 @@
         "n"
       ],
       "depends_on": [
-        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx"
+        "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx || TARGET_qualcommax_ipq50xx"
       ],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 39
     },
     {
@@ -122,7 +122,7 @@
       ],
       "depends_on": [],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 90
     },
     {
@@ -144,7 +144,7 @@
       ],
       "depends_on": [],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 100
     },
     {
@@ -155,7 +155,7 @@
       ],
       "depends_on": [],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 105
     },
     {
@@ -168,7 +168,7 @@
         "NSS_DRV_IPV6_ENABLE"
       ],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 110
     },
     {
@@ -273,7 +273,7 @@
       ],
       "depends_on": [],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 159
     },
     {
@@ -347,7 +347,7 @@
       ],
       "depends_on": [],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 200
     },
     {
@@ -467,7 +467,7 @@
         "TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx || TARGET_qualcommax_ipq50xx"
       ],
       "selects": [],
-      "profile_value": null,
+      "profile_value": "y",
       "source_line": 254
     },
     {

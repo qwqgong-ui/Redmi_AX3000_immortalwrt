@@ -1,0 +1,36 @@
+Subject: [PATCH] nss: expose lockless physical readiness for packet gates
+
+The process-context ownership API requires RTNL. Packet processing instead
+reads the static registration table and never dereferences a removable context.
+
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -378,6 +378,20 @@
+     return NSS_DATA_PLANE_HOST;
+ }
+ EXPORT_SYMBOL_GPL(nss_data_plane_state);
++
++bool nss_data_plane_is_ready(struct net_device *dev)
++{
++    int i;
++
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++        struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++        if (READ_ONCE(p->dpc.dev) == dev)
++            return READ_ONCE(p->attached) && READ_ONCE(p->notify_open);
++    }
++    return false;
++}
++EXPORT_SYMBOL_GPL(nss_data_plane_is_ready);
+ 
+ /*
+  * __nss_data_plane_register()
+--- a/exports/nss_data_plane_api.h
++++ b/exports/nss_data_plane_api.h
+@@ -15,3 +15,5 @@
+ int nss_data_plane_detach(struct net_device *dev);
+ int nss_data_plane_state(struct net_device *dev);
++/* Caller owns a live netdev reference; usable from softirq/RCU. */
++bool nss_data_plane_is_ready(struct net_device *dev);
+ #endif

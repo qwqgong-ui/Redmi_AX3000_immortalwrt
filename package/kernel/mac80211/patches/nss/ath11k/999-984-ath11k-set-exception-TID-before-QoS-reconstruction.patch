@@ -1,0 +1,35 @@
+Subject: [PATCH] ath11k: set exception TID before reconstructing QoS headers
+
+NSS MCBC exceptions bypass REO and therefore have no REO-populated rxcb TID.
+Read it from the packet descriptor before undecapsulation, so mac80211 uses
+the original QoS TID for duplicate and CCMP/GCMP replay checks. Both normal
+and mesh NSS MCBC delivery use this entry point.
+
+The host NULL queue descriptor path has the same ordering problem: it sets
+TID only after MPDU processing has already reconstructed the QoS header.
+Move that assignment before processing without weakening PN validation.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -3463,6 +3463,9 @@
+ 	bool fast_rx = false;
+ 
+ 	rxcb = ATH11K_SKB_RXCB(msdu);
+ 
++	/* This exception bypasses REO's population of the receive TID. */
++	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, rxcb->rx_desc);
++
+ 	ath11k_dp_rx_h_ppdu(ar, rxcb->rx_desc, &rx_status);
+ 	ath11k_dp_rx_h_mpdu(ar, msdu, rxcb->rx_desc, &rx_status, &fast_rx, true);
+@@ -5061,10 +5064,9 @@
+ 	}
+ 	ath11k_dp_rx_h_ppdu(ar, desc, status);
+ 
++	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, desc);
+ 	fast_rx = false;
+ 	ath11k_dp_rx_h_mpdu(ar, msdu, desc, status, &fast_rx, false);
+ 
+-	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, desc);
+-
+ 	/* Please note that caller will having the access to msdu and completing
+ 	 * rx with mac80211. Need not worry about cleaning up amsdu_list.

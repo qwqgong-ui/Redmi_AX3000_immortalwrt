@@ -1,0 +1,290 @@
+Subject: [PATCH] ath11k: observe REO queue update execution without callback ownership
+
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -292,6 +292,42 @@
+ 	struct ath11k_base *ab;
+ };
+ 
++/* Numeric diagnostics only: no queue/peer references or callback ownership. */
++struct ath11k_reo_update_stats {
++	u64 epoch;
++	u64 requested;
++	u64 queued;
++	u64 rejected;
++	u64 status_requested;
++	u64 ba_queued;
++	u64 ssn_queued;
++	u64 pn_queued;
++	u64 status[4];
++	u64 status_unknown;
++	u64 last_paddr;
++	u32 last_flags;
++	u32 last_upd0;
++	u32 last_window;
++	u16 last_ssn;
++	u16 last_cmd;
++	int last_errno;
++	u64 last_ba_paddr;
++	u16 last_ba_cmd;
++	u32 last_ba_window;
++	u16 last_ba_ssn;
++	u16 last_status_cmd;
++	u32 last_status;
++	u32 last_timestamp;
++};
++
++struct ath11k_reo_update_input {
++	u64 paddr;
++	u32 flags;
++	u32 upd0;
++	u32 window;
++	u16 ssn;
++};
++
+ struct ath11k_dp {
+ 	struct ath11k_base *ab;
+ 	enum ath11k_htc_ep_id eid;
+@@ -322,6 +358,8 @@
+ 	 * - reo_cmd_cache_flush_count
+ 	 */
+ 	spinlock_t reo_cmd_lock;
++	spinlock_t reo_stats_lock;
++	struct ath11k_reo_update_stats reo_update_stats;
+ 	struct list_head reo_cmd_update_rx_queue_list;
+ 	/**
+ 	 * protects access to below field,
+@@ -332,6 +370,90 @@
+ 	struct ath11k_hp_update_timer tx_ring_timer[DP_TCL_NUM_RING_MAX];
+ };
+ 
++static inline struct ath11k_reo_update_input
++ath11k_dp_reo_update_input(const struct ath11k_hal_reo_cmd *cmd)
++{
++	/* HAL normalizes window=1 and PN sizes in place. Retain requested values. */
++	return (struct ath11k_reo_update_input) {
++		.paddr = ((u64)cmd->addr_hi << 32) | cmd->addr_lo,
++		.flags = cmd->flag,
++		.upd0 = cmd->upd0,
++		.window = cmd->ba_window_size,
++		.ssn = FIELD_GET(HAL_REO_CMD_UPD2_SSN, cmd->upd2),
++	};
++}
++
++static inline void ath11k_dp_reo_update_record(struct ath11k_dp *dp,
++		const struct ath11k_reo_update_input *input, int cmd_num)
++{
++	struct ath11k_reo_update_stats *stats = &dp->reo_update_stats;
++
++	spin_lock_bh(&dp->reo_stats_lock);
++	stats->requested++;
++	stats->last_paddr = input->paddr;
++	stats->last_flags = input->flags;
++	stats->last_upd0 = input->upd0;
++	stats->last_window = input->window;
++	stats->last_ssn = input->ssn;
++	stats->last_cmd = cmd_num > 0 ? cmd_num : 0;
++	stats->last_errno = cmd_num > 0 ? 0 : cmd_num < 0 ? cmd_num : -EINVAL;
++	if (cmd_num > 0) {
++		stats->queued++;
++		if (input->flags & HAL_REO_CMD_FLG_NEED_STATUS)
++			stats->status_requested++;
++		if (input->upd0 & HAL_REO_CMD_UPD0_BA_WINDOW_SIZE) {
++			stats->ba_queued++;
++			stats->last_ba_paddr = input->paddr;
++			stats->last_ba_cmd = cmd_num;
++			stats->last_ba_window = input->window;
++			stats->last_ba_ssn = input->ssn;
++		}
++		if (input->upd0 & HAL_REO_CMD_UPD0_SSN)
++			stats->ssn_queued++;
++		if (input->upd0 & (HAL_REO_CMD_UPD0_PN_CHECK | HAL_REO_CMD_UPD0_PN))
++			stats->pn_queued++;
++	} else {
++		stats->rejected++;
++	}
++	spin_unlock_bh(&dp->reo_stats_lock);
++}
++
++static inline void ath11k_dp_reo_update_status(struct ath11k_dp *dp,
++		const struct hal_reo_status_header *header)
++{
++	struct ath11k_reo_update_stats *stats = &dp->reo_update_stats;
++	u32 status = header->cmd_status;
++
++	spin_lock_bh(&dp->reo_stats_lock);
++	if (status < ARRAY_SIZE(stats->status))
++		stats->status[status]++;
++	else
++		stats->status_unknown++;
++	stats->last_status_cmd = header->cmd_num;
++	stats->last_status = status;
++	stats->last_timestamp = header->timestamp;
++	spin_unlock_bh(&dp->reo_stats_lock);
++}
++
++static inline void ath11k_dp_reo_update_snapshot(struct ath11k_dp *dp,
++		struct ath11k_reo_update_stats *snapshot)
++{
++	spin_lock_bh(&dp->reo_stats_lock);
++	*snapshot = dp->reo_update_stats;
++	spin_unlock_bh(&dp->reo_stats_lock);
++}
++
++static inline void ath11k_dp_reo_update_reset(struct ath11k_dp *dp)
++{
++	u64 epoch;
++
++	spin_lock_bh(&dp->reo_stats_lock);
++	epoch = dp->reo_update_stats.epoch + 1;
++	memset(&dp->reo_update_stats, 0, sizeof(dp->reo_update_stats));
++	dp->reo_update_stats.epoch = epoch;
++	spin_unlock_bh(&dp->reo_stats_lock);
++}
++
+ /* HTT definitions */
+ 
+ #define HTT_TCL_META_DATA_TYPE			BIT(0)
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2926,6 +2926,8 @@
+ 	mutex_init(&ab->qmi.mem_lock);
+ 	mutex_init(&ab->base_ast_lock);
+ 	spin_lock_init(&ab->base_lock);
++	/* SOC debugfs precedes dp_alloc; reads must have an initialized lock. */
++	spin_lock_init(&ab->dp.reo_stats_lock);
+ 	INIT_LIST_HEAD(&ab->nss.retained_host_peers);
+ 	mutex_init(&ab->vdev_id_11d_lock);
+ 	init_completion(&ab->reset_complete);
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -1127,6 +1127,7 @@
+ 		return -ESHUTDOWN;
+ 
+ 	dp->ab = ab;
++	ath11k_dp_reo_update_reset(dp);
+ 
+ 	INIT_LIST_HEAD(&dp->reo_cmd_list);
+ 	INIT_LIST_HEAD(&dp->reo_cmd_cache_flush_list);
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -937,13 +937,22 @@
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	struct dp_reo_cmd *dp_cmd;
+ 	struct hal_srng *cmd_ring;
++	struct ath11k_reo_update_input input = {};
++	bool observe = type == HAL_REO_CMD_UPDATE_RX_QUEUE;
+ 	int cmd_num;
+ 
+-	if (test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
++	if (observe)
++		input = ath11k_dp_reo_update_input(cmd);
++	if (test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags)) {
++		if (observe)
++			ath11k_dp_reo_update_record(dp, &input, -ESHUTDOWN);
+ 		return -ESHUTDOWN;
++	}
+ 
+ 	cmd_ring = &ab->hal.srng_list[dp->reo_cmd_ring.ring_id];
+ 	cmd_num = ath11k_hal_reo_cmd_send(ab, cmd_ring, type, cmd);
++	if (observe)
++		ath11k_dp_reo_update_record(dp, &input, cmd_num);
+ 
+ 	/* cmd_num should start from 1, during failure return the error code */
+ 	if (cmd_num < 0)
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -5451,7 +5451,8 @@
+ 			break;
+ 		case HAL_REO_UPDATE_RX_REO_QUEUE_STATUS:
+ 			ath11k_hal_reo_update_rx_reo_queue_status(ab, reo_desc,
+-								  &reo_status);
++							  &reo_status);
++			ath11k_dp_reo_update_status(dp, &reo_status.uniform_hdr);
+ 			break;
+ 		default:
+ 			ath11k_warn(ab, "Unknown reo status type %d\n", tag);
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -759,6 +759,55 @@
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t ath11k_debugfs_reo_update_stats(struct file *file,
++		char __user *user_buf, size_t count, loff_t *ppos)
++{
++	struct ath11k_base *ab = file->private_data;
++	struct ath11k_reo_update_stats stats;
++	const size_t size = 2048;
++	char *buf;
++	int len = 0;
++	ssize_t ret;
++
++	buf = kzalloc(size, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	ath11k_dp_reo_update_snapshot(&ab->dp, &stats);
++	len += scnprintf(buf + len, size - len,
++		"epoch: %llu\nrequested: %llu\nqueued: %llu\nrejected: %llu\n"
++		"status_requested: %llu\nba_queued: %llu\nssn_queued: %llu\npn_queued: %llu\n",
++		stats.epoch, stats.requested, stats.queued, stats.rejected,
++		stats.status_requested, stats.ba_queued, stats.ssn_queued, stats.pn_queued);
++	len += scnprintf(buf + len, size - len,
++		"status_success: %llu\nstatus_blocked: %llu\nstatus_failed: %llu\n"
++		"status_resource_blocked: %llu\nstatus_unknown: %llu\n",
++		stats.status[0], stats.status[1], stats.status[2], stats.status[3],
++		stats.status_unknown);
++	len += scnprintf(buf + len, size - len,
++		"last_submit_cmd: %u\nlast_hal_submit_errno: %d\nlast_paddr: 0x%llx\n"
++		"last_flags: 0x%x\nlast_upd0: 0x%x\nlast_requested_window: %u\n"
++		"last_requested_ssn: %u\nlast_status_cmd: %u\nlast_status: %u\n"
++		"last_hw_timestamp: %u\n",
++		stats.last_cmd, stats.last_errno, stats.last_paddr, stats.last_flags,
++		stats.last_upd0, stats.last_window, stats.last_ssn,
++		stats.last_status_cmd, stats.last_status, stats.last_timestamp);
++	len += scnprintf(buf + len, size - len,
++		"last_ba_cmd: %u\nlast_ba_paddr: 0x%llx\n"
++		"last_ba_requested_window: %u\nlast_ba_requested_ssn: %u\n",
++		stats.last_ba_cmd, stats.last_ba_paddr, stats.last_ba_window,
++		stats.last_ba_ssn);
++	ret = simple_read_from_buffer(user_buf, count, ppos, buf, len);
++	kfree(buf);
++	return ret;
++}
++
++static const struct file_operations fops_reo_update_stats = {
++	.read = ath11k_debugfs_reo_update_stats,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ static ssize_t ath11k_write_fw_dbglog(struct file *file,
+ 				      const char __user *user_buf,
+ 				      size_t count, loff_t *ppos)
+@@ -962,6 +1011,8 @@
+ 
+ 	debugfs_create_file("soc_dp_stats", 0400, ab->debugfs_soc, ab,
+ 			    &fops_soc_dp_stats);
++	debugfs_create_file("reo_update_stats", 0400, ab->debugfs_soc, ab,
++			    &fops_reo_update_stats);
+ 
+ 	if (ab->hw_params.sram_dump.start != 0)
+ 		debugfs_create_file("sram", 0400, ab->debugfs_soc, ab,
+@@ -2086,4 +2137,3 @@
+ 	debugfs_create_file("resume_dialog", 0200, debugfs_twt,
+ 			    arvif, &ath11k_fops_twt_resume_dialog);
+ }
+-
+--- a/drivers/net/wireless/ath/ath11k/hal_rx.c
++++ b/drivers/net/wireless/ath/ath11k/hal_rx.c
+@@ -674,6 +674,9 @@
+ 	status->uniform_hdr.cmd_status =
+ 				FIELD_GET(HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS,
+ 					  desc->info0);
++	status->uniform_hdr.cmd_exe_time =
++		FIELD_GET(HAL_REO_STATUS_HDR_INFO0_EXEC_TIME, desc->info0);
++	status->uniform_hdr.timestamp = desc->timestamp;
+ }
+ 
+ u32 ath11k_hal_reo_qdesc_size(u32 ba_window_size, u8 tid)

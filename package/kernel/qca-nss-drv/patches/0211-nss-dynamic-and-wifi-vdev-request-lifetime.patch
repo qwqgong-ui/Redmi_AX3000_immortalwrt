@@ -1,0 +1,803 @@
+Subject: [PATCH] nss: own dynamic and Wi-Fi VDEV request lifetimes
+
+Bind replies to immutable core/interface/family/type/cookie identities.
+Keep client callbacks and context in the driver, revoke on timeout or
+unregistration, and drain dispatched callbacks before private waits free.
+Validate dynamic replies before changing the host allocator.
+
+--- a/Makefile
++++ b/Makefile
+@@ -12,6 +12,7 @@
+ #
+ qca-nss-drv-objs := \
+ 			nss_cmn.o \
++			nss_control.o \
+ 			nss_core.o \
+ 			nss_coredump.o \
+ 			nss_drv_stats.o \
+--- /dev/null
++++ b/nss_control.c
+@@ -0,0 +1,228 @@
++/* SPDX-License-Identifier: ISC */
++#include "nss_tx_rx_common.h"
++#include "nss_control.h"
++
++struct nss_control_request {
++	struct list_head list;
++	uint32_t cookie;
++	uint32_t core_id;
++	uint32_t if_num;
++	uint32_t type;
++	enum nss_control_family family;
++	nss_ptr_t callback;
++	nss_ptr_t app_data;
++	unsigned char original[];
++};
++
++static LIST_HEAD(nss_control_requests);
++static DEFINE_SPINLOCK(nss_control_lock);
++static atomic64_t nss_control_sequence = ATOMIC64_INIT(0);
++static bool nss_control_closing[NSS_CORE_MAX];
++static bool nss_control_registered[NSS_CONTROL_FAMILY_MAX][NSS_CORE_MAX][NSS_MAX_NET_INTERFACES];
++
++/* A reply delivered to another subsystem after interface reuse must not call
++ * a client callback or interpret its wire cookie as a host pointer.
++ */
++static void nss_control_wire_callback(void *data, struct nss_cmn_msg *cm)
++{
++	(void)data;
++	(void)cm;
++}
++
++static bool nss_control_valid(struct nss_ctx_instance *ctx,
++			      enum nss_control_family family, uint32_t if_num)
++{
++	return ctx && (uint32_t)ctx->id < NSS_CORE_MAX &&
++	       (unsigned int)family < NSS_CONTROL_FAMILY_MAX &&
++	       if_num < NSS_MAX_NET_INTERFACES;
++}
++
++void nss_control_init_core(struct nss_ctx_instance *ctx)
++{
++	if (!ctx || ctx->id >= NSS_CORE_MAX)
++		return;
++	spin_lock_bh(&nss_control_lock);
++	nss_control_closing[ctx->id] = false;
++	spin_unlock_bh(&nss_control_lock);
++}
++
++bool nss_control_open(struct nss_ctx_instance *ctx, enum nss_control_family family,
++		      uint32_t if_num)
++{
++	bool opened = false;
++
++	if (!nss_control_valid(ctx, family, if_num))
++		return false;
++	spin_lock_bh(&nss_control_lock);
++	if (!nss_control_closing[ctx->id]) {
++		nss_control_registered[family][ctx->id][if_num] = true;
++		opened = true;
++	}
++	spin_unlock_bh(&nss_control_lock);
++	return opened;
++}
++
++static void nss_control_revoke(struct nss_ctx_instance *ctx, int family, int if_num)
++{
++	struct nss_control_request *request, *next;
++	unsigned int index;
++
++	if (!ctx || ctx->id >= NSS_CORE_MAX)
++		return;
++	spin_lock_bh(&nss_control_lock);
++	if (family < 0) {
++		nss_control_closing[ctx->id] = true;
++		for (index = 0; index < NSS_CONTROL_FAMILY_MAX; index++)
++			memset(nss_control_registered[index][ctx->id], 0,
++			       sizeof(nss_control_registered[index][ctx->id]));
++	} else {
++		nss_control_registered[family][ctx->id][if_num] = false;
++	}
++	list_for_each_entry_safe(request, next, &nss_control_requests, list) {
++		if (request->core_id != ctx->id ||
++		    (family >= 0 && (request->family != (enum nss_control_family)family ||
++				    request->if_num != (uint32_t)if_num)))
++			continue;
++		list_del(&request->list);
++		kfree(request);
++	}
++	spin_unlock_bh(&nss_control_lock);
++	/* This also drains a callback which already claimed and removed its entry. */
++	synchronize_net();
++}
++
++void nss_control_close(struct nss_ctx_instance *ctx, enum nss_control_family family,
++		       uint32_t if_num)
++{
++	if (nss_control_valid(ctx, family, if_num))
++		nss_control_revoke(ctx, family, if_num);
++}
++
++void nss_control_close_core(struct nss_ctx_instance *ctx)
++{
++	nss_control_revoke(ctx, -1, -1);
++}
++
++void nss_control_cancel(uint32_t cookie)
++{
++	struct nss_control_request *request, *next;
++
++	spin_lock_bh(&nss_control_lock);
++	list_for_each_entry_safe(request, next, &nss_control_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		list_del(&request->list);
++		kfree(request);
++		break;
++	}
++	spin_unlock_bh(&nss_control_lock);
++	synchronize_net();
++}
++
++nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
++			       uint32_t size, uint32_t buffer_size,
++			       enum nss_control_family family, uint32_t *cookie)
++{
++	struct nss_cmn_msg *cm = msg;
++	struct nss_control_request *request = NULL;
++	nss_ptr_t saved_cb = cm->cb, saved_data = cm->app_data;
++	nss_tx_status_t status = NSS_TX_FAILURE_NOT_READY;
++	uint64_t sequence;
++
++	if (cookie)
++		*cookie = 0;
++	if (!nss_control_valid(ctx, family, cm->interface) ||
++	    size < sizeof(*cm) || size > buffer_size)
++		return NSS_TX_FAILURE_BAD_PARAM;
++	if (cm->cb || family == NSS_CONTROL_DYNAMIC) {
++		request = kzalloc(sizeof(*request) + size, GFP_ATOMIC);
++		if (!request)
++			return NSS_TX_FAILURE;
++		request->core_id = ctx->id;
++		request->if_num = cm->interface;
++		request->type = cm->type;
++		request->family = family;
++		request->callback = saved_cb;
++		request->app_data = saved_data;
++		memcpy(request->original, msg, size);
++	}
++	spin_lock_bh(&nss_control_lock);
++	if (!nss_control_registered[family][ctx->id][cm->interface] ||
++	    nss_control_closing[ctx->id])
++		goto unlock;
++	if (request) {
++		/* Tokens are also host shadow generations: assign them in enqueue order. */
++		sequence = atomic64_inc_return(&nss_control_sequence);
++		if (!sequence || sequence > U32_MAX) {
++			status = NSS_TX_FAILURE;
++			goto unlock;
++		}
++		request->cookie = sequence;
++		list_add_tail(&request->list, &nss_control_requests);
++		cm->cb = (nss_ptr_t)(uintptr_t)nss_control_wire_callback;
++		cm->app_data = request->cookie;
++	} else {
++		cm->cb = 0;
++		cm->app_data = 0;
++	}
++	/* Enqueue is indivisible with closing the interface/core submission gate. */
++	status = nss_core_send_cmd(ctx, msg, size, buffer_size);
++	cm->cb = saved_cb;
++	cm->app_data = saved_data;
++	if (request) {
++		if (status == NSS_TX_SUCCESS) {
++			if (cookie)
++				*cookie = request->cookie;
++			request = NULL;
++		} else {
++			list_del(&request->list);
++		}
++	}
++unlock:
++	spin_unlock_bh(&nss_control_lock);
++	kfree(request);
++	return status;
++}
++
++bool nss_control_receive(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm,
++			 enum nss_control_family family,
++			 void (*prepare)(struct nss_ctx_instance *, struct nss_cmn_msg *,
++					 const void *, uint32_t))
++{
++	struct nss_control_request *request, *found = NULL;
++	void (*callback)(void *, struct nss_cmn_msg *);
++	uint64_t cookie = cm->app_data;
++	bool accepted = false;
++
++	if (!nss_control_valid(ctx, family, cm->interface) || !cookie || cookie > U32_MAX ||
++	    cm->cb != (nss_ptr_t)(uintptr_t)nss_control_wire_callback ||
++	    cm->response == NSS_CMN_RESPONSE_NOTIFY)
++		return false;
++	rcu_read_lock_bh();
++	spin_lock_bh(&nss_control_lock);
++	list_for_each_entry(request, &nss_control_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		if (request->core_id != ctx->id || request->if_num != cm->interface ||
++		    request->type != cm->type || request->family != family ||
++		    !nss_control_registered[family][ctx->id][cm->interface])
++			break;
++		list_del(&request->list);
++		found = request;
++		break;
++	}
++	spin_unlock_bh(&nss_control_lock);
++	if (found) {
++		accepted = true;
++		cm->cb = found->callback;
++		cm->app_data = found->app_data;
++		if (prepare)
++			prepare(ctx, cm, found->original, found->cookie);
++		callback = (void (*)(void *, struct nss_cmn_msg *))(uintptr_t)found->callback;
++		if (callback)
++			callback((void *)(uintptr_t)found->app_data, cm);
++		kfree(found);
++	}
++	rcu_read_unlock_bh();
++	return accepted;
++}
+--- /dev/null
++++ b/nss_control.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: ISC */
++#ifndef NSS_CONTROL_H
++#define NSS_CONTROL_H
++
++enum nss_control_family {
++	NSS_CONTROL_DYNAMIC,
++	NSS_CONTROL_WIFI_VDEV,
++	NSS_CONTROL_FAMILY_MAX,
++};
++
++void nss_control_init_core(struct nss_ctx_instance *ctx);
++bool nss_control_open(struct nss_ctx_instance *ctx, enum nss_control_family family,
++		      uint32_t if_num);
++void nss_control_close(struct nss_ctx_instance *ctx, enum nss_control_family family,
++		       uint32_t if_num);
++void nss_control_close_core(struct nss_ctx_instance *ctx);
++void nss_control_cancel(uint32_t cookie);
++nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
++			       uint32_t size, uint32_t buffer_size,
++			       enum nss_control_family family, uint32_t *cookie);
++bool nss_control_receive(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm,
++			 enum nss_control_family family,
++			 void (*prepare)(struct nss_ctx_instance *, struct nss_cmn_msg *,
++					 const void *, uint32_t));
++
++#endif
+--- a/nss_dynamic_interface.c
++++ b/nss_dynamic_interface.c
+@@ -20,6 +20,7 @@
+ #include "nss_tx_rx_common.h"
+ #include "nss_dynamic_interface_log.h"
+ #include "nss_dynamic_interface_stats.h"
++#include "nss_control.h"
+ 
+ #define NSS_DYNAMIC_INTERFACE_COMP_TIMEOUT 60000	/* 60 Sec */
+ 
+@@ -40,6 +41,55 @@
+ };
+ 
+ static nss_dynamic_interface_assigned nss_dynamic_interface_assigned_types[NSS_CORE_MAX][NSS_MAX_DYNAMIC_INTERFACES]; /* Array of assigned interface types */
++static uint32_t nss_dynamic_interface_assigned_generations[NSS_CORE_MAX][NSS_MAX_DYNAMIC_INTERFACES];
++static DEFINE_SPINLOCK(nss_dynamic_interface_assignment_lock);
++
++/* Update the host allocator only after a current request has been claimed. */
++static void nss_dynamic_interface_prepare_reply(struct nss_ctx_instance *ctx,
++					       struct nss_cmn_msg *cm, const void *original,
++					       uint32_t generation)
++{
++	struct nss_dynamic_interface_msg *msg = (void *)cm;
++	const struct nss_dynamic_interface_msg *sent = original;
++	int if_num;
++	bool dealloc = cm->type == NSS_DYNAMIC_INTERFACE_DEALLOC_NODE;
++	enum nss_dynamic_interface_type type;
++
++	if (cm->response != NSS_CMN_RESPONSE_ACK)
++		return;
++	if (cm->type == NSS_DYNAMIC_INTERFACE_ALLOC_NODE) {
++		if (cm->len < sizeof(msg->msg.alloc_node) ||
++		    msg->msg.alloc_node.type != sent->msg.alloc_node.type)
++			goto invalid;
++		if_num = msg->msg.alloc_node.if_num;
++		if (!nss_is_dynamic_interface(if_num))
++			goto invalid;
++		type = msg->msg.alloc_node.type;
++	} else {
++		if (cm->len < sizeof(msg->msg.dealloc_node) ||
++		    msg->msg.dealloc_node.type != sent->msg.dealloc_node.type ||
++		    msg->msg.dealloc_node.if_num != sent->msg.dealloc_node.if_num)
++			goto invalid;
++		if_num = msg->msg.dealloc_node.if_num;
++		if (!nss_is_dynamic_interface(if_num))
++			goto invalid;
++		type = NSS_DYNAMIC_INTERFACE_TYPE_NONE;
++	}
++	spin_lock_bh(&nss_dynamic_interface_assignment_lock);
++	if (generation > nss_dynamic_interface_assigned_generations[ctx->id][if_num - NSS_DYNAMIC_IF_START]) {
++		nss_dynamic_interface_assigned_generations[ctx->id][if_num - NSS_DYNAMIC_IF_START] = generation;
++		WRITE_ONCE(nss_dynamic_interface_assigned_types[ctx->id][if_num - NSS_DYNAMIC_IF_START], type);
++		/* This notifier is atomic; serialize its deallocation event with later
++		 * shadow updates. The lockless type getter remains usable by notifiers.
++		 */
++		if (dealloc)
++			nss_dynamic_interface_stats_notify(if_num, ctx->id);
++	}
++	spin_unlock_bh(&nss_dynamic_interface_assignment_lock);
++	return;
++invalid:
++	cm->response = NSS_CMN_RESPONSE_EMSG;
++}
+ 
+ /*
+  * nss_dynamic_interface_handler()
+@@ -47,9 +97,7 @@
+  */
+ static void nss_dynamic_interface_handler(struct nss_ctx_instance *nss_ctx, struct nss_cmn_msg *ncm, __attribute__((unused))void *app_data)
+ {
+-	nss_dynamic_interface_msg_callback_t cb;
+ 	struct nss_dynamic_interface_msg *ndim = (struct nss_dynamic_interface_msg *)ncm;
+-	int32_t if_num;
+ 
+ 	BUG_ON(ncm->interface != NSS_DYNAMIC_INTERFACE);
+ 
+@@ -76,60 +124,8 @@
+ 	 */
+ 	nss_dynamic_interface_log_rx_msg(ndim);
+ 
+-	/*
+-	 * Handling dynamic interface messages coming from NSS fw.
+-	 */
+-	switch (ndim->cm.type) {
+-	case NSS_DYNAMIC_INTERFACE_ALLOC_NODE:
+-		if (ncm->response == NSS_CMN_RESPONSE_ACK) {
+-			nss_info("%px alloc_node response ack if_num %d\n", nss_ctx, ndim->msg.alloc_node.if_num);
+-			if_num = ndim->msg.alloc_node.if_num;
+-			if (nss_is_dynamic_interface(if_num)) {
+-				nss_dynamic_interface_assigned_types[nss_ctx->id][if_num - NSS_DYNAMIC_IF_START] = ndim->msg.alloc_node.type;
+-			} else {
+-				nss_warning("%px: if_num %d out of the dynamic range\n", nss_ctx, if_num);
+-			}
+-		}
+-
+-		break;
+-
+-	case NSS_DYNAMIC_INTERFACE_DEALLOC_NODE:
+-		if (ncm->response == NSS_CMN_RESPONSE_ACK) {
+-			nss_info("%px dealloc_node response ack if_num %d\n", nss_ctx, ndim->msg.dealloc_node.if_num);
+-			if_num = ndim->msg.dealloc_node.if_num;
+-			if (!nss_is_dynamic_interface(if_num)) {
+-				nss_warning("%px: if_num %d out of the dynamic range\n", nss_ctx, if_num);
+-				break;
+-			}
+-
+-			nss_dynamic_interface_assigned_types[nss_ctx->id][if_num - NSS_DYNAMIC_IF_START] = NSS_DYNAMIC_INTERFACE_TYPE_NONE;
+-			/*
+-			 * Send dynamic interface dealloc notifications to the registered modules.
+-			 */
+-			nss_dynamic_interface_stats_notify(ndim->msg.dealloc_node.if_num, nss_ctx->id);
+-		}
+-
+-		break;
+-
+-	default:
+-		nss_warning("%px: Received response %d for type %d, interface %d",
+-				nss_ctx, ncm->response, ncm->type, ncm->interface);
+-		return;
+-	}
+-
+-	/*
+-	 * Do we have a callback?
+-	 */
+-	if (!ncm->cb) {
+-		nss_warning("%px: nss_dynamic_interface_handler cb is NULL\n", nss_ctx);
+-		return;
+-	}
+-
+-	/*
+-	 * Callback
+-	 */
+-	cb = (nss_dynamic_interface_msg_callback_t)ncm->cb;
+-	cb((void *)ncm->app_data, ncm);
++	nss_control_receive(nss_ctx, ncm, NSS_CONTROL_DYNAMIC,
++			    nss_dynamic_interface_prepare_reply);
+ }
+ 
+ /*
+@@ -142,7 +138,8 @@
+ 	struct nss_dynamic_interface_msg *ndim = (struct nss_dynamic_interface_msg *)ncm;
+ 
+ 	di_data->response = ncm->response;
+-	di_data->if_num = ndim->msg.alloc_node.if_num;
++	di_data->if_num = ncm->response == NSS_CMN_RESPONSE_ACK ?
++		ndim->msg.alloc_node.if_num : -1;
+ 
+ 	/*
+ 	 * Unblock the sleeping function.
+@@ -154,7 +151,9 @@
+  * nss_dynamic_interface_tx()
+  * 	Transmit a dynamic interface message to NSSFW, asynchronously.
+  */
+-nss_tx_status_t nss_dynamic_interface_tx(struct nss_ctx_instance *nss_ctx, struct nss_dynamic_interface_msg *msg)
++static nss_tx_status_t nss_dynamic_interface_tx_tracked(struct nss_ctx_instance *nss_ctx,
++						     struct nss_dynamic_interface_msg *msg,
++						     uint32_t *cookie)
+ {
+ 	struct nss_cmn_msg *ncm = &msg->cm;
+ 
+@@ -166,7 +165,7 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	if (ncm->type > NSS_DYNAMIC_INTERFACE_MAX) {
++	if (ncm->type >= NSS_DYNAMIC_INTERFACE_MAX) {
+ 		nss_warning("%px: message type out of range: %d", nss_ctx, ncm->type);
+ 		return NSS_TX_FAILURE;
+ 	}
+@@ -176,7 +175,14 @@
+ 	 */
+ 	nss_dynamic_interface_log_tx_msg(msg);
+ 
+-	return nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	return nss_control_send(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++				NSS_CONTROL_DYNAMIC, cookie);
++}
++
++nss_tx_status_t nss_dynamic_interface_tx(struct nss_ctx_instance *nss_ctx,
++				       struct nss_dynamic_interface_msg *msg)
++{
++	return nss_dynamic_interface_tx_tracked(nss_ctx, msg, NULL);
+ }
+ 
+ /*
+@@ -187,9 +193,10 @@
+ 						     struct nss_dynamic_interface_msg *ndim)
+ {
+ 	nss_tx_status_t status;
++	uint32_t cookie = 0;
+ 	int ret;
+ 
+-	status = nss_dynamic_interface_tx(nss_ctx, ndim);
++	status = nss_dynamic_interface_tx_tracked(nss_ctx, ndim, &cookie);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_warning("%px: not able to transmit msg successfully\n", nss_ctx);
+ 		return status;
+@@ -199,7 +206,11 @@
+ 	 * Blocking call, wait till we get ACK for this msg.
+ 	 */
+ 	ret = wait_for_completion_timeout(&di_data->complete, msecs_to_jiffies(NSS_DYNAMIC_INTERFACE_COMP_TIMEOUT));
+-	if (ret == 0) {
++	/* Retire the wire identity and drain a callback already in progress before
++	 * the private completion/result object can be released by the caller.
++	 */
++	nss_control_cancel(cookie);
++	if (ret == 0 && !completion_done(&di_data->complete)) {
+ 		nss_warning("%px: Waiting for ack timed out\n", nss_ctx);
+ 		return NSS_TX_FAILURE;
+ 	}
+@@ -217,11 +228,12 @@
+ int nss_dynamic_interface_alloc_node(enum nss_dynamic_interface_type type)
+ {
+ 	struct nss_ctx_instance *nss_ctx = NULL;
+-	struct nss_dynamic_interface_msg ndim;
++	struct nss_dynamic_interface_msg ndim = { 0 };
+ 	struct nss_dynamic_interface_alloc_node_msg *ndia;
+-	struct nss_dynamic_interface_msg_data di_data;
++	struct nss_dynamic_interface_msg_data *di_data;
+ 	uint32_t core_id;
+ 	nss_tx_status_t status;
++	int if_num = -1;
+ 
+ 	if (type >= NSS_DYNAMIC_INTERFACE_TYPE_MAX) {
+ 		nss_warning("Dynamic if msg drooped as type is wrong %d\n", type);
+@@ -229,13 +241,18 @@
+ 	}
+ 
+ 	core_id = nss_top_main.dynamic_interface_table[type];
++	if (core_id >= NSS_CORE_MAX)
++		return -1;
+ 	nss_ctx = (struct nss_ctx_instance *)&nss_top_main.nss[core_id];
+-	di_data.if_num = -1;
+-	di_data.response = NSS_CMN_RESPONSE_ACK;
+-	init_completion(&di_data.complete);
++	di_data = kzalloc(sizeof(*di_data), GFP_KERNEL);
++	if (!di_data)
++		return -1;
++	di_data->if_num = -1;
++	di_data->response = NSS_CMN_RESPONSE_EMSG;
++	init_completion(&di_data->complete);
+ 
+ 	nss_dynamic_interface_msg_init(&ndim, NSS_DYNAMIC_INTERFACE, NSS_DYNAMIC_INTERFACE_ALLOC_NODE,
+-				sizeof(struct nss_dynamic_interface_alloc_node_msg), nss_dynamic_interface_callback, (void *)&di_data);
++				sizeof(struct nss_dynamic_interface_alloc_node_msg), nss_dynamic_interface_callback, di_data);
+ 
+ 	ndia = &ndim.msg.alloc_node;
+ 	ndia->type = type;
+@@ -249,21 +266,24 @@
+ 	/*
+ 	 * Calling synchronous transmit function.
+ 	 */
+-	status = nss_dynamic_interface_tx_sync(nss_ctx, &di_data, &ndim);
++	status = nss_dynamic_interface_tx_sync(nss_ctx, di_data, &ndim);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_warning("%px not able to transmit alloc node msg\n", nss_ctx);
+-		return -1;
++		goto free;
+ 	}
+ 
+ 	/*
+ 	 * Check response and return -1 if its a NACK else proceed.
+ 	 */
+-	if (di_data.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("%px Received NACK from NSS - Response:%d\n", nss_ctx, di_data.response);
+-		return -1;
+-	}
+-
+-	return di_data.if_num;
++	if (di_data->response != NSS_CMN_RESPONSE_ACK) {
++		nss_warning("%px Received NACK from NSS - Response:%d\n", nss_ctx, di_data->response);
++		goto free;
++	}
++
++	if_num = di_data->if_num;
++free:
++	kfree(di_data);
++	return if_num;
+ }
+ 
+ /*
+@@ -277,9 +297,9 @@
+ nss_tx_status_t nss_dynamic_interface_dealloc_node(int if_num, enum nss_dynamic_interface_type type)
+ {
+ 	struct nss_ctx_instance *nss_ctx = NULL;
+-	struct nss_dynamic_interface_msg ndim;
++	struct nss_dynamic_interface_msg ndim = { 0 };
+ 	struct nss_dynamic_interface_dealloc_node_msg *ndid;
+-	struct nss_dynamic_interface_msg_data di_data;
++	struct nss_dynamic_interface_msg_data *di_data;
+ 	uint32_t core_id;
+ 	nss_tx_status_t status;
+ 
+@@ -289,17 +309,23 @@
+ 	}
+ 
+ 	core_id = nss_top_main.dynamic_interface_table[type];
++	if (core_id >= NSS_CORE_MAX)
++		return NSS_TX_FAILURE_BAD_PARAM;
+ 	nss_ctx = (struct nss_ctx_instance *)&nss_top_main.nss[core_id];
+-	di_data.response = NSS_CMN_RESPONSE_ACK;
+-	init_completion(&di_data.complete);
+ 
+ 	if (nss_is_dynamic_interface(if_num) == false) {
+ 		nss_warning("%px: nss_dynamic_interface if_num is not in range %d\n", nss_ctx, if_num);
+ 		return NSS_TX_FAILURE_BAD_PARAM;
+ 	}
+ 
++	di_data = kzalloc(sizeof(*di_data), GFP_KERNEL);
++	if (!di_data)
++		return NSS_TX_FAILURE;
++	di_data->response = NSS_CMN_RESPONSE_EMSG;
++	init_completion(&di_data->complete);
++
+ 	nss_dynamic_interface_msg_init(&ndim, NSS_DYNAMIC_INTERFACE, NSS_DYNAMIC_INTERFACE_DEALLOC_NODE,
+-				sizeof(struct nss_dynamic_interface_dealloc_node_msg), nss_dynamic_interface_callback, (void *)&di_data);
++				sizeof(struct nss_dynamic_interface_dealloc_node_msg), nss_dynamic_interface_callback, di_data);
+ 
+ 	ndid = &ndim.msg.dealloc_node;
+ 	ndid->type = type;
+@@ -308,17 +334,19 @@
+ 	/*
+ 	 * Calling synchronous transmit function.
+ 	 */
+-	status = nss_dynamic_interface_tx_sync(nss_ctx, &di_data, &ndim);
++	status = nss_dynamic_interface_tx_sync(nss_ctx, di_data, &ndim);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_warning("%px not able to transmit alloc node msg\n", nss_ctx);
+-		return status;
+-	}
+-
+-	if (di_data.response != NSS_CMN_RESPONSE_ACK) {
++		goto free;
++	}
++
++	if (di_data->response != NSS_CMN_RESPONSE_ACK) {
+ 		nss_warning("%px Received NACK from NSS\n", nss_ctx);
+-		return -1;
+-	}
+-
++		status = NSS_TX_FAILURE;
++	}
++
++free:
++	kfree(di_data);
+ 	return status;
+ }
+ 
+@@ -327,7 +355,11 @@
+  */
+ void nss_dynamic_interface_register_handler(struct nss_ctx_instance *nss_ctx)
+ {
+-	nss_core_register_handler(nss_ctx, NSS_DYNAMIC_INTERFACE, nss_dynamic_interface_handler, NULL);
++	if (nss_core_register_handler(nss_ctx, NSS_DYNAMIC_INTERFACE,
++				      nss_dynamic_interface_handler, NULL) != NSS_CORE_STATUS_SUCCESS)
++		return;
++	nss_control_init_core(nss_ctx);
++	nss_control_open(nss_ctx, NSS_CONTROL_DYNAMIC, NSS_DYNAMIC_INTERFACE);
+ 	if (nss_ctx->id == NSS_CORE_0) {
+ 		nss_dynamic_interface_stats_dentry_create();
+ 	}
+@@ -376,7 +408,7 @@
+ 		return NSS_DYNAMIC_INTERFACE_TYPE_NONE;
+ 	}
+ 
+-	return nss_dynamic_interface_assigned_types[nss_ctx->id][if_num - NSS_DYNAMIC_IF_START];
++	return READ_ONCE(nss_dynamic_interface_assigned_types[nss_ctx->id][if_num - NSS_DYNAMIC_IF_START]);
+ }
+ 
+ /*
+--- a/nss_wifi_vdev.c
++++ b/nss_wifi_vdev.c
+@@ -15,6 +15,10 @@
+  */
+ 
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
++
++/* Registration and draining are process-context operations. */
++static DEFINE_MUTEX(nss_wifi_vdev_registration_lock);
+ 
+ /*
+  * nss_wifi_vdev_handler()
+@@ -58,6 +62,9 @@
+ 	if (ncm->response == NSS_CMN_RESPONSE_NOTIFY) {
+ 		ncm->cb = (nss_ptr_t)nss_core_get_msg_handler(nss_ctx, ncm->interface);
+ 		ncm->app_data = (nss_ptr_t)nss_ctx->subsys_dp_register[ncm->interface].ndev;
++	} else {
++		nss_control_receive(nss_ctx, ncm, NSS_CONTROL_WIFI_VDEV, NULL);
++		return;
+ 	}
+ 
+ 	/*
+@@ -117,9 +124,13 @@
+  * nss_wifi_vdev_tx_msg()
+  *	Transmit a wifi vdev message to NSSFW
+  */
+-nss_tx_status_t nss_wifi_vdev_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_wifi_vdev_msg *msg)
++nss_tx_status_t nss_wifi_vdev_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++					struct nss_wifi_vdev_msg *msg, uint32_t *cookie)
+ {
+ 	struct nss_cmn_msg *ncm = &msg->cm;
++
++	if (cookie)
++		*cookie = 0;
+ 
+ 	nss_trace("%px: Sending wifi vdev message on interface :%d", nss_ctx, ncm->interface);
+ 
+@@ -140,9 +151,23 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	return nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	return nss_control_send(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++				NSS_CONTROL_WIFI_VDEV, cookie);
++}
++EXPORT_SYMBOL(nss_wifi_vdev_tx_msg_tracked);
++
++nss_tx_status_t nss_wifi_vdev_tx_msg(struct nss_ctx_instance *nss_ctx,
++				  struct nss_wifi_vdev_msg *msg)
++{
++	return nss_wifi_vdev_tx_msg_tracked(nss_ctx, msg, NULL);
+ }
+ EXPORT_SYMBOL(nss_wifi_vdev_tx_msg);
++
++void nss_wifi_vdev_cancel_msg(uint32_t cookie)
++{
++	nss_control_cancel(cookie);
++}
++EXPORT_SYMBOL(nss_wifi_vdev_cancel_msg);
+ 
+ /*
+  * nss_wifi_vdev_tx_msg_ext()
+@@ -349,22 +374,33 @@
+ 
+ 	nss_assert((if_num >= NSS_DYNAMIC_IF_START) && (if_num < (NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES)));
+ 
++	mutex_lock(&nss_wifi_vdev_registration_lock);
+ 	status = nss_core_register_msg_handler(nss_ctx, if_num, vdev_event_callback);
+ 	if (status != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("%px: unable to register event handler for interface(%u)", nss_ctx, if_num);
+-		return status;
++		goto unlock;
+ 	}
+ 
+ 	status = nss_core_register_handler(nss_ctx, if_num, nss_wifi_vdev_handler, NULL);
+ 	if (status != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("%px: unable to register core handler for interface(%u)", nss_ctx, if_num);
+ 		nss_core_unregister_msg_handler(nss_ctx, if_num);
+-		return status;
++		goto unlock;
+ 	}
+ 
+ 	nss_core_register_subsys_dp(nss_ctx, if_num, vdev_data_callback, vdev_ext_data_callback, NULL, netdev, features);
+-
+-	return NSS_CORE_STATUS_SUCCESS;
++	if (!nss_control_open(nss_ctx, NSS_CONTROL_WIFI_VDEV, if_num)) {
++		nss_core_unregister_subsys_dp(nss_ctx, if_num);
++		nss_core_unregister_msg_handler(nss_ctx, if_num);
++		nss_core_unregister_handler(nss_ctx, if_num);
++		status = NSS_CORE_STATUS_FAILURE;
++		goto unlock;
++	}
++
++	status = NSS_CORE_STATUS_SUCCESS;
++unlock:
++	mutex_unlock(&nss_wifi_vdev_registration_lock);
++	return status;
+ }
+ EXPORT_SYMBOL(nss_register_wifi_vdev_if);
+ 
+@@ -379,14 +415,16 @@
+ 	nss_assert(nss_ctx);
+ 	nss_assert((if_num >= NSS_DYNAMIC_IF_START) && (if_num < (NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES)));
+ 
++	mutex_lock(&nss_wifi_vdev_registration_lock);
++	nss_control_close(nss_ctx, NSS_CONTROL_WIFI_VDEV, if_num);
+ 	nss_core_unregister_subsys_dp(nss_ctx, if_num);
+ 
+ 	status = nss_core_unregister_msg_handler(nss_ctx, if_num);
+ 	if (status != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("%px: unable to unregister event handler for interface(%u)", nss_ctx, if_num);
+-		return;
+ 	}
+ 
+ 	nss_core_unregister_handler(nss_ctx, if_num);
++	mutex_unlock(&nss_wifi_vdev_registration_lock);
+ }
+ EXPORT_SYMBOL(nss_unregister_wifi_vdev_if);
+--- a/nss_hal/nss_hal.c
++++ b/nss_hal/nss_hal.c
+@@ -33,6 +33,7 @@
+ #include "nss_arch.h"
+ #include "nss_core.h"
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ #ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
+ #include "nss_data_plane.h"
+ #endif
+@@ -855,6 +856,10 @@
+ 	struct nss_ctx_instance *nss_ctx = &nss_top->nss[nss_dev->id];
+ 	int i;
+ 
++	/* Revoke these command families before any core is halted or unmapped. */
++	for (i = 0; i < nss_top->num_nss; i++)
++		nss_control_close_core(&nss_top->nss[i]);
++
+ 	/*
+ 	 * Stop the firmware first: without this the cores keep executing
+ 	 * after the rmmod, and the next probe's firmware_load copies the
+--- a/exports/nss_wifi_vdev.h
++++ b/exports/nss_wifi_vdev.h
+@@ -1205,6 +1205,13 @@
+ nss_tx_status_t nss_wifi_vdev_tx_msg(struct nss_ctx_instance *nss_ctx,
+ 				struct nss_wifi_vdev_msg *msg);
+ 
++/* Process-context cancellation drains a dispatched callback. It does not
++ * cancel a configuration already accepted by firmware.
++ */
++nss_tx_status_t nss_wifi_vdev_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++					struct nss_wifi_vdev_msg *msg, uint32_t *cookie);
++void nss_wifi_vdev_cancel_msg(uint32_t cookie);
++
+ /**
+  * nss_wifi_vdev_base_tx_msg
+  *	Sends a Wi-Fi message to the NSS VAP interface.

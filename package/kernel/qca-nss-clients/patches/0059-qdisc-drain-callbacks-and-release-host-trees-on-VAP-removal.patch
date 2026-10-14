@@ -1,0 +1,448 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] clients: bound wireless qdisc teardown lifetimes
+
+Drain control/stats callbacks and timers before freeing a qdisc; release
+Linux children even when firmware teardown fails. Reset ingress before the
+wireless VAP registration disappears.
+
+--- a/nss_qdisc/nss_qdisc.c
++++ b/nss_qdisc/nss_qdisc.c
+@@ -29,6 +29,29 @@
+ 
+ void *nss_qdisc_ctx;			/* Shaping context for nss_qdisc */
+ 
++/* Cancel/drain every callback before its qdisc context can be freed. A callback
++ * already executing may enqueue the next cleanup step, so first close that
++ * client submission gate, drain, then retire any token published during drain.
++ */
++nss_tx_status_t nss_qdisc_command_tx(struct nss_qdisc *nq, struct nss_if_msg *msg)
++{
++	if (READ_ONCE(nq->command_stopping))
++		return NSS_TX_FAILURE_NOT_READY;
++	return nss_if_tx_msg_tracked(nq->nss_shaping_ctx, msg, &nq->command_cookie);
++}
++
++static void nss_qdisc_command_cancel(struct nss_qdisc *nq)
++{
++	uint32_t cookie;
++
++	WRITE_ONCE(nq->command_stopping, true);
++	do {
++		cookie = xchg(&nq->command_cookie, 0);
++		nss_if_cancel_msg(cookie);
++	} while (READ_ONCE(nq->command_cookie));
++	WRITE_ONCE(nq->command_stopping, false);
++}
++
+ /*
+  * Defines related to root hash maintenance
+  */
+@@ -223,7 +246,7 @@
+ 	 * by if_num.
+ 	 */
+ 	nim.msg.shaper_assign.shaper_id = nq->shaper_id;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Failed to send bshaper (id: %u) attach for "
+@@ -238,6 +261,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("bshaper attach command for %x on interface %u timedout!\n",
+ 					nq->qos_tag, if_num);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+@@ -312,7 +336,7 @@
+ 				nss_qdisc_detach_bshaper_callback,
+ 				sch);
+ 	nim.msg.shaper_unassign.shaper_id = nq->shaper_id;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Failed to send B-shaper (id: %u) detach "
+@@ -327,6 +351,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("bshaper detach command for %x on interface %u timedout!\n",
+ 					nq->qos_tag, if_num);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+@@ -586,7 +611,7 @@
+ 			nss_qdisc_root_cleanup_shaper_unassign_callback,
+ 			nq);
+ 	nim.msg.shaper_unassign.shaper_id = nq->shaper_id;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc == NSS_TX_SUCCESS) {
+ 		/*
+@@ -648,7 +673,7 @@
+ 				nq);
+ 	nim.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_FREE_SHAPER_NODE;
+ 	nim.msg.shaper_configure.config.msg.free_shaper_node.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc == NSS_TX_SUCCESS) {
+ 		/*
+@@ -727,7 +752,7 @@
+ 				nq);
+ 	nim->msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_SET_ROOT;
+ 	nim->msg.shaper_configure.config.msg.set_root_node.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, nim);
++	rc = nss_qdisc_command_tx(nq, nim);
+ 
+ 	if (rc == NSS_TX_SUCCESS) {
+ 		return;
+@@ -788,7 +813,7 @@
+ 	nim->msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_ALLOC_SHAPER_NODE;
+ 	nim->msg.shaper_configure.config.msg.alloc_shaper_node.node_type = nq->type;
+ 	nim->msg.shaper_configure.config.msg.alloc_shaper_node.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, nim);
++	rc = nss_qdisc_command_tx(nq, nim);
+ 
+ 	if (rc == NSS_TX_SUCCESS) {
+ 		return;
+@@ -875,7 +900,7 @@
+ 				nq);
+ 	nim.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_FREE_SHAPER_NODE;
+ 	nim.msg.shaper_configure.config.msg.free_shaper_node.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc == NSS_TX_SUCCESS) {
+ 		return;
+@@ -1467,7 +1492,7 @@
+ 		nim.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_HYBRID_MODE_DISABLE;
+ 	}
+ 
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Failed to send set hybrid mode message for "
+@@ -1482,6 +1507,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("set_hybrid_mode for qdisc %x timedout!\n", nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+ 		return -1;
+@@ -1556,7 +1582,7 @@
+ 				nq);
+ 	nim.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_SET_DEFAULT;
+ 	nim.msg.shaper_configure.config.msg.set_default_node.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Failed to send set default message for "
+@@ -1571,6 +1597,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("set_default for qdisc %x timedout!\n", nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+ 		return -1;
+@@ -1657,7 +1684,7 @@
+ 				nss_qdisc_node_attach_callback,
+ 				nq);
+ 	nim->msg.shaper_configure.config.request_type = attach_type;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, nim);
++	rc = nss_qdisc_command_tx(nq, nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Failed to send configure message for "
+@@ -1672,6 +1699,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("attach for qdisc %x timedout!\n", nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+ 		return -1;
+@@ -1772,7 +1800,7 @@
+ 				nss_qdisc_node_detach_callback,
+ 				nq);
+ 	nim->msg.shaper_configure.config.request_type = detach_type;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, nim);
++	rc = nss_qdisc_command_tx(nq, nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Qdisc %px (type %d): Failed to send configure "
+@@ -1787,6 +1815,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("detach for qdisc %x timedout!\n", nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+ 		return -1;
+@@ -1873,7 +1902,7 @@
+ 				nss_qdisc_configure_callback,
+ 				nq);
+ 	nim->msg.shaper_configure.config.request_type = config_type;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, nim);
++	rc = nss_qdisc_command_tx(nq, nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_warning("Qdisc %px (type %d): Failed to send configure "
+@@ -1888,6 +1917,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("configure for qdisc %x timedout!\n", nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_READY);
+ 		return -1;
+@@ -1955,17 +1985,17 @@
+ 	}
+ #endif
+ 
++	/*
++	 * Delete node from stats list
++	 */
++	nss_qdisc_stats_qdisc_detach(nq);
++	nss_qdisc_command_cancel(nq);
+ 	state = atomic_read(&nq->state);
+ 	if (state != NSS_QDISC_STATE_READY) {
+-		nss_qdisc_warning("Qdisc %px (type %d): destroy not ready, "
+-				"state: %d\n", nq->qdisc, nq->type, state);
++		if (nq->is_root)
++			nss_qdisc_stats_stop_polling(nq);
+ 		return;
+ 	}
+-
+-	/*
+-	 * Delete node from stats list
+-	 */
+-	nss_qdisc_stats_qdisc_detach(nq);
+ 
+ 	/*
+ 	 * How we begin to tidy up depends on whether we are root or child
+@@ -2009,8 +2039,10 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) == NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("destroy command for %x timedout!\n", nq->qos_tag);
+ 	}
++	nss_qdisc_command_cancel(nq);
+ 
+ 	state = atomic_read(&nq->state);
+ 	if (state != NSS_QDISC_STATE_IDLE) {
+@@ -2275,7 +2307,7 @@
+ 		nim_alloc.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_ALLOC_SHAPER_NODE;
+ 		nim_alloc.msg.shaper_configure.config.msg.alloc_shaper_node.node_type = nq->type;
+ 		nim_alloc.msg.shaper_configure.config.msg.alloc_shaper_node.qos_tag = nq->qos_tag;
+-		rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim_alloc);
++		rc = nss_qdisc_command_tx(nq, &nim_alloc);
+ 
+ 		if (rc != NSS_TX_SUCCESS) {
+ 			nss_qdisc_error("Qdisc %px (type %d) create command "
+@@ -2290,6 +2322,7 @@
+ 		 */
+ 		if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 					NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 			nss_qdisc_error("init for qdisc %x timedout!\n", nq->qos_tag);
+ 			return -1;
+ 		}
+@@ -2492,7 +2525,7 @@
+ 				nss_qdisc_root_init_shaper_assign_callback,
+ 				nq);
+ 	nim.msg.shaper_assign.shaper_id = 0;	/* Any free shaper will do */
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
++	rc = nss_qdisc_command_tx(nq, &nim);
+ 
+ 	if (rc != NSS_TX_SUCCESS) {
+ 		nss_qdisc_error("shaper assign command failed: %d\n", rc);
+@@ -2506,6 +2539,7 @@
+ 	 */
+ 	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) != NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
++		nss_qdisc_command_cancel(nq);
+ 		/*
+ 		 * Decrement the IGS module reference.
+ 		 */
+--- a/nss_qdisc/nss_qdisc.h
++++ b/nss_qdisc/nss_qdisc.h
+@@ -226,6 +226,11 @@
+ #endif
+ 	struct timer_list stats_get_timer;	/* Timer used to poll for stats */
+ 	atomic_t pending_stat_requests;		/* Number of pending stats responses */
++	u32 command_cookie;			/* Driver-owned outstanding control request */
++	u32 stats_cookie;			/* Driver-owned 11.4 stats request */
++	bool command_stopping;
++	bool stats_timer_initialized;
++	bool stats_stopping;
+ 	struct nss_qdisc_stats_wq *stats_wq;	/* Stats info and state work object */
+ 	struct hlist_node hlist;		/* Hlist node for managing stats hash list */
+ 	wait_queue_head_t wait_queue;		/* Wait queue used to wait on responses from the NSS */
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -98,7 +98,7 @@
+ 		nq->stats_cb(nq, &response);
+ 	}
+ 
+-	if (refcount_read(refcnt) == 0) {
++	if (READ_ONCE(nq->stats_stopping) || refcount_read(refcnt) == 0) {
+ 		atomic_sub(1, &nq->pending_stat_requests);
+ 		wake_up(&nq->wait_queue);
+ 		return;
+@@ -124,6 +124,8 @@
+ 	nss_tx_status_t rc;
+ 	struct nss_if_msg nim;
+ 	int msg_type;
++	if (READ_ONCE(nq->stats_stopping))
++		return;
+ 
+ 	msg_type = nss_qdisc_get_interface_msg(nq->is_bridge, NSS_QDISC_IF_SHAPER_CONFIG);
+ 	nss_qdisc_msg_init(&nim, nq->nss_interface_number, msg_type,
+@@ -131,8 +133,8 @@
+ 			nss_qdisc_stats_basic_stats_callback, nq);
+ 	nim.msg.shaper_configure.config.request_type = NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_BASIC_STATS_GET;
+ 	nim.msg.shaper_configure.config.msg.shaper_node_stats_get.qos_tag = nq->qos_tag;
+-	rc = nss_if_tx_msg(nq->nss_shaping_ctx, &nim);
+-	if (rc != NSS_TX_SUCCESS) {
++	rc = nss_if_tx_msg_tracked(nq->nss_shaping_ctx, &nim, &nq->stats_cookie);
++	if (rc != NSS_TX_SUCCESS && !READ_ONCE(nq->stats_stopping)) {
+ 		/*
+ 		 * Retry in 100ms instead of a full second.
+ 		 */
+@@ -170,6 +172,8 @@
+ 	}
+ 
+ 	timer_setup(&nq->stats_get_timer, nss_qdisc_stats_get_timer_callback, 0);
++	nq->stats_timer_initialized = true;
++	WRITE_ONCE(nq->stats_stopping, false);
+ 	nq->stats_get_timer.expires = jiffies + HZ;
+ 	atomic_set(&nq->pending_stat_requests, 1);
+ 	add_timer(&nq->stats_get_timer);
+@@ -177,22 +181,17 @@
+ 
+ void nss_qdisc_stats_qdisc_detach(struct nss_qdisc *nq)
+ {
+-	if (timer_delete(&nq->stats_get_timer) > 0) {
+-		/*
+-		 * The timer had not fired: no response can be in flight.
+-		 */
+-		atomic_set(&nq->pending_stat_requests, 0);
+-		return;
+-	}
+-
+-	/*
+-	 * The timer has fired: wait for the pending response to drain.
+-	 */
+-	if (!wait_event_timeout(nq->wait_queue,
+-			atomic_read(&nq->pending_stat_requests) == 0,
+-			NSS_QDISC_COMMAND_TIMEOUT)) {
+-		nss_qdisc_error("Stats request command for %x timedout!\n", nq->qos_tag);
+-	}
++	if (!nq->stats_timer_initialized)
++		return;
++	WRITE_ONCE(nq->stats_stopping, true);
++	del_timer_sync(&nq->stats_get_timer);
++	nss_if_cancel_msg(xchg(&nq->stats_cookie, 0));
++	/* A response callback already in flight may have passed its stop check
++	 * before the first timer deletion. Cancellation drains that callback.
++	 */
++	del_timer_sync(&nq->stats_get_timer);
++	atomic_set(&nq->pending_stat_requests, 0);
++	nq->stats_timer_initialized = false;
+ }
+ 
+ void nss_qdisc_stats_start_polling(struct nss_qdisc *nq)
+--- a/nss_qdisc/nss_tbl.c
++++ b/nss_qdisc/nss_tbl.c
+@@ -81,7 +81,7 @@
+ 				NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 			nss_qdisc_error("Failed to detach child %x from nss_tbl %x\n",
+ 					q->qdisc->handle, q->nq.qos_tag);
+-			return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 		}
+ 	}
+ 
+--- a/nss_qdisc/nss_prio.c
++++ b/nss_qdisc/nss_prio.c
+@@ -121,7 +121,7 @@
+ 					NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 				nss_qdisc_error("Failed to detach child in band %d from prio %x\n",
+ 							i, q->nq.qos_tag);
+-				return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 			}
+ 		}
+ 
+--- a/nss_qdisc/nss_bf.c
++++ b/nss_qdisc/nss_bf.c
+@@ -266,7 +266,7 @@
+ 				NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 			nss_qdisc_error("Failed to detach child %x from class %x\n",
+ 					cl->qdisc->handle, q->nq.qos_tag);
+-			return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 		}
+ 	}
+ 
+@@ -718,7 +718,7 @@
+ 					NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 				nss_qdisc_error("Node detach failed for qdisc %x class %x\n",
+ 							cl->nq.qos_tag, q->nq.qos_tag);
+-				return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 			}
+ 
+ 			/*
+--- a/nss_qdisc/nss_wrr.c
++++ b/nss_qdisc/nss_wrr.c
+@@ -81,7 +81,7 @@
+ 				NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 			nss_qdisc_error("Failed to detach child %x from class %x\n",
+ 					cl->qdisc->handle, q->nq.qos_tag);
+-			return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 		}
+ 	}
+ 
+@@ -834,7 +834,7 @@
+ 			if (nss_qdisc_node_detach(&q->nq, &cl->nq, &nim, NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 				nss_qdisc_error("Node detach failed for qdisc %x class %x\n",
+ 							cl->nq.qos_tag, q->nq.qos_tag);
+-				return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 			}
+ 
+ 			/*
+--- a/nss_qdisc/nss_htb.c
++++ b/nss_qdisc/nss_htb.c
+@@ -492,7 +492,7 @@
+ 				NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_DETACH) < 0) {
+ 			nss_qdisc_error("failed to detach child %x from class %x\n",
+ 					cl->qdisc->handle, q->nq.qos_tag);
+-			return;
++			/* Linux destruction cannot be vetoed by firmware. */
+ 		}
+ 	}
+ 
+--- a/nss_qdisc/igs/nss_mirred.c
++++ b/nss_qdisc/igs/nss_mirred.c
+@@ -477,6 +477,11 @@
+ 
+ 	mutex_lock(&nss_mirred_config_lock);
+ 	switch (event) {
++	case NETDEV_GOING_DOWN:
++		/* Before ndo_stop tears down a Wi-Fi VAP's NSS registration. */
++		if (!netif_is_ifb_dev(dev))
++			nss_mirred_unregister_event_handler(dev);
++		break;
+ 	case NETDEV_UNREGISTER:
+ 		nss_mirred_unregister_event_handler(dev);
+ 

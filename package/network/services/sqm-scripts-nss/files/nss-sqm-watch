@@ -1,0 +1,109 @@
+#!/bin/sh
+# Retry delayed NSS readiness, follow netifd VIF replacements, and repair the
+# volatile ECM denied list after a module restart. SQM serializes mutations.
+. /lib/functions.sh
+. /lib/functions/network.sh
+. /etc/sqm/sqm.conf
+
+runtime="${SQM_STATE_DIR}/nss-bindings"
+mkdir -p "$runtime"
+chmod 700 "$runtime"
+
+stop_binding() {
+	local file="$1" old old_index
+	[ -f "$file" ] || return 0
+	read -r old old_index < "$file"
+	[ -n "$old" ] && /usr/lib/sqm/run.sh stop "$old"
+	rm -f "$file"
+}
+
+cleanup() {
+	local file
+	for file in "$runtime"/*; do stop_binding "$file"; done
+}
+trap 'cleanup; exit 0' TERM INT
+
+poll_queue() {
+	local queue="$1" enabled script logical wireless iface old current up
+	local old_index index ifb healthy upload download
+	local watch
+	local file="$runtime/$queue" marker denied
+	config_get_bool enabled "$queue" enabled 0
+	config_get script "$queue" script
+	config_get logical "$queue" network
+	config_get wireless "$queue" wireless_interface
+	config_get_bool watch "$queue" nss_watch 0
+	case "$script" in nss-edma.qos|nss-fq.qos) ;; *) return 0 ;; esac
+	[ -n "$logical$wireless" ] || [ "$watch" = 1 ] || return 0
+	seen="$seen $queue"
+	if [ "$enabled" != 1 ] || ! /etc/init.d/sqm enabled; then
+		stop_binding "$file"
+		return 0
+	fi
+	if [ -n "$logical" ]; then
+		network_flush_cache
+		network_is_up "$logical" && network_get_device iface "$logical"
+	elif [ -n "$wireless" ]; then
+		# Section names are UCI identifiers, not executable shell fragments.
+		case "$wireless" in *[!a-zA-Z0-9_]*) return 0 ;; esac
+		iface=$(ubus call network.wireless status | jsonfilter \
+			-e "@.*.interfaces[@.section=\"$wireless\"].ifname" | head -n1)
+	else
+		config_get iface "$queue" interface
+	fi
+	[ -f "$file" ] && read -r old old_index < "$file"
+	if [ -z "$iface" ] || [ ! -e "/sys/class/net/$iface" ]; then
+		stop_binding "$file"
+		return 0
+	fi
+	index=$(cat "/sys/class/net/$iface/ifindex")
+	[ -z "$old" ] || { [ "$old" = "$iface" ] && [ "$old_index" = "$index" ]; } || stop_binding "$file"
+	[ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" = 1 ] || return 0
+	config_get current "$queue" interface
+	if [ "$current" != "$iface" ]; then
+		# Runtime UCI delta only: resolve anew on every boot, avoid flash writes.
+		uci set "sqm.$queue.interface=$iface" || return 0
+	fi
+	printf '%s %s\n' "$iface" "$index" > "$file"
+	if [ -f "${SQM_STATE_DIR}/${iface}.state" ]; then
+		healthy=1
+		if [ "$script" = nss-fq.qos ]; then
+			tc qdisc show dev "$iface" | grep -q '^qdisc nssfq_codel 10: root' || healthy=0
+		elif [ -e "/sys/class/net/$iface/phy80211" ]; then
+			config_get upload "$queue" upload 0
+			config_get download "$queue" download 0
+			if [ "$upload" -gt 0 ]; then
+				tc qdisc show dev "$iface" | grep -q '^qdisc nsstbl .* root' || healthy=0
+			fi
+			if [ "$download" -gt 0 ]; then
+				ifb=$(printf '%.15s' "ifb@$iface")
+				tc qdisc show dev "$ifb" 2>/dev/null | grep -q '^qdisc nsstbl .* root' || healthy=0
+			fi
+		fi
+		[ "$healthy" = 1 ] || /usr/lib/sqm/run.sh stop "$iface"
+	fi
+	[ -f "${SQM_STATE_DIR}/${iface}.state" ] || /usr/lib/sqm/run.sh start "$iface"
+	[ -f "${SQM_STATE_DIR}/${iface}.state" ] || return 0
+	if [ "$script" = nss-edma.qos ] && [ -e "/sys/class/net/$iface/phy80211" ] &&
+	   [ "$(config_get "$queue" download)" -gt 0 ]; then
+		denied=/proc/sys/net/ecm/interface_denied_list
+		[ -w "$denied" ] || return 0
+		case " $(cat "$denied") " in
+		*" $iface "*) ;;
+		*) printf 'add %s\n' "$iface" > "$denied" &&
+			: > "${SQM_STATE_DIR}/${iface}.nss-ecm-owned" ;;
+		esac
+	fi
+}
+
+while :; do
+	seen=""
+	config_load sqm
+	config_foreach poll_queue queue
+	for file in "$runtime"/*; do
+		[ -f "$file" ] || continue
+		case " $seen " in *" ${file##*/} "*) ;; *) stop_binding "$file" ;; esac
+	done
+	sleep 5 &
+	wait $!
+done

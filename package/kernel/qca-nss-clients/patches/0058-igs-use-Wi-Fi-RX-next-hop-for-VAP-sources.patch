@@ -1,0 +1,27 @@
+NSS VAP ingress shaping: use the Wi-Fi RX next-hop with a tracked ACK.
+
+--- a/nss_qdisc/igs/nss_ifb.c
++++ b/nss_qdisc/igs/nss_ifb.c
+@@ -342,6 +342,22 @@
+ 	struct nss_if_msg nim;
+ 	int32_t ret;
+ 
++#ifdef NSS_QDISC_WIFI_SUPPORT
++	/* Wi-Fi RX has a VDEV-specific next hop, separate from the base interface. */
++	if (config == NSS_IFB_SET_NEXTHOP || config == NSS_IFB_RESET_NEXTHOP) {
++		struct nss_ctx_instance *ctx = nss_igs_get_context();
++		int32_t ifnum = nss_cmn_get_interface_number_by_dev(dev);
++
++		if (ifnum >= NSS_DYNAMIC_IF_START &&
++		    ifnum < NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES &&
++		    nss_dynamic_interface_get_type(ctx, ifnum) == NSS_DYNAMIC_INTERFACE_TYPE_VAP) {
++			ret = nss_wifi_vdev_set_next_hop_sync(ctx, ifnum,
++				config == NSS_IFB_SET_NEXTHOP ? ifb_num : NSS_ETH_RX_INTERFACE);
++			return ret == NSS_TX_SUCCESS ? 0 : -EIO;
++		}
++	}
++#endif
++
+ 	if ((ret = nss_ifb_config_msg_fill(&nim, dev, ifb_num, config, cb))) {
+ 		nss_igs_error("Error in setting up IFB %d config message\n", config);
+ 		return -1;

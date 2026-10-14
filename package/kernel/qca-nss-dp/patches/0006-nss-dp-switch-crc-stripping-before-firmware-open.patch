@@ -1,0 +1,43 @@
+Subject: [PATCH] nss-dp: switch CRC stripping before firmware OPEN
+
+The Syn host RX path uses MAC CST and takes the descriptor length directly.
+MP firmware expects the FCS in that length and removes it before N2H delivery.
+Keeping the live MAC during handoff must not keep the host's CST setting:
+otherwise IPv4 frames reach Linux four bytes short. Disable CST before OPEN,
+and explicitly select the host/NSS policy when starting the MAC again.
+
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp.c
+@@ -20,6 +20,7 @@
+ #include <linux/irq.h>
+ #include <linux/iopoll.h>
+ #include "syn_dma_reg.h"
++#include "../../gmac_ops/syn/gmac/syn_mac_reg.h"
+ 
+ /*
+  * syn_dp_napi_poll_rx()
+@@ -483,6 +484,13 @@
+ 	struct nss_dp_dev *gmac = netdev_priv(dpc->dev);
+ 	void __iomem *base = gmac->gmac_hal_ctx->mac_base;
+ 
++	/* Firmware removes the FCS before N2H delivery. Convert the host MAC
++	 * policy while DMA is quiescent, including the first preserved-link
++	 * OPEN, before firmware can start receiving on its own rings.
++	 */
++	writel(readl(base + SYN_MAC_CONFIGURATION) & ~SYN_MAC_CST,
++	       base + SYN_MAC_CONFIGURATION);
++
+ 	if (!gmac->syn_fw_known)
+ 		return 0;
+ 	if (!gmac->syn_fw_resume_valid)
+--- a/hal/gmac_ops/syn/gmac/syn_if.c
++++ b/hal/gmac_ops/syn/gmac/syn_if.c
+@@ -718,6 +718,8 @@
+ 	if (!(dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE))) {
+ 		syn_enable_mac_cst(nghd);
++	} else {
++		syn_disable_mac_cst(nghd);
+ 	}
+ 
+ 	netdev_dbg(nghd->netdev, "%s: mac_base:0x%px MAC Config:0x%x\n",
+ 		__func__, nghd->mac_base,

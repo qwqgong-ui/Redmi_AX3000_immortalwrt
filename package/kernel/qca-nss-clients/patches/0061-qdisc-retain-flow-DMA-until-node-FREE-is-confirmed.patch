@@ -1,0 +1,307 @@
+Subject: [PATCH] Keep FQ DMA mapped until the firmware node FREE is confirmed
+
+VAP teardown can revoke the NSS interface before qdisc FREE is sent. Drain
+host callbacks independently, finish negative teardown states promptly, and
+retain published flow memory with its DMA device and module references if
+FREE is unconfirmed. Failed configure and child-node teardown follow the
+same ownership rule. No callback or netdev pointer is retained. An uncertain
+mapping is quarantined until reboot, rather than reused by the allocator.
+
+--- a/nss_qdisc/nss_qdisc.h
++++ b/nss_qdisc/nss_qdisc.h
+@@ -232,6 +232,7 @@
+ 	bool command_stopping;
+ 	bool stats_timer_initialized;
+ 	bool stats_stopping;
++	bool fw_node_free_confirmed;		/* FREE ACK, separate from host teardown state */
+ 	struct nss_qdisc_stats_wq *stats_wq;	/* Stats info and state work object */
+ 	struct hlist_node hlist;		/* Hlist node for managing stats hash list */
+ 	wait_queue_head_t wait_queue;		/* Wait queue used to wait on responses from the NSS */
+--- a/nss_qdisc/nss_qdisc.c
++++ b/nss_qdisc/nss_qdisc.c
+@@ -522,7 +522,7 @@
+  *	Performs final cleanup of a root shaper node after all other
+  *	shaper node cleanup is complete.
+  */
+-static void nss_qdisc_root_cleanup_final(struct nss_qdisc *nq)
++static void nss_qdisc_root_cleanup_host(struct nss_qdisc *nq)
+ {
+ 	nss_qdisc_info("Root qdisc %px (type %d) final cleanup\n",
+ 				nq->qdisc, nq->type);
+@@ -531,13 +531,14 @@
+ 	 * If we are a bridge then we have to unregister for bridge bouncing
+ 	 * AND destroy the virtual interface that provides bridge shaping.
+ 	 */
+-	if (nq->is_bridge) {
++	if (nq->is_bridge && nq->bounce_context) {
+ 		/*
+ 		 * Unregister for bouncing to the NSS for bridge shaping
+ 		 */
+ 		nss_qdisc_info("Unregister for bridge bouncing: %px\n",
+ 				nq->bounce_context);
+ 		nss_shaper_unregister_shaper_bounce_bridge(nq->nss_interface_number);
++		nq->bounce_context = NULL;
+ 
+ 		/*
+ 		 * Unregister the virtual interface we use to act as shaper
+@@ -552,13 +553,14 @@
+ 	 * unregister for interface bouncing and not care about deleting the
+ 	 * interface.
+ 	 */
+-	if (nq->is_virtual && !nq->is_bridge) {
++	if (nq->is_virtual && !nq->is_bridge && nq->bounce_context) {
+ 		/*
+ 		 * Unregister for interface bouncing of packets
+ 		 */
+ 		nss_qdisc_info("Unregister for interface bouncing: %px\n",
+ 				nq->bounce_context);
+ 		nss_shaper_unregister_shaper_bounce_interface(nq->nss_interface_number);
++		nq->bounce_context = NULL;
+ 	}
+ 
+ 	/*
+@@ -567,6 +569,12 @@
+ 	nss_qdisc_info("Unregister for shaping\n");
+ 	nss_shaper_unregister_shaping(nq->nss_shaping_ctx);
+ 
++}
++
++static void nss_qdisc_root_cleanup_final(struct nss_qdisc *nq)
++{
++	nss_qdisc_root_cleanup_host(nq);
++
+ 	/*
+ 	 * Now set our final state and wake up the caller
+ 	 */
+@@ -631,19 +639,27 @@
+  * nss_qdisc_root_cleanup_free_node_callback()
+  *	Invoked on the response to freeing a shaper node
+  */
++static bool nss_qdisc_node_free_succeeded(const struct nss_if_msg *nim)
++{
++	return nim->cm.response == NSS_CMN_RESPONSE_ACK &&
++		nim->cm.len >= offsetof(struct nss_if_shaper_configure, config.response_type) +
++				 sizeof(nim->msg.shaper_configure.config.response_type) &&
++		nim->msg.shaper_configure.config.response_type == NSS_SHAPER_RESPONSE_TYPE_SUCCESS;
++}
++
+ static void nss_qdisc_root_cleanup_free_node_callback(void *app_data,
+ 						struct nss_if_msg *nim)
+ {
+ 	struct nss_qdisc *nq = (struct nss_qdisc *)app_data;
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_qdisc_error("Root qdisc %px (type %d) free FAILED response "
+-					"type: %d\n", nq->qdisc, nq->type,
+-					nim->msg.shaper_configure.config.response_type);
++	if (!nss_qdisc_node_free_succeeded(nim)) {
++		nss_qdisc_error("Root qdisc %px (type %d) FREE not confirmed\n",
++				nq->qdisc, nq->type);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_NODE_FREE_FAIL);
+ 		wake_up(&nq->wait_queue);
+ 		return;
+ 	}
+ 
++	WRITE_ONCE(nq->fw_node_free_confirmed, true);
+ 	nss_qdisc_info("Root qdisc %px (type %d) free SUCCESS - response "
+ 			"type: %d\n", nq->qdisc, nq->type,
+ 			nim->msg.shaper_configure.config.response_type);
+@@ -861,14 +877,15 @@
+ {
+ 	struct nss_qdisc *nq = (struct nss_qdisc *)app_data;
+ 
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_qdisc_error("Qdisc %px (type %d qos_tag %x): child free FAILED response type: %d\n",
+-			nq->qdisc, nq->type, nq->qos_tag, nim->msg.shaper_configure.config.response_type);
++	if (!nss_qdisc_node_free_succeeded(nim)) {
++		nss_qdisc_error("Qdisc %px (type %d qos_tag %x): child FREE not confirmed\n",
++			nq->qdisc, nq->type, nq->qos_tag);
+ 		atomic_set(&nq->state, NSS_QDISC_STATE_NODE_FREE_FAIL);
+ 		wake_up(&nq->wait_queue);
+ 		return;
+ 	}
+ 
++	WRITE_ONCE(nq->fw_node_free_confirmed, true);
+ 	nss_qdisc_info("Qdisc %px (type %d): child shaper node "
+ 			"free complete\n", nq->qdisc, nq->type);
+ 
+@@ -1977,6 +1994,7 @@
+ 	tcf_destroy_chain(&nq->filter_list);
+ #else
+ 	tcf_block_put(nq->block);
++	nq->block = NULL;
+ #endif
+ 
+ #if defined(NSS_QDISC_PPE_SUPPORT)
+@@ -1992,8 +2010,10 @@
+ 	nss_qdisc_command_cancel(nq);
+ 	state = atomic_read(&nq->state);
+ 	if (state != NSS_QDISC_STATE_READY) {
+-		if (nq->is_root)
++		if (nq->is_root) {
+ 			nss_qdisc_stats_stop_polling(nq);
++			nss_qdisc_root_cleanup_host(nq);
++		}
+ 		return;
+ 	}
+ 
+@@ -2037,12 +2057,15 @@
+ 	 * Wait until cleanup operation is complete at which point the state
+ 	 * shall become idle.
+ 	 */
+-	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) == NSS_QDISC_STATE_IDLE,
++	if (!wait_event_timeout(nq->wait_queue, atomic_read(&nq->state) <= NSS_QDISC_STATE_IDLE,
+ 				NSS_QDISC_COMMAND_TIMEOUT)) {
+ 		nss_qdisc_command_cancel(nq);
+ 		nss_qdisc_error("destroy command for %x timedout!\n", nq->qos_tag);
+ 	}
+ 	nss_qdisc_command_cancel(nq);
++	/* Host bounce callbacks must not outlive a failed firmware teardown. */
++	if (nq->is_root)
++		nss_qdisc_root_cleanup_host(nq);
+ 
+ 	state = atomic_read(&nq->state);
+ 	if (state != NSS_QDISC_STATE_IDLE) {
+@@ -2120,6 +2143,7 @@
+ 	 */
+ 	nq->qdisc = sch;
+ 	nq->type = type;
++	WRITE_ONCE(nq->fw_node_free_confirmed, false);
+ 
+ #if defined(NSS_QDISC_PPE_SUPPORT)
+ 	/*
+--- a/nss_qdisc/nss_codel.c
++++ b/nss_qdisc/nss_codel.c
+@@ -16,6 +16,23 @@
+ 
+ #include "nss_qdisc.h"
+ #include "nss_codel.h"
++#include <linux/device.h>
++
++/* No host qdisc or callback pointers survive an unconfirmed firmware FREE. */
++struct nss_codel_flow_memory {
++	struct list_head list;
++	struct device *dev;
++	unsigned long pages;
++	dma_addr_t dma;
++	u32 bytes;
++	unsigned int order;
++	bool mapped;
++	bool published;
++};
++
++static LIST_HEAD(nss_codel_retained_flow_memory);
++static DEFINE_SPINLOCK(nss_codel_retained_lock);
++static atomic_long_t nss_codel_retained_bytes = ATOMIC_LONG_INIT(0);
+ 
+ /*
+  * Default number of flow queues used (in fq_codel) if user doesn't specify a value.
+@@ -64,6 +81,7 @@
+ 	dma_addr_t dma_mapped_mem ;
+ 				/* Mapped memory address */
+ 	u32 flow_queue_sz;	/* Size of a flow queue in firmware (bytes) */
++	struct nss_codel_flow_memory *flow_memory;
+ 	u8 ecn;			/* 0 - disable ECN, 1 - enable ECN */
+ 	u8 set_default;		/* Flag to set qdisc as default qdisc for enqueue */
+ 	struct nss_codel_stats_sq sq_stats;
+@@ -135,22 +153,33 @@
+  */
+ static void nss_codel_flow_queues_free(struct nss_codel_sched_data *q)
+ {
+-	if (!q->flow_queue_mem) {
+-		return;
+-	}
++	struct nss_codel_flow_memory *memory = q->flow_memory;
+ 
+-	/*
+-	 * If DMA mapping was successful, unmap it.
+-	 */
+-	if (!dma_mapping_error(nss_shaper_get_dev(), q->dma_mapped_mem)) {
+-		nss_qdisc_trace("Unmapping flow queue memory\n");
+-		dma_unmap_single(nss_shaper_get_dev(), q->dma_mapped_mem, q->flow_queue_sz * q->flows, DMA_FROM_DEVICE);
++	if (!memory) {
++		return;
+ 	}
+ 
+-	free_pages(q->flow_queue_mem, get_order(q->flow_queue_sz * q->flows));
++	q->flow_memory = NULL;
+ 	q->flow_queue_mem = 0;
+ 	q->dma_mapped_mem = (dma_addr_t)0;
++	if (memory->published && !READ_ONCE(q->nq.fw_node_free_confirmed)) {
++		/* The firmware may still DMA here. Retain the mapping until reboot. */
++		__module_get(THIS_MODULE);
++		spin_lock_bh(&nss_codel_retained_lock);
++		list_add_tail(&memory->list, &nss_codel_retained_flow_memory);
++		spin_unlock_bh(&nss_codel_retained_lock);
++		atomic_long_add(memory->bytes, &nss_codel_retained_bytes);
++		nss_qdisc_error("FQ DMA retained after unconfirmed FREE: qos_tag=%x bytes=%u total=%ld; reboot required for release\n",
++				q->nq.qos_tag, memory->bytes, atomic_long_read(&nss_codel_retained_bytes));
++		return;
++	}
+ 
++	if (memory->mapped)
++		dma_unmap_single(memory->dev, memory->dma, memory->bytes, DMA_TO_DEVICE);
++	free_pages(memory->pages, memory->order);
++	if (memory->dev)
++		put_device(memory->dev);
++	kfree(memory);
+ 	nss_qdisc_trace("Flow queues freed\n");
+ }
+ 
+@@ -400,17 +429,36 @@
+ 					"shaping with %u\n", flows, q->flows);
+ 		}
+ 
++		q->flow_memory = kzalloc(sizeof(*q->flow_memory), GFP_KERNEL);
++		if (!q->flow_memory) {
++			free_pages(q->flow_queue_mem, order);
++			q->flow_queue_mem = 0;
++			return -ENOMEM;
++		}
++		q->flow_memory->pages = q->flow_queue_mem;
++		q->flow_memory->bytes = sz;
++		q->flow_memory->order = order;
++		q->flow_memory->dev = get_device(nss_shaper_get_dev());
++		if (!q->flow_memory->dev) {
++			nss_codel_flow_queues_free(q);
++			return -ENODEV;
++		}
++
+ 		nss_qdisc_info("Flows:%u Quantum:%u Ecn:%u\n",
+ 			q->flows, q->quantum, q->ecn);
+ 
+-		q->dma_mapped_mem = dma_map_single(nss_shaper_get_dev(), (void *)q->flow_queue_mem, sz, DMA_TO_DEVICE);
+-		if(unlikely(dma_mapping_error(nss_shaper_get_dev(), q->dma_mapped_mem))) {
++		q->dma_mapped_mem = dma_map_single(q->flow_memory->dev, (void *)q->flow_queue_mem, sz, DMA_TO_DEVICE);
++		if (unlikely(dma_mapping_error(q->flow_memory->dev, q->dma_mapped_mem))) {
+ 			nss_qdisc_warning("DMA map failed for virtual address = %lu\n", q->flow_queue_mem);
+ 			nss_codel_flow_queues_free(q);
+ 			return -ENOMEM;
+ 		}
++		q->flow_memory->dma = q->dma_mapped_mem;
++		q->flow_memory->mapped = true;
+ 		nss_qdisc_trace("Successfully allocated memory for flow queue\n");
+ 	}
++	if (q->flow_memory)
++		sz = q->flow_memory->bytes;
+ 
+ 	/*
+ 	 * Target and interval time needs to be provided in milliseconds
+@@ -430,6 +478,9 @@
+ 	nss_qdisc_info("MTU size of interface %s is %u bytes\n",
+ 			dev->name, config->snc.codel_param.cap.mtu);
+ 
++	/* A missing configure reply does not prove that DMA was never published. */
++	if (q->flow_memory)
++		q->flow_memory->published = true;
+ 	if (nss_qdisc_configure(&q->nq, &nim,
+ 				NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_CHANGE_PARAM) < 0) {
+ 		goto fail;
+@@ -453,7 +504,7 @@
+ 	return 0;
+ 
+ fail:
+-	if (free_flow_queue) {
++	if (free_flow_queue && q->flow_memory && !q->flow_memory->published) {
+ 		nss_codel_flow_queues_free(q);
+ 	}
+

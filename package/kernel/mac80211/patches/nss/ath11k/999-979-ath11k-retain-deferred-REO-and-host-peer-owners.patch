@@ -1,0 +1,191 @@
+Subject: [PATCH] ath11k: serialize REO quarantine and retain host peer owners
+
+Drain REO status and host-peer critical sections before publishing
+unresolved ownership. Keep peer RX TID metadata without allocation,
+and use one finalizer for every host peer release path.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -748,6 +748,23 @@
+ 					 HAL_REO_CMD_UPDATE_RX_QUEUE,
+ 					 &cmd,
+ 					 ath11k_dp_rx_tid_del_func);
++}
++
++void ath11k_dp_dma_quarantine(struct ath11k_base *ab)
++{
++	struct hal_srng *srng = &ab->hal.srng_list[ab->dp.reo_status_ring.ring_id];
++	bool status_live = READ_ONCE(srng->initialized);
++
++	/* Status callbacks can retire the descriptor and then their command owner.
++	 * Drain that critical section before publishing permanent retention.
++	 */
++	if (status_live)
++		spin_lock_bh(&srng->lock);
++	spin_lock_bh(&ab->base_lock);
++	WRITE_ONCE(ab->nss.ownership_uncertain, true);
++	spin_unlock_bh(&ab->base_lock);
++	if (status_live)
++		spin_unlock_bh(&srng->lock);
+ }
+ 
+ void ath11k_dp_reo_cmd_list_cleanup(struct ath11k_base *ab)
+@@ -959,6 +976,9 @@
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_dp *dp = &ab->dp;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	if (!rx_tid->active)
+ 		return;
+ 
+@@ -1143,6 +1163,9 @@
+ 	struct dp_rx_tid *rx_tid;
+ 
+ 	spin_lock_bh(&ar->ab->base_lock);
++
++	if (READ_ONCE(ar->ab->nss.ownership_uncertain))
++		goto unlock_exit;
+ 
+ 	peer = ath11k_peer_find(ar, vdev_id, peer_mac);
+ 	if (!peer) {
+@@ -5391,6 +5414,11 @@
+ 
+ 	spin_lock_bh(&srng->lock);
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain)) {
++		spin_unlock_bh(&srng->lock);
++		return;
++	}
++
+ 	ath11k_hal_srng_access_begin(ab, srng);
+ 
+ 	while ((reo_desc = ath11k_hal_srng_dst_get_next_entry(ab, srng))) {
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.h
+@@ -116,6 +116,7 @@
+ int ath11k_dp_rx_pdev_alloc(struct ath11k_base *ab, int pdev_idx);
+ void ath11k_dp_rx_pdev_free(struct ath11k_base *ab, int pdev_idx);
+ void ath11k_dp_reo_cmd_list_cleanup(struct ath11k_base *ab);
++void ath11k_dp_dma_quarantine(struct ath11k_base *ab);
+ void ath11k_dp_process_reo_status(struct ath11k_base *ab);
+ int ath11k_dp_process_rxdma_err(struct ath11k_base *ab, int mac_id, int budget);
+ int ath11k_dp_rx_process_wbm_err(struct ath11k_base *ab,
+--- a/drivers/net/wireless/ath/ath11k/peer.c
++++ b/drivers/net/wireless/ath/ath11k/peer.c
+@@ -413,6 +413,25 @@
+ }
+ #endif
+ 
++void ath11k_peer_release(struct ath11k *ar, struct ath11k_peer *peer)
++{
++	struct ath11k_base *ab = ar->ab;
++
++	lockdep_assert_held(&ab->base_lock);
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++	ath11k_nss_peer_detach(ar, peer);
++	/* Local finalization has no firmware-provided WDS count to compare. */
++	ath11k_peer_ast_cleanup(ar, peer, true, 0);
++	if (ar->bss_peer == peer)
++		ar->bss_peer = NULL;
++#endif
++	if (READ_ONCE(ab->nss.ownership_uncertain)) {
++		list_add_tail(&peer->list, &ab->nss.retained_host_peers);
++		return;
++	}
++	kfree(peer);
++}
++
+ void ath11k_peer_unmap_event(struct ath11k *ar, u16 peer_id)
+ {
+ 	struct ath11k_peer *peer;
+@@ -437,7 +456,7 @@
+ 		ar->bss_peer = NULL;
+ #endif
+ 	list_del(&peer->list);
+-	kfree(peer);
++	ath11k_peer_release(ar, peer);
+ 	wake_up(&ar->peer_mapping_wq);
+ 
+ exit:
+@@ -481,7 +500,7 @@
+ 		ar->bss_peer = NULL;
+ #endif
+ 	list_del(&peer->list);
+-	kfree(peer);
++	ath11k_peer_release(ar, peer);
+ 	wake_up(&ar->peer_mapping_wq);
+ 
+ exit:
+@@ -711,7 +730,7 @@
+ #endif
+ 		ath11k_peer_rhash_delete(ar, peer);
+ 		list_del(&peer->list);
+-		kfree(peer);
++		ath11k_peer_release(ar, peer);
+ 		ar->num_peers--;
+ 	}
+ 
+--- a/drivers/net/wireless/ath/ath11k/peer.h
++++ b/drivers/net/wireless/ath/ath11k/peer.h
+@@ -111,6 +111,8 @@
+ 				     const u8 *addr);
+ struct ath11k_peer *ath11k_peer_find_by_ast(struct ath11k *ar, int ast_hash);
+ void ath11k_peer_cleanup(struct ath11k *ar, u32 vdev_id);
++/* Caller holds base_lock and has already detached peer->list. */
++void ath11k_peer_release(struct ath11k *ar, struct ath11k_peer *peer);
+ int ath11k_peer_delete(struct ath11k *ar, u32 vdev_id, u8 *addr);
+ int ath11k_peer_create(struct ath11k *ar, struct ath11k_vif *arvif,
+ 		       struct ieee80211_sta *sta, struct peer_create_params *param);
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -920,7 +920,7 @@
+ 		ath11k_peer_rx_tid_cleanup(ar, peer);
+ 		ath11k_peer_rhash_delete(ar, peer);
+ 		list_del(&peer->list);
+-		kfree(peer);
++		ath11k_peer_release(ar, peer);
+ 	}
+ 	spin_unlock_bh(&ab->base_lock);
+ 	mutex_unlock(&ar->tbl_mtx_lock);
+@@ -10409,7 +10409,7 @@
+ 			ath11k_peer_rhash_delete(ar, peer);
+ 			peer->sta = NULL;
+ 			list_del(&peer->list);
+-			kfree(peer);
++			ath11k_peer_release(ar, peer);
+ 			ar->num_peers--;
+ 		}
+ 		spin_unlock_bh(&ar->ab->base_lock);
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2926,6 +2926,7 @@
+ 	mutex_init(&ab->qmi.mem_lock);
+ 	mutex_init(&ab->base_ast_lock);
+ 	spin_lock_init(&ab->base_lock);
++	INIT_LIST_HEAD(&ab->nss.retained_host_peers);
+ 	mutex_init(&ab->vdev_id_11d_lock);
+ 	init_completion(&ab->reset_complete);
+ 	init_completion(&ab->reconfigure_complete);
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -5085,7 +5085,7 @@
+ 	ret = ath11k_nss_command_send(ab->nss.ctx, wlmsg, NULL);
+ unregister:
+ 	if (ret) {
+-		ab->nss.ownership_uncertain = true;
++		ath11k_dp_dma_quarantine(ab);
+ 		nss_wifili_interface_quarantine(ab->nss.ctx, ab->nss.if_num);
+ 		nss_wifili_soc_quarantine(ab->nss.ctx, ab->nss.if_num,
+ 					ath11k_nss_get_target_type(ab), ab);
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -281,6 +281,7 @@
+ 	bool peers_initialized;
+ 	bool ownership_uncertain;
+ 	bool dma_metadata_retained;
++	struct list_head retained_host_peers;
+ 	bool quiescing;
+ 	bool registered;
+ 	bool init_submitted;

@@ -1,0 +1,96 @@
+Subject: [PATCH] bridge-mgr: coordinate dynamic port ownership
+
+Retain failed join ownership and expose process-context join/revoke APIs.
+Revocation names the saved firmware interface, not a new dataplane lookup.
+
+--- a/bridge/nss_bridge_mgr.c
++++ b/bridge/nss_bridge_mgr.c
+@@ -58,6 +58,7 @@
+ 	struct net_device *dev;
+ 	int32_t ifnum;
+ 	bool leaving;
++	bool uncertain;
+ };
+ 
+ static struct delayed_work nss_bridge_reconcile_work;
+@@ -845,7 +846,7 @@
+ 	}
+ 	member = nss_bridge_mgr_find_member(br, dev);
+ 	if (member && member->ifnum == ifnum)
+-		return member->leaving ? -EAGAIN : 0;
++		return (member->leaving || member->uncertain) ? -EAGAIN : 0;
+ 	if (member)
+ 		nss_bridge_mgr_delete_member(member);
+ 	member = kzalloc(sizeof(*member), GFP_KERNEL);
+@@ -929,7 +930,14 @@
+ 	if (nss_bridge_tx_join_msg(br->ifnum, dev) != NSS_TX_SUCCESS) {
+ 		nss_bridge_mgr_warn("%px: Interface %s join bridge failed\n", br, dev->name);
+ #if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+-		kfree(member);
++		/* Timeout does not prove that firmware rejected this member. */
++		member->dev = dev;
++		member->ifnum = ifnum;
++		member->uncertain = true;
++		member->leaving = true;
++		dev_hold(dev);
++		list_add_tail(&member->list, &br->members);
++		nss_bridge_mgr_schedule_reconcile();
+ #endif
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 		if (NSS_BRIDGE_MGR_IF_IS_TYPE_PHYSICAL(ifnum)) {
+@@ -1891,3 +1899,55 @@
+ 
+ module_param(fdb_disabled, bool, 0644);
+ MODULE_PARM_DESC(fdb_disabled, "fdb learning is disabled");
++
++/* Interface owners hold RTNL and keep the dataplane published until revoke
++ * succeeds. Neither helper lends an unreferenced bridge-instance pointer.
++ */
++int nss_bridge_mgr_offload_port_join(struct net_device *dev)
++{
++	struct net_device *master;
++	struct nss_bridge_pvt *br;
++
++	ASSERT_RTNL();
++	master = netdev_master_upper_dev_get(dev);
++	if (!master || !netif_is_bridge_master(master))
++		return 0;
++	br = nss_bridge_mgr_find_instance(master);
++	if (!br)
++		return -EAGAIN;
++	return nss_bridge_mgr_join_bridge(dev, br);
++}
++EXPORT_SYMBOL_GPL(nss_bridge_mgr_offload_port_join);
++
++int nss_bridge_mgr_offload_port_revoke(struct net_device *dev, int ifnum)
++{
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	struct nss_bridge_pvt *br;
++	struct nss_bridge_member *member;
++	struct nss_bridge_msg msg;
++
++	ASSERT_RTNL();
++	list_for_each_entry(br, &br_mgr_ctx.list, list) {
++		member = nss_bridge_mgr_find_member(br, dev);
++		if (!member)
++			continue;
++		if (member->ifnum != ifnum)
++			return -EBUSY;
++		/* Use recorded ownership, never a potentially changed lookup. */
++		memset(&msg, 0, sizeof(msg));
++		msg.msg.br_leave.if_num = ifnum;
++		nss_bridge_msg_init(&msg, br->ifnum, NSS_BRIDGE_MSG_LEAVE,
++				    sizeof(struct nss_bridge_leave_msg), NULL, NULL);
++		if (nss_bridge_tx_msg_sync(nss_bridge_get_context(), &msg) != NSS_TX_SUCCESS) {
++			member->leaving = true;
++			member->uncertain = true;
++			return -EIO;
++		}
++		nss_bridge_mgr_delete_member(member);
++	}
++	return 0;
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++EXPORT_SYMBOL_GPL(nss_bridge_mgr_offload_port_revoke);

@@ -1,0 +1,34 @@
+Subject: [PATCH] ecm: admit multicast without a unicast return flow
+
+Keep both-direction admission for unicast.  A published multicast UDP
+hierarchy uses a two-packet slow-path threshold because it has no reply.
+
+
+--- a/ecm_classifier_default.c
++++ b/ecm_classifier_default.c
+@@ -231,6 +231,25 @@
+ 	 * Delay forever until seeing the reply packet.
+ 	 */
+ 	if (ecm_classifier_accel_delay_pkts == 1) {
++#ifdef ECM_MULTICAST_ENABLE
++		/* Multicast UDP has no return flow.  Its published destination
++		 * hierarchy already proves membership; require two slow packets
++		 * instead of waiting forever for a unicast-style reply.
++		 */
++		if (cdii->protocol == IPPROTO_UDP) {
++			ci = ecm_db_connection_serial_find_and_ref(cdii->ci_serial);
++			if (!ci)
++				return false;
++			if (ecm_db_multicast_connection_to_interfaces_set_check(ci)) {
++				feci = ecm_db_connection_front_end_get_and_ref(ci);
++				slow_pkts = ecm_front_end_get_slow_packet_count(feci);
++				ecm_front_end_connection_deref(feci);
++				ecm_db_connection_deref(ci);
++				return slow_pkts >= 2;
++			}
++			ecm_db_connection_deref(ci);
++		}
++#endif
+ 		DEBUG_INFO("%px: Checking both direction traffic\n", cdii);
+ 
+ 		/*

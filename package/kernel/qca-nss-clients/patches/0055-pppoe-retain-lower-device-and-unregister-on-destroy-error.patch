@@ -1,0 +1,57 @@
+Retain the lower-device addressing snapshot for the entire CREATE transaction.
+Always revoke host registration before freeing its context, including DESTROY
+NACK/timeout. PPP channel events are serialized by the kernel event mutex.
+
+--- a/pppoe/nss_connmgr_pppoe.c
++++ b/pppoe/nss_connmgr_pppoe.c
+@@ -75,7 +75,6 @@ static int nss_connmgr_pppoe_get_session
+ 		return -1;
+ 	}
+ 
+-	dev_put(addressing->dev);
+ 	ppp_release_channels(channel, 1);
+ 	return 0;
+ }
+@@ -183,7 +182,6 @@ static int nss_connmgr_pppoe_disconnect
+ 	status = nss_pppoe_tx_msg_sync(nss_pppoe_get_context(), &npm);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_connmgr_pppoe_warn("%px: pppoe session destroy command failed, if_number = %d\n", dev, if_number);
+-		goto done;
+ 	}
+ 	nss_unregister_pppoe_session_if(if_number);
+ 	status = nss_dynamic_interface_dealloc_node(if_number, NSS_DYNAMIC_INTERFACE_TYPE_PPPOE);
+@@ -194,7 +192,6 @@ static int nss_connmgr_pppoe_disconnect
+ 				       dev, if_number, entry->info.session_id,
+ 				       entry->info.server_mac, entry->info.local_mac);
+ 	}
+-done:
+ 	kfree(entry);
+ 	return NOTIFY_DONE;
+ }
+@@ -244,7 +241,7 @@ static int nss_connmgr_pppoe_connect
+ 	if_number = nss_dynamic_interface_alloc_node(NSS_DYNAMIC_INTERFACE_TYPE_PPPOE);
+ 	if (if_number == -1) {
+ 		nss_connmgr_pppoe_warn("%px: Request interface number failed\n", dev);
+-		return NOTIFY_DONE;
++		goto put_lower;
+ 	}
+ 
+ 	if (!nss_is_dynamic_interface(if_number)) {
+@@ -346,7 +343,8 @@ static int nss_connmgr_pppoe_connect
+ 	}
+ 	nss_connmgr_pppoe_info("%px: PPPoE session creation is successful\n", dev);
+ 
+-	return NOTIFY_DONE;
++	dev_put(opt.dev);
++	return NOTIFY_DONE;
+ 
+ connect_fail3:
+ 	nss_unregister_pppoe_session_if(if_number);
+@@ -362,6 +360,8 @@ connect_fail1:
+ 		nss_connmgr_pppoe_warn("%px: Unable to dealloc the node[%d] in the NSS fw!\n", dev, if_number);
+ 	}
+ 
++put_lower:
++	dev_put(opt.dev);
+ 	return NOTIFY_DONE;
+ }

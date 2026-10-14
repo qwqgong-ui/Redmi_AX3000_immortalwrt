@@ -1,0 +1,113 @@
+Subject: [PATCH] nss-dp: confirm Synopsys DMA is stopped before reclaim
+
+MAC disable and NSS core halt do not stop autonomous GMAC DMA. Check
+both process states before releasing an old ring or restoring host rings.
+
+--- a/exports/nss_dp_api_if.h
++++ b/exports/nss_dp_api_if.h
+@@ -117,5 +117,7 @@ struct nss_dp_data_plane_ops {
+ 	void (*get_stats)(struct nss_dp_data_plane_ctx *dpc, struct nss_dp_gmac_stats *stats);
+ 	int (*deinit)(struct nss_dp_data_plane_ctx *dpc);
++	/* Host HAL method, also usable after an overlay's core is halted. */
++	int (*quiesce_dma)(struct nss_dp_data_plane_ctx *dpc);
+ };
+ 
+ /**
+@@ -194,5 +196,8 @@ int nss_dp_restore_data_plane(struct net_device *netdev);
+ int nss_dp_restore_data_plane(struct net_device *netdev);
+ 
++/* RTNL required; stops the local DMA engine without firmware cooperation. */
++int nss_dp_quiesce_dma(struct net_device *netdev);
++
+ /**
+  * nss_dp_get_netdev_by_nss_if_num
+  *	Returns the net device of the corresponding id if it exists.
+--- a/nss_dp_attach.c
++++ b/nss_dp_attach.c
+@@ -105,5 +105,12 @@ int nss_dp_override_data_plane(struct net_device *netdev,
+     }
+     if (dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_DONE)) {
++        struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
++
++        if (host->quiesce_dma) {
++            ret = nss_dp_quiesce_dma(netdev);
++            if (ret)
++                return ret;
++        }
+         /* The old owner's context, not the new driver's cookie. */
+         ret = dp_dev->data_plane_ops->deinit(dp_dev->dpc);
+         if (ret) {
+@@ -175,6 +181,11 @@ int nss_dp_restore_data_plane(struct net_device *netdev)
+     ret = dp_dev->data_plane_ops->close(dp_dev->dpc);
+     if (ret)
+         return ret < 0 ? ret : -EIO;
++    if (nss_dp_hal_get_data_plane_ops()->quiesce_dma) {
++        ret = nss_dp_quiesce_dma(netdev);
++        if (ret)
++            return ret;
++    }
+     if (dp_dev->gmac_hal_ops->stop) {
+         ret = dp_dev->gmac_hal_ops->stop(dp_dev->gmac_hal_ctx);
+         if (ret)
+@@ -224,2 +236,16 @@ struct net_device *nss_dp_get_netdev_by_nss_if_num(int if_num)
+ }
+ EXPORT_SYMBOL(nss_dp_get_netdev_by_nss_if_num);
++int nss_dp_quiesce_dma(struct net_device *netdev)
++{
++    struct nss_dp_dev *dp_dev = netdev_priv(netdev);
++    struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
++
++    ASSERT_RTNL();
++    if (!host->quiesce_dma)
++        return -EOPNOTSUPP;
++    netif_tx_disable(netdev);
++    netif_carrier_off(netdev);
++    return host->quiesce_dma(
++        &dp_global_data_plane_ctx[nss_dp_get_idx_from_macid(dp_dev->macid)]);
++}
++EXPORT_SYMBOL_GPL(nss_dp_quiesce_dma);
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp.c
+@@ -18,6 +18,7 @@
+ 
+ #include <nss_dp_dev.h>
+ #include <linux/irq.h>
++#include <linux/iopoll.h>
+ #include "syn_dma_reg.h"
+ 
+ /*
+@@ -437,6 +438,28 @@ static int syn_dp_if_deinit(struct nss_dp_data_plane_ctx *dpc)
+ 	return NSS_DP_SUCCESS;
+ }
+ 
++static int syn_dp_quiesce_dma(struct nss_dp_data_plane_ctx *dpc)
++{
++	struct nss_dp_dev *gmac = netdev_priv(dpc->dev);
++	void __iomem *base = gmac->gmac_hal_ctx->mac_base;
++	u32 status;
++	int ret;
++
++	if (gmac->gmac_hal_ops->stop) {
++		ret = gmac->gmac_hal_ops->stop(gmac->gmac_hal_ctx);
++		if (ret)
++			return ret < 0 ? ret : -EIO;
++	}
++	syn_disable_dma_interrupt(base);
++	syn_disable_dma_rx(base);
++	syn_disable_dma_tx(base);
++	ret = readl_poll_timeout(base + SYN_DMA_STATUS, status,
++		!(status & (SYN_DMA_TX_STATE | SYN_DMA_RX_STATE)), 10, 50000);
++	if (ret)
++		netdev_err(dpc->dev, "DMA did not stop: status=%#x\n", status);
++	return ret;
++}
++
+ /*
+  * nss_dp_gmac_ops
+  *	Data plane operations for Synopsys GMAC
+@@ -453,4 +476,5 @@ struct nss_dp_data_plane_ops nss_dp_gmac_ops = {
+ 	.pause_on_off	= syn_dp_if_pause_on_off,
+ 	.get_stats	= syn_dp_if_get_stats,
+ 	.deinit		= syn_dp_if_deinit,
++	.quiesce_dma	= syn_dp_quiesce_dma,
+ };

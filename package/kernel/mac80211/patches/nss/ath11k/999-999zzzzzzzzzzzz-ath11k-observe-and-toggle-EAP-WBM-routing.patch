@@ -1,0 +1,70 @@
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2273,6 +2273,55 @@
+ 	.release = single_release,
+ };
+ 
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++static ssize_t ath11k_nss_eap_route_write(struct file *file,
++					const char __user *user_buf,
++					size_t count, loff_t *ppos)
++{
++	struct ath11k *ar = file->private_data;
++	struct ath11k_base *ab = ar->ab;
++	char buf[8];
++	bool enable;
++	int ret;
++
++	if (!count || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++	if (kstrtobool(buf, &enable))
++		return -EINVAL;
++	mutex_lock(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON && ar->state != ATH11K_STATE_RESTARTED) {
++		ret = -ENETDOWN;
++		goto out;
++	}
++	if (!ab->nss.enabled || !ab->nss.registered || ab->nss.quiescing ||
++	    ab->nss.ownership_uncertain ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
++		ret = -ESHUTDOWN;
++		goto out;
++	}
++	/* Diagnostic control only: WMI submission is not firmware readback.
++	 * Deleting this CCE rule keeps the peer's ordinary hardware RX route.
++	 * Radio stop/start still restores the existing default rule lifecycle.
++	 */
++	ret = ath11k_dp_rx_pkt_type_filter(ar, ATH11K_PKT_TYPE_EAP,
++					 ATH11K_ROUTE_EAP_METADATA, enable);
++	ath11k_info(ab, "NSS EAP CCE rule enable=%u submit_result=%d\n", enable, ret);
++out:
++	mutex_unlock(&ar->conf_mutex);
++	return ret ? ret : count;
++}
++
++static const struct file_operations fops_nss_eap_route = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = ath11k_nss_eap_route_write,
++};
++#endif
++
+ int ath11k_debugfs_register(struct ath11k *ar)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -2310,6 +2359,11 @@
+ 			    ar->debug.debugfs_pdev, ar, &fops_wmi_key_stats);
+ 	debugfs_create_file("monitor_stats", 0400,
+ 			    ar->debug.debugfs_pdev, ar, &fops_monitor_stats);
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++	if (ab->nss.enabled)
++		debugfs_create_file("nss_eap_route", 0200,
++				    ar->debug.debugfs_pdev, ar, &fops_nss_eap_route);
++#endif
+ 	debugfs_create_file("monitor_metadata", 0400,
+ 			    ar->debug.debugfs_pdev, ar, &fops_mon_metadata);
+ 	debugfs_create_file("pktlog_filter", 0644,

@@ -1,0 +1,45 @@
+Subject: [PATCH] ath11k: unwind the NSS EAP route after failed radio start
+
+mac80211 does not call stop when start fails. If monitor or idle-PS
+configuration fails after the EAP route ADD, queue its DEL before
+returning the original error. Only unwind the ADD sent by this attempt;
+its successful send is not a firmware execution acknowledgement.
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -6804,6 +6804,8 @@
+ 	struct ath11k *ar = hw->priv;
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_pdev *pdev = ar->pdev;
++	bool eap_route_added = false;
++	int route_ret;
+ 	int ret;
+ 
+ 	if (ath11k_ftm_mode) {
+@@ -6894,6 +6896,7 @@
+ 			ath11k_err(ar->ab, "failed to configure EAP pkt route: %d\n", ret);
+ 			goto err;
+ 		}
++		eap_route_added = true;
+ 	}
+ 
+ 	__ath11k_set_antenna(ar, ar->cfg_tx_chainmask, ar->cfg_rx_chainmask);
+@@ -6941,6 +6944,18 @@
+ 	return 0;
+ 
+ err:
++	/* mac80211 does not call stop for a failed start. Undo only the
++	 * route queued by this attempt, preserving the original failure.
++	 * The WMI send result does not acknowledge firmware execution.
++	 */
++	if (eap_route_added) {
++		route_ret = ath11k_dp_rx_pkt_type_filter(ar, ATH11K_PKT_TYPE_EAP,
++						      ATH11K_ROUTE_EAP_METADATA,
++						      false);
++		if (route_ret)
++			ath11k_warn(ab, "failed to unwind EAP pkt route: %d\n",
++				    route_ret);
++	}
+ 	ar->state = ATH11K_STATE_OFF;
+ 	mutex_unlock(&ar->conf_mutex);
+ 

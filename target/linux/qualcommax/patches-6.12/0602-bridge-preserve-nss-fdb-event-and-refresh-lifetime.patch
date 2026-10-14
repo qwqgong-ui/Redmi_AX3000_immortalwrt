@@ -1,0 +1,247 @@
+Subject: [PATCH] bridge: preserve typed NSS FDB events and refresh lifetime
+
+Send complete synchronous move events with the original port preserved. Replaced
+remote entries becoming local use the existing delete chain. Cover administrative
+and external-learn replacements and keep ageing on its single delete event.
+Protect NSS refresh lookups for the lifetime of the bridge port.
+
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -200,6 +200,7 @@
+ 		       bool swdev_notify)
+ {
+ 	struct net *net = dev_net(br->dev);
++	struct net_bridge_port *dst = READ_ONCE(fdb->dst);
+ 	struct sk_buff *skb;
+ 	int err = -ENOBUFS;
+ 
+@@ -207,16 +208,18 @@
+ 		br_switchdev_fdb_notify(br, fdb, type);
+ 
+ 	/* QCA NSS ECM support - Start */
+-	if (fdb->dst) {
++	if (dst) {
+ 		int event;
+-		struct br_fdb_event fdb_event;
++		struct br_fdb_event fdb_event = {
++			.br = br,
++		};
+ 
+ 		if (type == RTM_NEWNEIGH)
+ 			event = BR_FDB_EVENT_ADD;
+ 		else
+ 			event = BR_FDB_EVENT_DEL;
+ 
+-		fdb_event.dev = fdb->dst->dev;
++		fdb_event.dev = dst->dev;
+ 		ether_addr_copy(fdb_event.addr, fdb->key.addr.addr);
+ 		fdb_event.is_local = test_bit(BR_FDB_LOCAL, &fdb->flags);
+ 		atomic_notifier_call_chain(&br_fdb_notifier_list,
+@@ -590,6 +593,36 @@
+ EXPORT_SYMBOL_GPL(br_fdb_update_unregister_notify);
+ /* QCA NSS ECM support - End */
+ 
++/* Invalidate the old remote identity before a replaced entry is advertised. */
++static void br_fdb_notify_move(struct net_bridge *br,
++			       const struct net_bridge_fdb_entry *fdb,
++			       struct net_bridge_port *orig_dst, bool orig_local)
++{
++	struct net_bridge_port *dst = READ_ONCE(fdb->dst);
++	bool is_local = test_bit(BR_FDB_LOCAL, &fdb->flags);
++	struct br_fdb_event event = {
++		.br = br,
++	};
++
++	if (!orig_dst || orig_local || (orig_dst == dst && !is_local))
++		return;
++
++	ether_addr_copy(event.addr, fdb->key.addr.addr);
++	if (!dst || is_local) {
++		/* The remote entry no longer exists; DEL describes its old port.
++		 * Keep the move chain's two non-NULL remote ports contract.
++		 */
++		event.dev = orig_dst->dev;
++		atomic_notifier_call_chain(&br_fdb_notifier_list,
++					   BR_FDB_EVENT_DEL, &event);
++		return;
++	}
++
++	event.orig_dev = orig_dst->dev;
++	event.dev = dst->dev;
++	atomic_notifier_call_chain(&br_fdb_update_notifier_list, 0, &event);
++}
++
+ void br_fdb_cleanup(struct work_struct *work)
+ {
+ 	struct net_bridge *br = container_of(work, struct net_bridge,
+@@ -598,7 +631,6 @@
+ 	unsigned long delay = hold_time(br);
+ 	unsigned long work_delay = delay;
+ 	unsigned long now = jiffies;
+-	u8 mac_addr[6]; /* QCA NSS ECM support */
+ 
+ 	/* this part is tricky, in order to avoid blocking learning and
+ 	 * consequently forwarding, we rely on rcu to delete objects with
+@@ -625,15 +657,8 @@
+ 			work_delay = min(work_delay, this_timer - now);
+ 		} else {
+ 			spin_lock_bh(&br->hash_lock);
+-			if (!hlist_unhashed(&f->fdb_node)) {
+-				ether_addr_copy(mac_addr, f->key.addr.addr);
++			if (!hlist_unhashed(&f->fdb_node))
+ 				fdb_delete(br, f, true);
+-				/* QCA NSS ECM support - Start */
+-				atomic_notifier_call_chain(
+-					&br_fdb_update_notifier_list, 0,
+-					(void *)mac_addr);
+-				/* QCA NSS ECM support - End */
+-			}
+ 			spin_unlock_bh(&br->hash_lock);
+ 		}
+ 	}
+@@ -972,6 +997,7 @@
+ 					source->dev->name, addr, vid);
+ 		} else {
+ 			unsigned long now = jiffies;
++			struct net_bridge_port *orig_dst = READ_ONCE(fdb->dst);
+ 			bool fdb_modified = false;
+ 
+ 			if (now != READ_ONCE(fdb->updated)) {
+@@ -980,7 +1006,7 @@
+ 			}
+ 
+ 			/* fastpath: update of existing entry */
+-			if (unlikely(source != READ_ONCE(fdb->dst) &&
++			if (unlikely(source != orig_dst &&
+ 				     !test_bit(BR_FDB_STICKY, &fdb->flags))) {
+ 				br_switchdev_fdb_notify(br, fdb, RTM_DELNEIGH);
+ 				WRITE_ONCE(fdb->dst, source);
+@@ -996,11 +1022,7 @@
+ 				if (unlikely(test_bit(BR_FDB_LOCKED, &fdb->flags)))
+ 					clear_bit(BR_FDB_LOCKED, &fdb->flags);
+ 
+-				/* QCA NSS ECM support - Start */
+-				atomic_notifier_call_chain(
+-					&br_fdb_update_notifier_list,
+-					0, (void *)addr);
+-				/* QCA NSS ECM support - End */
++				br_fdb_notify_move(br, fdb, orig_dst, false);
+ 			}
+ 
+ 			if (unlikely(test_bit(BR_FDB_ADDED_BY_USER, &flags))) {
+@@ -1032,10 +1054,7 @@
+ /* Refresh FDB entries for bridge packets being forwarded by offload engines */
+ void br_refresh_fdb_entry(struct net_device *dev, const char *addr)
+ {
+-	struct net_bridge_port *p = br_port_get_rcu(dev);
+-
+-	if (!p || p->state == BR_STATE_DISABLED)
+-		return;
++	struct net_bridge_port *p;
+ 
+ 	if (!is_valid_ether_addr(addr)) {
+ 		pr_info("bridge: Attempt to refresh with invalid ether address %pM\n",
+@@ -1044,7 +1063,11 @@
+ 	}
+ 
+ 	rcu_read_lock();
++	p = br_port_get_check_rcu(dev);
++	if (!p || p->state == BR_STATE_DISABLED)
++		goto out;
+ 	br_fdb_update(p->br, p, addr, 0, true);
++out:
+ 	rcu_read_unlock();
+ }
+ EXPORT_SYMBOL_GPL(br_refresh_fdb_entry);
+@@ -1053,16 +1076,17 @@
+ void br_fdb_entry_refresh(struct net_device *dev, const char *addr, __u16 vid)
+ {
+ 	struct net_bridge_fdb_entry *fdb;
+-	struct net_bridge_port *p = br_port_get_rcu(dev);
+-
+-	if (!p || p->state == BR_STATE_DISABLED)
+-		return;
++	struct net_bridge_port *p;
+ 
+ 	rcu_read_lock();
++	p = br_port_get_check_rcu(dev);
++	if (!p || p->state == BR_STATE_DISABLED)
++		goto out;
+ 	fdb = fdb_find_rcu(&p->br->fdb_hash_tbl, addr, vid);
+ 	if (likely(fdb)) {
+-		fdb->updated = jiffies;
++		WRITE_ONCE(fdb->updated, jiffies);
+ 	}
++out:
+ 	rcu_read_unlock();
+ }
+ EXPORT_SYMBOL_GPL(br_fdb_entry_refresh);
+@@ -1071,14 +1095,15 @@
+ struct net_bridge_fdb_entry *br_fdb_has_entry(struct net_device *dev,
+ 					      const char *addr, __u16 vid)
+ {
+-	struct net_bridge_port *p = br_port_get_rcu(dev);
+-	struct net_bridge_fdb_entry *fdb;
+-
+-	if (!p || p->state == BR_STATE_DISABLED)
+-		return NULL;
++	struct net_bridge_port *p;
++	struct net_bridge_fdb_entry *fdb = NULL;
+ 
+ 	rcu_read_lock();
++	p = br_port_get_check_rcu(dev);
++	if (!p || p->state == BR_STATE_DISABLED)
++		goto out;
+ 	fdb = fdb_find_rcu(&p->br->fdb_hash_tbl, addr, vid);
++out:
+ 	rcu_read_unlock();
+ 
+ 	return fdb;
+@@ -1199,6 +1224,8 @@
+ 	bool is_sticky = !!(ndm->ndm_flags & NTF_STICKY);
+ 	bool refresh = !nfea_tb[NFEA_DONT_REFRESH];
+ 	struct net_bridge_fdb_entry *fdb;
++	struct net_bridge_port *orig_dst = NULL;
++	bool orig_local = true;
+ 	u16 state = ndm->ndm_state;
+ 	bool modified = false;
+ 	u8 notify = 0;
+@@ -1240,6 +1267,8 @@
+ 		if (flags & NLM_F_EXCL)
+ 			return -EEXIST;
+ 
++		orig_dst = READ_ONCE(fdb->dst);
++		orig_local = test_bit(BR_FDB_LOCAL, &fdb->flags);
+ 		if (READ_ONCE(fdb->dst) != source) {
+ 			WRITE_ONCE(fdb->dst, source);
+ 			modified = true;
+@@ -1283,6 +1312,7 @@
+ 	if (modified) {
+ 		if (refresh)
+ 			WRITE_ONCE(fdb->updated, jiffies);
++		br_fdb_notify_move(br, fdb, orig_dst, orig_local);
+ 		fdb_notify(br, fdb, RTM_NEWNEIGH, true);
+ 	}
+ 
+@@ -1588,6 +1618,9 @@
+ 		}
+ 		fdb_notify(br, fdb, RTM_NEWNEIGH, swdev_notify);
+ 	} else {
++		struct net_bridge_port *orig_dst = READ_ONCE(fdb->dst);
++		bool orig_local = test_bit(BR_FDB_LOCAL, &fdb->flags);
++
+ 		if (locked &&
+ 		    (!test_bit(BR_FDB_LOCKED, &fdb->flags) ||
+ 		     READ_ONCE(fdb->dst) != p)) {
+@@ -1624,8 +1657,10 @@
+ 		    test_and_clear_bit(BR_FDB_DYNAMIC_LEARNED, &fdb->flags))
+ 			atomic_dec(&br->fdb_n_learned);
+ 
+-		if (modified)
++		if (modified) {
++			br_fdb_notify_move(br, fdb, orig_dst, orig_local);
+ 			fdb_notify(br, fdb, RTM_NEWNEIGH, swdev_notify);
++		}
+ 	}
+ 
+ err_unlock:

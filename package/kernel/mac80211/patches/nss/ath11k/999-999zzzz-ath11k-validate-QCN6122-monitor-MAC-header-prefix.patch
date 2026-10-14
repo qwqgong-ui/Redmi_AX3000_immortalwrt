@@ -1,0 +1,69 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -784,6 +784,7 @@
+ #define ATH11K_MON_META_FIRST_LAST BIT(12)
+ #define ATH11K_MON_META_DONE BIT(13)
+ #define ATH11K_MON_META_TRUSTED BIT(14)
++#define ATH11K_MON_META_HDR_TRUNCATED BIT(15)
+ 
+ struct ath11k_mon_meta_record {
+ 	u64 ordinal;
+--- a/drivers/net/wireless/ath/ath11k/rx_desc.h
++++ b/drivers/net/wireless/ath/ath11k/rx_desc.h
+@@ -1430,6 +1430,14 @@
+ 
+ #define HAL_RX_DESC_HDR_STATUS_LEN	120
+ 
++/* QCN6122 monitor prefix verified with the current compact RXDMA profile.
++ * The declared 132-byte header body exceeds the stored 124-byte prefix;
++ * only the MAC header inside hdr_status may be checked, never its tail.
++ */
++#define HAL_RX_DESC_QCN6122_MON_HDR_PPDU_ID GENMASK(31, 16)
++#define HAL_RX_DESC_QCN6122_MON_HDR_RESERVED GENMASK(15, 0)
++#define HAL_RX_DESC_QCN6122_MON_HDR_LEN 132
++
+ struct hal_rx_desc_ipq8074 {
+ 	__le32 msdu_end_tag;
+ 	struct rx_msdu_end_ipq8074 msdu_end;
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -6605,17 +6605,24 @@
+ 	r->header_ppdu = le32_to_cpu(d->phy_ppdu_id);
+ 	ath11k_mon_meta_probe(d, header_len - sizeof(d->phy_ppdu_id), r);
+ 	if (header_len < sizeof(d->phy_ppdu_id) + sizeof(h->frame_control) ||
+-	    header_len > sizeof(d->phy_ppdu_id) + sizeof(d->hdr_status))
++	    (header_len > sizeof(d->phy_ppdu_id) + sizeof(d->hdr_status) &&
++	     header_len != HAL_RX_DESC_QCN6122_MON_HDR_LEN))
+ 		return;
++	if (header_len > sizeof(d->phy_ppdu_id) + sizeof(d->hdr_status))
++		r->flags |= ATH11K_MON_META_HDR_TRUNCATED;
+ 	h = (const struct ieee80211_hdr *)d->hdr_status;
+ 	fc = h->frame_control;
+ 	if ((fc & cpu_to_le16(IEEE80211_FCTL_VERS)) || !ieee80211_is_data(fc))
+ 		return;
+ 	hdrlen = ieee80211_hdrlen(fc);
+-	if (hdrlen < 24 || hdrlen > header_len - sizeof(d->phy_ppdu_id))
++	if (hdrlen < 24 || hdrlen > r->header_bytes)
+ 		return;
+ 	r->flags |= ATH11K_MON_META_HDR_VALID;
+-	if ((r->header_ppdu & 0xffff) != r->ppdu ||
++	v = ATH11K_MON_META_FC_VALID | ATH11K_MON_META_RA_VALID |
++	    ATH11K_MON_META_TA_VALID | ATH11K_MON_META_SEQ_VALID;
++	if ((r->flags & v) != v ||
++	    (r->header_ppdu & HAL_RX_DESC_QCN6122_MON_HDR_RESERVED) ||
++	    FIELD_GET(HAL_RX_DESC_QCN6122_MON_HDR_PPDU_ID, r->header_ppdu) != r->ppdu ||
+ 	    r->fc != le16_to_cpu(fc) || r->seq_ctrl != le16_to_cpu(h->seq_ctrl) ||
+ 	    !ether_addr_equal(r->ra, h->addr1) || !ether_addr_equal(r->ta, h->addr2))
+ 		return;
+@@ -6630,7 +6637,9 @@
+ 		ATH11K_MON_META_RA_VALID | ATH11K_MON_META_TA_VALID | ATH11K_MON_META_SEQ_VALID |
+ 		ATH11K_MON_META_PPDU_MATCH | ATH11K_MON_META_HDR_VALID | ATH11K_MON_META_HDR_MATCH |
+ 		ATH11K_MON_META_END_VALID | ATH11K_MON_META_FIRST_LAST | ATH11K_MON_META_DONE;
+-	if ((r->flags & v) == v && !(r->flags & (ATH11K_MON_META_FCS_BAD | ATH11K_MON_META_CONTINUATION)))
++	if ((r->flags & v) == v &&
++	    !(r->flags & (ATH11K_MON_META_FCS_BAD | ATH11K_MON_META_CONTINUATION |
++			  ATH11K_MON_META_HDR_TRUNCATED)))
+ 		r->flags |= ATH11K_MON_META_TRUSTED;
+ }
+ 
+

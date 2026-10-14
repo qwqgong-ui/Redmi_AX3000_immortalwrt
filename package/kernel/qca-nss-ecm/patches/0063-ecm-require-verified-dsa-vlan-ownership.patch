@@ -1,0 +1,36 @@
+Subject: [PATCH] ecm: gate DSA hierarchy on verified NSS node ownership
+
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -83,6 +83,7 @@
+ #if IS_ENABLED(CONFIG_NET_DSA)
+ #include <linux/dsa/8021q.h>
+ #include <net/dsa.h>
++extern int qca_dsa_nss_if_num(struct net_device *conduit, u16 vid);
+ #endif
+ #ifdef ECM_INTERFACE_DSA_ENABLE
+ #include <linux/dsa/8021q.h>
+@@ -4102,6 +4103,23 @@
+ 		protocol = v4_hdr->protocol;
+ 	}
+ #endif
++#endif
++#if IS_ENABLED(CONFIG_NET_DSA)
++	/* A DSA rule must never outlive the verified VLAN node. The wire still
++	 * uses the conduit plus VID; the node number is only a readiness gate.
++	 */
++	if (dsa_user_dev_check(dev)) {
++		uint16_t vid;
++		struct net_device *conduit = ecm_interface_dsa_8021q_conduit(dev, &vid);
++
++		if (!conduit || qca_dsa_nss_if_num(conduit, vid) < 0)
++			return NULL;
++	}
++	/* VLAN-aware/stacked DSA layouts require independent VLAN nodes and
++	 * are outside the currently verified topology.
++	 */
++	if (is_vlan_dev(dev) && dsa_user_dev_check(vlan_dev_real_dev(dev)))
++		return NULL;
+ #endif
+ 	/*
+ 	 * Get basic information about the given device

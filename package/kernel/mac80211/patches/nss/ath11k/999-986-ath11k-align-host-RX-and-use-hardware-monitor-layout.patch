@@ -1,0 +1,100 @@
+Subject: [PATCH] ath11k: align empty RX buffers and use the hardware monitor layout
+
+skb_pull() cannot align a newly allocated, zero-length skb. Reserve the
+padding before mapping both normal and monitor buffers for DMA, preserving
+the zero length and aligned tail.
+
+The RX descriptor union can be larger than the active hardware descriptor.
+Use hw_params.hal_desc_sz for both monitor payload offsets and fragment
+capacity, including the compact 384-byte IPQ5018/QCN6122 layout. Deduct
+the current buffer's L2 padding from its fragment capacity as well.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -388,2 +388,8 @@
++static void ath11k_dp_rx_align_skb(struct sk_buff *skb)
++{
++	skb_reserve(skb, PTR_ALIGN(skb->data, DP_RX_BUFFER_ALIGN_SIZE) -
++		    skb->data);
++}
++
+ /* Returns number of Rx buffers replenished */
+ int ath11k_dp_rxbufs_replenish(struct ath11k_base *ab, int mac_id,
+@@ -428,11 +428,6 @@
+ 		if (!skb)
+ 			break;
+ 
+-		if (!IS_ALIGNED((unsigned long)skb->data,
+-				DP_RX_BUFFER_ALIGN_SIZE)) {
+-			skb_pull(skb,
+-				 PTR_ALIGN(skb->data, DP_RX_BUFFER_ALIGN_SIZE) -
+-				 skb->data);
+-		}
++		ath11k_dp_rx_align_skb(skb);
+ 
+ 		paddr = dma_map_single_attrs(ab->dev, skb->data,
+@@ -3907,10 +3907,6 @@
+ 	if (!skb)
+ 		goto fail_alloc_skb;
+ 
+-	if (!IS_ALIGNED((unsigned long)skb->data,
+-			DP_RX_BUFFER_ALIGN_SIZE)) {
+-		skb_pull(skb, PTR_ALIGN(skb->data, DP_RX_BUFFER_ALIGN_SIZE) -
+-			 skb->data);
+-	}
++	ath11k_dp_rx_align_skb(skb);
+ 
+ 	paddr = dma_map_single(ab->dev, skb->data,
+@@ -5642,6 +5642,9 @@
+-static void ath11k_dp_mon_set_frag_len(u32 *total_len, u32 *frag_len)
++static void ath11k_dp_mon_set_frag_len(u32 rx_buf_offset, u32 *total_len,
++				       u32 *frag_len)
+ {
+-	if (*total_len >= (DP_RX_BUFFER_SIZE - sizeof(struct hal_rx_desc))) {
+-		*frag_len = DP_RX_BUFFER_SIZE - sizeof(struct hal_rx_desc);
++	u32 capacity = DP_RX_BUFFER_SIZE - rx_buf_offset;
++
++	if (*total_len >= capacity) {
++		*frag_len = capacity;
+ 		*total_len -= *frag_len;
+ 	} else {
+@@ -5787,4 +5787,5 @@
+-static void ath11k_dp_mon_get_buf_len(struct hal_rx_msdu_desc_info *info,
++static void ath11k_dp_mon_get_buf_len(u32 rx_buf_offset,
++				      struct hal_rx_msdu_desc_info *info,
+ 				      bool *is_frag, u32 *total_len,
+ 				      u32 *frag_len, u32 *msdu_cnt)
+ {
+@@ -5796,6 +5796,6 @@
+-		ath11k_dp_mon_set_frag_len(total_len,
++		ath11k_dp_mon_set_frag_len(rx_buf_offset, total_len,
+ 					   frag_len);
+ 	} else {
+ 		if (*is_frag) {
+-			ath11k_dp_mon_set_frag_len(total_len,
++			ath11k_dp_mon_set_frag_len(rx_buf_offset, total_len,
+ 						   frag_len);
+@@ -5921,4 +5921,4 @@
+ 			rx_desc = (struct hal_rx_desc *)msdu->data;
+ 
+-			rx_pkt_offset = sizeof(struct hal_rx_desc);
++			rx_pkt_offset = ar->ab->hw_params.hal_desc_sz;
+ 			l2_hdr_offset = ath11k_dp_rx_h_msdu_end_l3pad(ar->ab, rx_desc);
+@@ -5952,3 +5952,4 @@
+-			ath11k_dp_mon_get_buf_len(&msdu_list.msdu_info[i],
++			ath11k_dp_mon_get_buf_len(rx_pkt_offset + l2_hdr_offset,
++						  &msdu_list.msdu_info[i],
+ 						  &is_frag, &total_len,
+ 						  &frag_len, &msdu_cnt);
+@@ -6623,4 +6623,4 @@
+ 			rx_desc = (struct hal_rx_desc *)msdu->data;
+ 
+-			rx_pkt_offset = sizeof(struct hal_rx_desc);
++			rx_pkt_offset = ar->ab->hw_params.hal_desc_sz;
+ 			l2_hdr_offset = ath11k_dp_rx_h_msdu_end_l3pad(ar->ab, rx_desc);
+@@ -6638,3 +6638,4 @@
+-			ath11k_dp_mon_get_buf_len(&msdu_list.msdu_info[i],
++			ath11k_dp_mon_get_buf_len(rx_pkt_offset + l2_hdr_offset,
++						  &msdu_list.msdu_info[i],
+ 						  &is_frag, &total_len,
+ 						  &frag_len, &msdu_cnt);

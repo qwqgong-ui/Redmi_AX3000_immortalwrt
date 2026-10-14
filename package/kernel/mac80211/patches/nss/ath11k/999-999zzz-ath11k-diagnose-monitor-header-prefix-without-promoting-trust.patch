@@ -1,0 +1,111 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -806,6 +806,14 @@
+ 	u8 tid;
+ 	u8 ra[ETH_ALEN];
+ 	u8 ta[ETH_ALEN];
++	/* Diagnostic prefix only: no candidate becomes a trusted header. */
++	u8 header_bytes;
++	u8 header_nonzero;
++	u8 probe_fc;
++	u8 probe_ra;
++	u8 probe_ta;
++	u8 probe_seq;
++	u8 probe_qos;
+ };
+ 
+ struct ath11k_mon_metadata {
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -6479,6 +6479,50 @@
+ 		FIELD_GET(HAL_TLV_HDR_LEN, word) == payload;
+ }
+ 
++/* Diagnose the stored prefix without interpreting an oversized TLV as complete.
++ * Bits 0..7 are offsets 0,4,..28 from hdr_status, bounded by both the declared
++ * prefix and the actual compact descriptor. Store comparison results only.
++ */
++static void ath11k_mon_meta_probe(const struct hal_rx_desc_qcn9074 *d,
++				size_t prefix, struct ath11k_mon_meta_record *r)
++{
++	const struct ieee80211_hdr *h;
++	__le16 fc = cpu_to_le16(r->fc);
++	size_t pos, i, qos_offset;
++	u8 bit;
++
++	if (prefix > sizeof(d->hdr_status))
++		prefix = sizeof(d->hdr_status);
++	r->header_bytes = prefix;
++	for (i = 0; i < prefix; i++)
++		r->header_nonzero += !!d->hdr_status[i];
++	if (!(r->flags & ATH11K_MON_META_FC_VALID) || !ieee80211_is_data(fc))
++		return;
++	qos_offset = ieee80211_has_a4(fc) ? 30 : 24;
++	for (i = 0; i < 8; i++) {
++		pos = i * 4;
++		if (pos + 24 > prefix)
++			break;
++		bit = BIT(i);
++		h = (const struct ieee80211_hdr *)(d->hdr_status + pos);
++		if (h->frame_control == fc)
++			r->probe_fc |= bit;
++		if ((r->flags & ATH11K_MON_META_RA_VALID) &&
++		    ether_addr_equal(r->ra, h->addr1))
++			r->probe_ra |= bit;
++		if ((r->flags & ATH11K_MON_META_TA_VALID) &&
++		    ether_addr_equal(r->ta, h->addr2))
++			r->probe_ta |= bit;
++		if ((r->flags & ATH11K_MON_META_SEQ_VALID) &&
++		    r->seq_ctrl == le16_to_cpu(h->seq_ctrl))
++			r->probe_seq |= bit;
++		if ((r->flags & ATH11K_MON_META_QOS_VALID) &&
++		    pos + qos_offset + 2 <= prefix && h->frame_control == fc &&
++		    r->qos == get_unaligned_le16((const u8 *)h + qos_offset))
++			r->probe_qos |= bit;
++	}
++}
++
+ /* Monitor-only compact layout. Never enable the normal low-memory getter. */
+ static void ath11k_mon_meta_decode(const void *buffer, size_t bytes, u16 expected,
+ 				  u32 msdu_flags, struct ath11k_mon_meta_record *r)
+@@ -6556,10 +6600,13 @@
+ 	}
+ 	header_len = FIELD_GET(HAL_TLV_HDR_LEN, r->header_tag);
+ 	if (FIELD_GET(HAL_TLV_HDR_TAG, r->header_tag) != HAL_RX_HEADER ||
+-	    header_len < sizeof(d->phy_ppdu_id) + sizeof(h->frame_control) ||
++	    header_len < sizeof(d->phy_ppdu_id))
++		return;
++	r->header_ppdu = le32_to_cpu(d->phy_ppdu_id);
++	ath11k_mon_meta_probe(d, header_len - sizeof(d->phy_ppdu_id), r);
++	if (header_len < sizeof(d->phy_ppdu_id) + sizeof(h->frame_control) ||
+ 	    header_len > sizeof(d->phy_ppdu_id) + sizeof(d->hdr_status))
+ 		return;
+-	r->header_ppdu = le32_to_cpu(d->phy_ppdu_id);
+ 	h = (const struct ieee80211_hdr *)d->hdr_status;
+ 	fc = h->frame_control;
+ 	if ((fc & cpu_to_le16(IEEE80211_FCTL_VERS)) || !ieee80211_is_data(fc))
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2177,15 +2177,18 @@
+ 	spin_unlock_bh(&meta->lock);
+ 	seq_printf(s, "enabled: 1\nproduced: %llu\nretained: %u\nfirst: %llu\ncapacity: %u\n",
+ 		   produced, count, first, ATH11K_MON_META_CAPACITY);
+-	seq_puts(s, "ordinal time_ns session flags ppdu expected decap tid fc seq qos ra ta mpdu_tag header_tag end_tag attention_tag header_ppdu info11 info13\n");
++	seq_puts(s, "probe_offsets: hdr_status+0,4,8,12,16,20,24,28 (diagnostic only)\n");
++	seq_puts(s, "ordinal time_ns session flags ppdu expected decap tid fc seq qos ra ta mpdu_tag header_tag end_tag attention_tag header_ppdu info11 info13 header_bytes header_nonzero probe_fc probe_ra probe_ta probe_seq probe_qos\n");
+ 	for (i = 0; i < count; i++) {
+ 		r = &records[i];
+-		seq_printf(s, "%llu %llu %u 0x%x %u %u %u %u 0x%x 0x%x 0x%x %pM %pM 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
++		seq_printf(s, "%llu %llu %u 0x%x %u %u %u %u 0x%x 0x%x 0x%x %pM %pM 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x %u %u 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+ 			   r->ordinal, r->time_ns, r->session, r->flags,
+ 			   r->ppdu, r->expected_ppdu, r->decap, r->tid,
+ 			   r->fc, r->seq_ctrl, r->qos, r->ra, r->ta,
+ 			   r->mpdu_tag, r->header_tag, r->end_tag, r->attention_tag,
+-			   r->header_ppdu, r->info11, r->info13);
++			   r->header_ppdu, r->info11, r->info13,
++			   r->header_bytes, r->header_nonzero, r->probe_fc,
++			   r->probe_ra, r->probe_ta, r->probe_seq, r->probe_qos);
+ 	}
+ 	kvfree(records);
+ 	return 0;
+

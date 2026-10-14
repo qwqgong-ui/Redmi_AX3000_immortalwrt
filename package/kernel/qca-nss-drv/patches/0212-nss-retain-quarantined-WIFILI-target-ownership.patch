@@ -1,0 +1,81 @@
+Subject: [PATCH] nss: retain unsafe WIFILI target state in the provider
+
+Pin the provider and retain opaque SOC metadata when shared DMA
+ownership is unresolved. Keep the hardware exclusion until reboot.
+
+--- a/nss_wifili.c
++++ b/nss_wifili.c
+@@ -37,6 +37,58 @@
+ static DEFINE_SPINLOCK(nss_wifili_peer_memory_lock);
+ static unsigned long nss_wifili_blocked_interfaces[NSS_MAX_NET_INTERFACES];
+ static bool nss_wifili_registered_interfaces[NSS_MAX_NET_INTERFACES];
++
++/* Retained until a full reboot. Holding this provider prevents module reload
++ * from discarding the unsafe-hardware state while old DMA pages still exist.
++ */
++static unsigned long nss_wifili_unsafe_targets;
++struct nss_wifili_soc_quarantine {
++	void *metadata;
++	uint32_t core_id;
++	uint32_t if_num;
++	uint32_t target_type;
++};
++static struct nss_wifili_soc_quarantine
++	nss_wifili_retained_socs[NSS_MAX_NET_INTERFACES * NSS_CORE_MAX];
++
++void nss_wifili_soc_quarantine(struct nss_ctx_instance *ctx, uint32_t if_num,
++			      uint32_t target_type, void *metadata)
++{
++	struct nss_wifili_soc_quarantine *record = NULL;
++	unsigned int i;
++
++	if (!ctx || ctx->id >= NSS_CORE_MAX || if_num >= NSS_MAX_NET_INTERFACES ||
++	    target_type >= 32 || !metadata)
++		return;
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	for (i = 0; i < ARRAY_SIZE(nss_wifili_retained_socs); i++) {
++		if (nss_wifili_retained_socs[i].metadata == metadata) {
++			record = &nss_wifili_retained_socs[i];
++			break;
++		}
++		if (!record && !nss_wifili_retained_socs[i].metadata)
++			record = &nss_wifili_retained_socs[i];
++	}
++	if (record) {
++		record->metadata = metadata;
++		record->core_id = ctx->id;
++		record->if_num = if_num;
++		record->target_type = target_type;
++	}
++	if (!test_and_set_bit(target_type, &nss_wifili_unsafe_targets))
++		__module_get(THIS_MODULE);
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++	if (!record)
++		nss_warning("NSS shared DMA quarantine record capacity exhausted");
++}
++EXPORT_SYMBOL(nss_wifili_soc_quarantine);
++
++bool nss_wifili_target_quarantined(uint32_t target_type)
++{
++	return target_type < 32 &&
++	       (READ_ONCE(nss_wifili_unsafe_targets) & BIT(target_type));
++}
++EXPORT_SYMBOL(nss_wifili_target_quarantined);
+ 
+ struct nss_wifili_request {
+ 	struct list_head list;
+--- a/exports/nss_wifili_if.h
++++ b/exports/nss_wifili_if.h
+@@ -46,6 +46,12 @@
+ void nss_wifili_peer_memory_free(struct nss_wifili_peer_memory *memory);
+ void nss_wifili_peer_memory_quarantine(struct nss_wifili_peer_memory *memory);
+ void nss_wifili_interface_quarantine(struct nss_ctx_instance *ctx, uint32_t if_num);
++/* Opaque SOC metadata and hardware exclusion are retained until full reboot.
++ * The provider is pinned. This API does not prove or stop hardware DMA.
++ */
++void nss_wifili_soc_quarantine(struct nss_ctx_instance *ctx, uint32_t if_num,
++			      uint32_t target_type, void *metadata);
++bool nss_wifili_target_quarantined(uint32_t target_type);
+ /* Firmware sees a driver-owned callback and a non-reused 32-bit request ID.
+  * The original app_data is restored for the client callback. cancel_msg()
+  * is process-context and drains a callback that was already dispatched;

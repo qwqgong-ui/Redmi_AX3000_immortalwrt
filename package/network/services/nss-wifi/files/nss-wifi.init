@@ -2,11 +2,51 @@
 
 START=19
 
+prepare_wired_tagging() {
+	local tagging found=0
+	# Before netifd opens any conduit, both CPU links of a QCA DSA tree
+	# must agree on the VLAN tagger. No DSA user-port names are rewritten.
+	modprobe qca8k || return 1
+	for tagging in /sys/class/net/*/dsa/tagging; do
+		[ -w "$tagging" ] || continue
+		case "$(cat "$tagging")" in
+			qca) printf '%s' qca-8021q > "$tagging" || return 1 ;;
+			qca-8021q) ;;
+			*) continue ;;
+		esac
+		found=1
+	done
+	[ "$found" = 1 ]
+}
+
+setup_rx_queues() {
+	local queue0 queue1
+	[ -d /sys/devices/system/cpu/cpu1 ] || return 1
+	if [ -r /sys/devices/system/cpu/cpu1/online ]; then
+		[ "$(cat /sys/devices/system/cpu/cpu1/online)" = 1 ] || return 1
+	fi
+	[ -w /proc/sys/dev/nss/rps/enable ] &&
+	[ -w /proc/sys/dev/nss/rps/hash_bitmap ] || return 1
+	queue0="$(awk '$NF == "nss_queue0" { sub(/:$/, "", $1); print $1; exit }' /proc/interrupts)"
+	queue1="$(awk '$NF == "nss_queue1" { sub(/:$/, "", $1); print $1; exit }' /proc/interrupts)"
+	case "$queue0" in ''|*[!0-9]*) return 1 ;; esac
+	case "$queue1" in ''|*[!0-9]*) return 1 ;; esac
+	# These are host CPUs, independent of the single NSS firmware core.
+	printf '%s' 0 > "/proc/irq/$queue0/smp_affinity_list" || return 1
+	printf '%s' 1 > "/proc/irq/$queue1/smp_affinity_list" || return 1
+	printf '%s' 3 > /proc/sys/dev/nss/rps/hash_bitmap || return 1
+	printf '%s' 1 > /proc/sys/dev/nss/rps/enable || return 1
+	[ "$(cat /proc/sys/dev/nss/rps/enable)" = 1 ] || return 1
+	logger -t nss-wifi 'NSS host RX queues assigned to CPUs 0 and 1'
+}
+
 start() {
-	local enabled ready=0 attempts=0 failed=0
+	local enabled monitor_test ready=0 attempts=0 failed=0
 	. /lib/functions.sh
 	config_load nss-wifi
 	config_get_bool enabled main enabled 1
+	# Explicit target validation; normal boot keeps concurrent monitor off.
+	config_get_bool monitor_test main monitor_test 0
 
 	# Parameters are sampled when ath11k probes; do not reload live radios.
 	if [ -d /sys/module/ath11k ]; then
@@ -38,7 +78,16 @@ start() {
 	modprobe ath || return 1
 	modprobe qmi_helpers || return 1
 	if [ "$ready" = 1 ]; then
-		insmod ath11k nss_offload=1 frame_mode=2 || return 1
+		prepare_wired_tagging || logger -t nss-wifi 'QCA VLAN tagging not confirmed; wired NSS will stay inactive'
+		# Set up both host queues before any ath11k VDEV can receive traffic.
+		setup_rx_queues || logger -t nss-wifi 'NSS host RX steering not confirmed; continuing wireless startup'
+		# Register bridge notifications before netifd creates wireless members.
+		modprobe qca-nss-bridge-mgr || failed=1
+		# Optional managers must see a ready core before netifd creates sessions.
+		if [ -f "/lib/modules/$(uname -r)/qca-nss-pppoe.ko" ]; then
+			modprobe qca-nss-pppoe || failed=1
+		fi
+		insmod ath11k nss_offload=1 frame_mode=2 nss_monitor_test="$monitor_test" || return 1
 		logger -t nss-wifi 'NSS core ready; loading ath11k with wireless offload'
 	else
 		# Keep ath11k's default Ethernet decapsulation on the host path.

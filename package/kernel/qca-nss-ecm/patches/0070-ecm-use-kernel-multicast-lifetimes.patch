@@ -1,0 +1,1742 @@
+diff --git a/ecm_interface.c b/ecm_interface.c
+index 9b84970..1ef89d2 100644
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -37,13 +37,9 @@
+ #include <linux/wireless.h>
+ #if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+ #include <linux/if_bridge.h>
+-/*
+- * Workaround for struct mac_addr redefinition issue between
+- * br_private.h and bond_3ad.h
+- */
+-#define mac_addr br_mac_addr
+-#include <br_private.h>
+-#undef mac_addr
++#endif
++#ifdef ECM_MULTICAST_ENABLE
++#include <linux/workqueue.h>
+ #endif
+ #include <net/genetlink.h>
+ #include <net/netevent.h>
+@@ -228,13 +224,11 @@ int ecm_interface_src_check_no_flush;
+ int ecm_interface_igs_enabled;
+ #endif
+ 
+-#if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+-static const struct rhashtable_params ecm_interface_br_mdb_rht_params = {
+-	.head_offset = offsetof(struct net_bridge_mdb_entry, rhnode),
+-	.key_offset = offsetof(struct net_bridge_mdb_entry, addr),
+-	.key_len = sizeof(struct br_ip),
+-	.automatic_shrinking = true,
+-};
++#ifdef ECM_MULTICAST_ENABLE
++static atomic64_t ecm_interface_multicast_generation = ATOMIC64_INIT(1);
++static void ecm_interface_multicast_invalidate_work(struct work_struct *work);
++static DECLARE_WORK(ecm_interface_multicast_work,
++		    ecm_interface_multicast_invalidate_work);
+ #endif
+ 
+ /*
+@@ -9028,292 +9022,156 @@ static struct notifier_block ecm_interface_node_br_fdb_delete_nb = {
+ 
+ #if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+ /*
+- * ecm_interface_br_mdb_get()
+- *	Fetch the MDB entry for the MCAST group.
++ * The bridge owns its MDB, source filters and multicast lock.  Obtain one
++ * complete public snapshot instead of walking private bridge structures.
+  */
+-static struct net_bridge_mdb_entry *ecm_interface_br_mdb_get(struct net_bridge_mcast *brmctx, ip_addr_t origin, ip_addr_t group, u16 vid, bool is_v4)
++int ecm_interface_linux_mcs_bridge_get_if(struct net_device *brdev, ip_addr_t origin, ip_addr_t group, uint32_t max_dst, uint32_t *dst_dev, bool is_v4)
+ {
+-	struct net_bridge_mdb_entry *mdb;
+-	struct net_bridge *br = brmctx->br;
+-	struct br_ip ip;
+-
+-	if (!br_opt_get(br, BROPT_MULTICAST_ENABLED) ||
+-		br_multicast_ctx_vlan_global_disabled(brmctx)) {
+-		DEBUG_WARN("%px: Invalid Net Bridge Pointer\n", br);
+-		return NULL;
+-	}
+-
+-	memset(&ip, 0, sizeof(ip));
+-	ip.vid = vid;
++	struct br_ip ip = {};
++	u64 seq;
+ 
+-	/*
+-	 * Fetch and Initialize v4/v6 specific info.
+-	 * Lookup the MDB Database with this info.
+-	 */
+ 	if (is_v4) {
+-		__be32 origin4, group4;
+-
+-		ECM_IP_ADDR_TO_NIN4_ADDR(origin4, origin);
+-		ECM_IP_ADDR_TO_NIN4_ADDR(group4, group);
+ 		ip.proto = htons(ETH_P_IP);
+-		ip.dst.ip4 = group4;
+-
+-		if (brmctx->multicast_igmp_version == 3) {
+-			ip.src.ip4 = origin4;
+-			mdb = rhashtable_lookup(&br->mdb_hash_tbl, &ip, ecm_interface_br_mdb_rht_params);
+-			if (mdb)
+-				return mdb;
+-
+-			ip.src.ip4 = 0;
+-		}
+-
+-		return rhashtable_lookup(&br->mdb_hash_tbl, &ip, ecm_interface_br_mdb_rht_params);
+-#if IS_ENABLED(CONFIG_IPV6)
++		ECM_IP_ADDR_TO_NIN4_ADDR(ip.src.ip4, origin);
++		ECM_IP_ADDR_TO_NIN4_ADDR(ip.dst.ip4, group);
+ 	} else {
+-		struct in6_addr origin6, group6;
+-
+-		ECM_IP_ADDR_TO_NIN6_ADDR(origin6, origin);
+-		ECM_IP_ADDR_TO_NIN6_ADDR(group6, group);
++#if IS_ENABLED(CONFIG_IPV6)
+ 		ip.proto = htons(ETH_P_IPV6);
+-		ip.dst.ip6 = group6;
+-
+-		if (brmctx->multicast_mld_version == 2) {
+-			ip.src.ip6 = origin6;
+-			mdb = rhashtable_lookup(&br->mdb_hash_tbl, &ip, ecm_interface_br_mdb_rht_params);
+-			if (mdb)
+-				return mdb;
+-
+-			memset(&ip.src.ip6, 0, sizeof(ip.src.ip6));
+-		}
+-
+-		return rhashtable_lookup(&br->mdb_hash_tbl, &ip, ecm_interface_br_mdb_rht_params);
++		ECM_IP_ADDR_TO_NIN6_ADDR(ip.src.ip6, origin);
++		ECM_IP_ADDR_TO_NIN6_ADDR(ip.dst.ip6, group);
++#else
++		return -EAFNOSUPPORT;
+ #endif
+ 	}
++	return br_mcast_offload_get_ifindexes(brdev, &ip, dst_dev, max_dst, &seq);
+ }
+ 
+ /*
+- * ecm_interface_linux_mcs_bridge_get_if()
+- *	Fetch the active listeners for the multicast group.
++ * The bridge calls this under multicast_lock.  Do not query the bridge or
++ * update a firmware rule here: invalidate the generation and defer DB work.
+  */
+-int ecm_interface_linux_mcs_bridge_get_if(struct net_device *brdev, ip_addr_t origin, ip_addr_t group, uint32_t max_dst, uint32_t *dst_dev, bool is_v4)
++static int ecm_br_mdb_notify_event(struct notifier_block *nb, unsigned long event, void *data)
+ {
+-	struct net_bridge_mdb_entry *mdst = NULL;
+-	struct net_bridge_mcast *brmctx = NULL;
+-	struct net_bridge_port_group *pg = NULL;
+-	struct hlist_node *rp = NULL;
+-	struct net_bridge *br = NULL;
+-	struct ethhdr eth;
+-	bool allow_mode_include = true;
+-	int if_cnt = 0;
+-	u16 vid = 0;
+-
+-	/*
+-	 * Check whether the dst_dev pointer is valid.
+-	 */
+-	if (!dst_dev) {
+-		DEBUG_WARN("%px:Invalid pointer to the (dst_dev) array passed\n", brdev);
+-		return 0;
+-	}
+-
+-	/*
+-	 * Fetch the Bridge Netdev pointer.
+-	 */
+-	br = netdev_priv(brdev);
+-	if (!br) {
+-		DEBUG_WARN("%px:net_bridge not found from netdevice(%s)\n", brdev, brdev->name);
+-		return 0;
+-	}
+-
+-	/*
+-	 * Fetch the Bridge MCAST context.
+-	 */
+-	brmctx = &br->multicast_ctx;
+-	memset(&eth, 0, sizeof(eth));
++	if (data)
++		ecm_interface_multicast_invalidate();
++	return NOTIFY_DONE;
++}
+ 
+-	if (is_v4) {
+-		eth.h_proto = htons(ETH_P_IP);
+-		rp = rcu_dereference(hlist_first_rcu(&brmctx->ip4_mc_router_list));
+-#if IS_ENABLED(CONFIG_IPV6)
+-	} else {
+-		eth.h_proto = htons(ETH_P_IPV6);
+-		rp = rcu_dereference(hlist_first_rcu(&brmctx->ip6_mc_router_list));
++static struct notifier_block ecm_br_mdb_update_nb = {
++	.notifier_call = ecm_br_mdb_notify_event,
++};
+ #endif
+-	}
+ 
+-	/*
+-	 * Fetch the Bridge MDB entry.
+-	 */
+-	mdst = ecm_interface_br_mdb_get(brmctx, origin, group, vid, is_v4);
+-	if (mdst) {
+-		/*
+-		 * Check if the querier exists.
+-		 */
+-		if (!br_multicast_querier_exists(brmctx, &eth, mdst)) {
+-			DEBUG_WARN("%px: Multicast Querier not exists for Bridge\n", brmctx);
+-			return 0;
+-		}
++#ifdef ECM_MULTICAST_ENABLE
++u64 ecm_interface_multicast_generation_get(void)
++{
++	return atomic64_read(&ecm_interface_multicast_generation);
++}
+ 
+-		/*
+-		 * Check if the obtained MDB is a (*,G) or (S,G) entry.
+-		 */
+-		pg = rcu_dereference(mdst->ports);
+-		if (br_multicast_should_handle_mode(brmctx, mdst->addr.proto) && br_multicast_is_star_g(&mdst->addr))
+-			allow_mode_include = false;
++void ecm_interface_multicast_invalidate(void)
++{
++	spin_lock_bh(&ecm_interface_lock);
++	if (!ecm_interface_terminate_pending) {
++		atomic64_inc(&ecm_interface_multicast_generation);
++		queue_work(system_unbound_wq, &ecm_interface_multicast_work);
+ 	}
++	spin_unlock_bh(&ecm_interface_lock);
++}
+ 
+-	while (pg || rp) {
+-		struct net_bridge_port *port, *lport, *rport;
+-		struct net_bridge_mcast_port *mctx = NULL;
+-		struct net_device *dev;
+-
+-		lport = pg ? pg->key.port : NULL;
+-
+-		if (is_v4) {
+-			mctx = hlist_entry_safe(rp, struct net_bridge_mcast_port, ip4_rlist);
+-#if IS_ENABLED(CONFIG_IPV6)
+-		} else {
+-			mctx = hlist_entry_safe(rp, struct net_bridge_mcast_port, ip6_rlist);
+-#endif
+-		}
++void ecm_interface_multicast_quiesce(void)
++{
++	spin_lock_bh(&ecm_interface_lock);
++	ecm_interface_terminate_pending = true;
++	spin_unlock_bh(&ecm_interface_lock);
++	cancel_work_sync(&ecm_interface_multicast_work);
++}
+ 
+-		rport = mctx ? mctx->port : NULL;
++/*
++ * SYNC_MANY is a tagged scan of active firmware slots.  Snapshot only rules
++ * already ACKed when this request is submitted.  A later CREATE, a new CI
++ * using the same tuple, or a topology change cannot inherit this request.
++ */
++void ecm_interface_multicast_stats_snapshot(int ip_version, unsigned long request)
++{
++	struct ecm_db_connection_instance *ci;
+ 
+-		if ((unsigned long)lport > (unsigned long)rport) {
+-			port = lport;
++	ci = ecm_db_connections_get_and_ref_first();
++	while (ci) {
++		struct ecm_db_connection_instance *next;
+ 
+-			/*
+-			 * Reject offloading the multicast flows in ECM if Linux MCUC
+-			 * is enabled on any of the Tx ports.
+-			 */
+-			if (port->flags & BR_MULTICAST_TO_UNICAST) {
+-				memset(dst_dev, 0, (sizeof(*dst_dev) * ECM_DB_MULTICAST_IF_MAX));
+-				return 0;
+-			}
++		next = ecm_db_connection_get_and_ref_next(ci);
++		if (ecm_db_connection_ip_version_get(ci) == ip_version &&
++		    ecm_db_multicast_connection_to_interfaces_set_check(ci)) {
++			struct ecm_front_end_connection_instance *feci;
+ 
+-			/*
+-			 * Exclude the following interface from the list.
+-			 */
+-			if ((!allow_mode_include && pg->filter_mode == MCAST_INCLUDE) || (pg->flags & MDB_PG_FLAGS_BLOCKED)) {
+-				goto skip_port;
++			feci = ecm_db_connection_front_end_get_and_ref(ci);
++			spin_lock_bh(&feci->lock);
++			feci->multicast_stats_request = 0;
++			if (!feci->is_defunct &&
++			    feci->accel_engine == ECM_FRONT_END_ENGINE_NSS &&
++			    feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL &&
++			    feci->multicast_generation == ecm_interface_multicast_generation_get()) {
++				feci->multicast_stats_request = request;
++				feci->multicast_stats_rule_generation = feci->multicast_rule_generation;
++				feci->multicast_stats_route_cookie = feci->multicast_route_cookie;
+ 			}
+-		} else {
+-			port = rport;
++			spin_unlock_bh(&feci->lock);
++			ecm_front_end_connection_deref(feci);
+ 		}
+-
+-		dev = port->dev;
+-		dst_dev[if_cnt] = dev->ifindex;
+-		if_cnt++;
+-
+-		if (if_cnt > max_dst)
+-			return -1;
+-
+-skip_port:
+-		if ((unsigned long)lport >= (unsigned long)port)
+-			pg = rcu_dereference(pg->next);
+-
+-		if ((unsigned long)rport >= (unsigned long)port)
+-			rp = rcu_dereference(hlist_next_rcu(rp));
++		ecm_db_connection_deref(ci);
++		ci = next;
++		cond_resched();
+ 	}
+-
+-	DEBUG_TRACE("%px: Interfaces(%d) obtained from the netdevice(%s)\n", brdev, if_cnt, brdev->name);
+-	return if_cnt;
+ }
+ 
+-/*
+- * ecm_br_mdb_notify_event()
+- *	Notifier event to Update MDB changes
+- */
+-static int ecm_br_mdb_notify_event(struct notifier_block *nb, unsigned long event, void *data)
++bool ecm_interface_multicast_stats_valid(struct ecm_front_end_connection_instance *feci,
++					unsigned long request, u64 *route_cookie)
+ {
+-	struct br_mdb_event *fe = (struct br_mdb_event *)data;
+-	struct ecm_db_connection_instance *ci;
+-	struct ecm_db_multicast_tuple_instance *ti;
+-	struct ecm_front_end_connection_instance *feci;
+-	struct net_device *dev;
+-	ip_addr_t dest_ip;
+-	int dest_ip_ver;
+-
+-	if (!fe) {
+-		DEBUG_WARN("Fetched Invalid pointer to the event data\n");
+-		return NOTIFY_DONE;
+-	}
+-
+-	if (!fe->dev) {
+-		DEBUG_WARN("%px: Invalid Netdevide obtained\n", fe);
+-		return NOTIFY_DONE;
+-	}
++	bool valid;
+ 
+-	dev = fe->dev;
+-	dev_hold(dev);
+-	DEBUG_TRACE("%px: Bridge MDB notify event: net_dev:%s, event:%ld, proto:%d\n", fe, dev->name, event, htons(fe->proto));
++	spin_lock_bh(&feci->lock);
++	valid = request && request == feci->multicast_stats_request &&
++		!feci->is_defunct &&
++		feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL &&
++		feci->multicast_rule_generation == feci->multicast_stats_rule_generation &&
++		feci->multicast_route_cookie == feci->multicast_stats_route_cookie &&
++		feci->multicast_generation == ecm_interface_multicast_generation_get();
++	if (valid)
++		*route_cookie = feci->multicast_stats_route_cookie;
++	spin_unlock_bh(&feci->lock);
++	return valid;
++}
+ 
+-	switch (fe->proto) {
+-	case htons(ETH_P_IP):
+-		ECM_HIN4_ADDR_TO_IP_ADDR(dest_ip, htonl(fe->group.ip));
+-		dest_ip_ver = 4;
+-		break;
+-#if IS_ENABLED(CONFIG_IPV6)
+-	case htons(ETH_P_IPV6):
+-		ECM_NIN6_ADDR_TO_IP_ADDR(dest_ip, fe->group.in6);
+-		dest_ip_ver = 6;
+-		break;
+-#endif
+-	default:
+-		DEBUG_WARN("%px:Invalid Protocol fetched from the Bridge MDB notifer\n", fe);
+-		dev_put(dev);
+-		return NOTIFY_DONE;
+-	}
++static void ecm_interface_multicast_invalidate_work(struct work_struct *work)
++{
++	u64 generation;
+ 
+-	/*
+-	 * Get the first entry for the group in the tuple_instance table.
+-	 * Iterate the hash bucket to find a tuple instance whose group IP
+-	 * matches dest_ip. Due to hash collisions between IPv4 and IPv6
+-	 * multicast addresses, the first entry in the bucket may belong to
+-	 * a different IP version / IP.
+-	 */
+-	ti = ecm_db_multicast_connection_get_and_ref_first(dest_ip);
+-	if (!ti) {
+-		DEBUG_WARN("%px: no multicast tuple entry found\n", dev);
+-		dev_put(dev);
+-		return NOTIFY_DONE;
+-	}
++	do {
++		struct ecm_db_connection_instance *ci;
+ 
+-	while (ti) {
+-		struct ecm_db_multicast_tuple_instance *ti_next;
+-		ip_addr_t grp_ip;
++		generation = ecm_interface_multicast_generation_get();
++		ci = ecm_db_connections_get_and_ref_first();
++		while (ci) {
++			struct ecm_db_connection_instance *next;
+ 
+-		ci = ecm_db_multicast_connection_get_from_tuple(ti);
++			next = ecm_db_connection_get_and_ref_next(ci);
++			if (!READ_ONCE(ecm_interface_terminate_pending) &&
++			    ecm_db_multicast_connection_to_interfaces_set_check(ci)) {
++				struct ecm_front_end_connection_instance *feci;
+ 
+-		/*
+-		 * Ensure IP versions match before comparing addresses.
+-		 */
+-		if (ecm_db_connection_ip_version_get(ci) == dest_ip_ver) {
+-			ecm_db_multicast_tuple_instance_group_ip_get(ti, grp_ip);
+-			if (ECM_IP_ADDR_MATCH(grp_ip, dest_ip)) {
+ 				feci = ecm_db_connection_front_end_get_and_ref(ci);
+-
+-				if (feci->multicast_update) {
+-					feci->multicast_update(dest_ip, dev);
+-				}
+-
++				if (feci->multicast_generation !=
++				    ecm_interface_multicast_generation_get())
++					ecm_db_connection_make_defunct(ci);
+ 				ecm_front_end_connection_deref(feci);
+-				ecm_db_multicast_connection_deref(ti);
+-				break;
+ 			}
++			ecm_db_connection_deref(ci);
++			ci = next;
++			cond_resched();
+ 		}
+-
+-		ti_next = ecm_db_multicast_connection_get_and_ref_next(ti);
+-		ecm_db_multicast_connection_deref(ti);
+-		ti = ti_next;
+-	}
+-
+-	dev_put(dev);
+-	return NOTIFY_DONE;
++	} while (!READ_ONCE(ecm_interface_terminate_pending) &&
++		 generation != ecm_interface_multicast_generation_get());
+ }
+-
+-static struct notifier_block ecm_br_mdb_update_nb = {
+-	.notifier_call = ecm_br_mdb_notify_event,
+-};
+ #endif
+ 
+ #ifdef ECM_MULTICAST_ENABLE
+@@ -11069,6 +10927,17 @@ int ecm_interface_init(void)
+ 		return result;
+ 	}
+ 
++#if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
++	result = br_mcast_offload_mdb_register_notify(&ecm_br_mdb_update_nb);
++	if (result) {
++		ecm_interface_multicast_quiesce();
++		unregister_netevent_notifier(&ecm_interface_netevent_notifier);
++		unregister_netdevice_notifier(&ecm_interface_netdev_notifier);
++		unregister_sysctl_table(ecm_interface_ctl_table_header);
++		return result;
++	}
++#endif
++
+ #if defined(ECM_DB_XREF_ENABLE) && defined(ECM_BAND_STEERING_ENABLE)
+ 	/*
+ 	 * If the bridge feature is supported in the selected frontend,
+@@ -11084,9 +10953,6 @@ int ecm_interface_init(void)
+ #endif
+ #ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
+ 	ovsmgr_notifier_register(&ecm_interface_ovs_notifier);
+-#endif
+-#if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+-	br_mcast_offload_mdb_register_notify(&ecm_br_mdb_update_nb);
+ #endif
+ 	ecm_interface_register_nf_hook_wlan_device();
+ 
+@@ -11105,6 +10971,9 @@ void ecm_interface_exit(void)
+ 	ecm_interface_terminate_pending  = true;
+ 	spin_unlock_bh(&ecm_interface_lock);
+ 
++#ifdef ECM_MULTICAST_ENABLE
++	ecm_interface_multicast_quiesce();
++#endif
+ 	ecm_interface_unregister_nf_hook_wlan_device();
+ 
+ 	unregister_netevent_notifier(&ecm_interface_netevent_notifier);
+diff --git a/ecm_interface.h b/ecm_interface.h
+index a669308..1a24f88 100644
+--- a/ecm_interface.h
++++ b/ecm_interface.h
+@@ -112,6 +112,12 @@ int32_t ecm_interface_multicast_from_heirarchy_construct(struct ecm_front_end_co
+ 					uint8_t *dest_node_addr, uint8_t *src_node_addr,
+ 					__be16 *layer4hdr, struct sk_buff *skb);
+ int32_t ecm_interface_multicast_filter_src_interface(struct ecm_db_connection_instance *ci, uint32_t *mc_dst_if_index);
++u64 ecm_interface_multicast_generation_get(void);
++void ecm_interface_multicast_invalidate(void);
++void ecm_interface_multicast_quiesce(void);
++void ecm_interface_multicast_stats_snapshot(int ip_version, unsigned long request);
++bool ecm_interface_multicast_stats_valid(struct ecm_front_end_connection_instance *feci,
++					unsigned long request, u64 *route_cookie);
+ 
+ #ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ int ecm_interface_linux_mcs_bridge_get_if(struct net_device *brdev, ip_addr_t origin, ip_addr_t group, uint32_t max_dst, uint32_t *dst_dev, bool is_v4);
+diff --git a/ecm_init.c b/ecm_init.c
+index 2a486d6..bfeb938 100644
+--- a/ecm_init.c
++++ b/ecm_init.c
+@@ -109,6 +109,9 @@ extern void ecm_classifier_hyfi_rules_exit(void);
+ 
+ extern int ecm_interface_init(void);
+ extern void ecm_interface_exit(void);
++#ifdef ECM_MULTICAST_ENABLE
++extern void ecm_interface_multicast_quiesce(void);
++#endif
+ 
+ #ifdef ECM_CLASSIFIER_DSCP_ENABLE
+ extern int ecm_classifier_dscp_init(struct dentry *dentry);
+@@ -323,9 +326,15 @@ err_state:
+ 	ecm_conntrack_notifier_exit();
+ #endif
+ err_ct:
++#ifdef ECM_MULTICAST_ENABLE
++	ecm_interface_multicast_quiesce();
++#endif
+ #ifdef ECM_IPV6_ENABLE
+ 	ecm_front_end_ipv6_exit();
+ err_fe_ipv6:
++#endif
++#ifdef ECM_MULTICAST_ENABLE
++	ecm_interface_multicast_quiesce();
+ #endif
+ 	ecm_front_end_ipv4_exit();
+ err_fe_ipv4:
+@@ -397,6 +406,10 @@ static void __exit ecm_exit(void)
+ {
+ 	printk(KERN_INFO "ECM exit\n");
+ 
++#ifdef ECM_MULTICAST_ENABLE
++	/* Drain multicast DB work before any frontend callback is removed. */
++	ecm_interface_multicast_quiesce();
++#endif
+ 	/* call stop on anything that requires a prepare-to-exit signal */
+ 	DEBUG_INFO("stop conntrack notifier\n");
+ 	ecm_conntrack_notifier_stop(1);
+@@ -504,4 +517,3 @@ module_exit(ecm_exit)
+ 
+ MODULE_DESCRIPTION("ECM Core");
+ MODULE_LICENSE("Dual BSD/GPL");
+-
+diff --git a/frontends/include/ecm_front_end_types.h b/frontends/include/ecm_front_end_types.h
+index 2b0c056..ed730b5 100644
+--- a/frontends/include/ecm_front_end_types.h
++++ b/frontends/include/ecm_front_end_types.h
+@@ -301,6 +301,14 @@ struct ecm_front_end_connection_instance {
+ 	int ip_version;						/* RO: The version of IP protocol this instance was established for */
+ 	int protocol;						/* RO: The protocol this instance was established for */
+ 	struct ecm_db_connection_instance *ci;			/* RO: The connection instance relating to this instance. */
++#ifdef ECM_MULTICAST_ENABLE
++	u64 multicast_generation;		/* RO: topology snapshot used to construct this CI */
++	u64 multicast_route_cookie;		/* RO: MFC lifetime, zero for bridge-only traffic */
++	u64 multicast_rule_generation;		/* Protected by lock: each CREATE attempt */
++	unsigned long multicast_stats_request;
++	u64 multicast_stats_rule_generation;
++	u64 multicast_stats_route_cookie;
++#endif
+ 	bool can_accel;						/* RO: True when the connection can be accelerated */
+ 	bool is_defunct;					/* True if the connection has become defunct */
+ 	bool destroy_fail_handle_pending;			/* Set while handling the connection destroy failure */
+diff --git a/frontends/cmn/ecm_multicast_ipv4.c b/frontends/cmn/ecm_multicast_ipv4.c
+index 00058fd..6ada186 100644
+--- a/frontends/cmn/ecm_multicast_ipv4.c
++++ b/frontends/cmn/ecm_multicast_ipv4.c
+@@ -561,6 +561,13 @@ unsigned int ecm_multicast_ipv4_connection_process(struct net_device *out_dev,
+ 	int protocol = (int)orig_tuple->dst.protonum;
+ 	__be16 *layer4hdr = NULL;
+ 	bool in_dev_is_pppoe = false;
++	u64 multicast_generation;
++	u64 multicast_route_cookie = 0;
++
++	if (!net_eq(dev_net(in_dev), &init_net) ||
++	    !net_eq(dev_net(out_dev), &init_net) ||
++	    (is_routed && !ipmr_mfc_offload_eligible(&init_net, skb)))
++		return NF_ACCEPT;
+ 
+ 	if (protocol != IPPROTO_UDP) {
+ 		DEBUG_WARN("Invalid Protocol %d in skb %px\n", protocol, skb);
+@@ -640,7 +647,10 @@ unsigned int ecm_multicast_ipv4_connection_process(struct net_device *out_dev,
+ 	 * Query MFC/Bridge to access the destination interface list.
+ 	 */
+ 	memset(dst_dev, 0, sizeof(dst_dev));
+-	if_cnt =  ipmr_find_mfc_entry(&init_net, ip_src, ip_grp, ECM_DB_MULTICAST_IF_MAX, dst_dev);
++	multicast_generation = ecm_interface_multicast_generation_get();
++	if_cnt = ipmr_find_mfc_entry(&init_net, ip_src, ip_grp,
++				    ECM_DB_MULTICAST_IF_MAX, dst_dev,
++				    &multicast_route_cookie);
+ 
+ 	/*
+ 	 * Skip PPP acceleration
+@@ -677,6 +687,9 @@ unsigned int ecm_multicast_ipv4_connection_process(struct net_device *out_dev,
+ 	 * scenario.
+ 	 */
+ 	if (if_cnt > 0) {
++		/* Bridge cb is not IP cb.  Routed acceleration starts at INET. */
++		if (!is_routed)
++			return NF_ACCEPT;
+ 		is_routed = true;
+ 
+ 		/*
+@@ -920,6 +933,9 @@ process_packet:
+ 			goto done;
+ 		}
+ 
++		feci->multicast_generation = multicast_generation;
++		feci->multicast_route_cookie = multicast_route_cookie;
++
+ 		/*
+ 		 * Create a tuple instance
+ 		 */
+diff --git a/frontends/cmn/ecm_multicast_ipv6.c b/frontends/cmn/ecm_multicast_ipv6.c
+index eb85dda..a867b14 100644
+--- a/frontends/cmn/ecm_multicast_ipv6.c
++++ b/frontends/cmn/ecm_multicast_ipv6.c
+@@ -534,6 +534,13 @@ unsigned int ecm_multicast_ipv6_connection_process(struct net_device *out_dev,
+ 	uint8_t mcuc_addr[ETH_ALEN] = {0};
+ 	ip_addr_t from_nat_mac_lookup;
+ 	bool in_dev_is_pppoe = false;
++	u64 multicast_generation;
++	u64 multicast_route_cookie = 0;
++
++	if (!net_eq(dev_net(in_dev), &init_net) ||
++	    !net_eq(dev_net(out_dev), &init_net) ||
++	    (is_routed && !ip6mr_mfc_offload_eligible(&init_net, skb)))
++		return NF_ACCEPT;
+ 
+ 	if (protocol != IPPROTO_UDP) {
+ 		DEBUG_WARN("Invalid Protocol %d in skb %px\n", protocol, skb);
+@@ -614,7 +621,10 @@ unsigned int ecm_multicast_ipv6_connection_process(struct net_device *out_dev,
+ 	in_dev_nat = in_dev;
+ 
+ 	memset(mc_dest_if, 0, sizeof(mc_dest_if));
+-	mc_if_cnt =  ip6mr_find_mfc_entry(&init_net, &origin6, &group6, ECM_DB_MULTICAST_IF_MAX, mc_dest_if);
++	multicast_generation = ecm_interface_multicast_generation_get();
++	mc_if_cnt = ip6mr_find_mfc_entry(&init_net, &origin6, &group6,
++					ECM_DB_MULTICAST_IF_MAX, mc_dest_if,
++					&multicast_route_cookie);
+ 
+ 	/*
+ 	 * Skip PPP interface
+@@ -650,6 +660,9 @@ unsigned int ecm_multicast_ipv6_connection_process(struct net_device *out_dev,
+ 	 * scenario.
+ 	 */
+ 	if (mc_if_cnt > 0) {
++		/* Bridge cb is not IPv6 cb.  Routed acceleration starts at INET6. */
++		if (!is_routed)
++			return NF_ACCEPT;
+ 		is_routed = true;
+ 
+ 		/*
+@@ -886,6 +899,9 @@ process_packet:
+ 			goto done;
+ 		}
+ 
++		feci->multicast_generation = multicast_generation;
++		feci->multicast_route_cookie = multicast_route_cookie;
++
+ 		/*
+ 		 * Create a tuple instance
+ 		 */
+diff --git a/frontends/nss/ecm_nss_multicast_ipv4.c b/frontends/nss/ecm_nss_multicast_ipv4.c
+index 33c9bc8..b230765 100644
+--- a/frontends/nss/ecm_nss_multicast_ipv4.c
++++ b/frontends/nss/ecm_nss_multicast_ipv4.c
+@@ -62,7 +62,9 @@
+ #define DEBUG_LEVEL ECM_NSS_MULTICAST_IPV4_DEBUG_LEVEL
+ 
+ #include <nss_api_if.h>
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ #include <mc_ecm.h>
++#endif
+ #include "ecm_types.h"
+ #include "ecm_db_types.h"
+ #include "ecm_state.h"
+@@ -82,6 +84,26 @@
+ #include "ecm_front_end_ipv4.h"
+ 
+ static int ecm_nss_multicast_ipv4_accelerated_count = 0;
++
++/* All CREATE construction failures must release the global pending owner. */
++static void ecm_nss_multicast_ipv4_accel_abort(struct ecm_front_end_connection_instance *feci,
++					       ecm_front_end_acceleration_mode_t mode)
++{
++	bool defunct;
++
++	spin_lock_bh(&feci->lock);
++	defunct = feci->is_defunct;
++	if (defunct)
++		mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
++	if (feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL_PENDING) {
++		spin_lock_bh(&ecm_nss_ipv4_lock);
++		_ecm_nss_ipv4_accel_pending_clear(feci, mode);
++		spin_unlock_bh(&ecm_nss_ipv4_lock);
++	}
++	spin_unlock_bh(&feci->lock);
++	if (defunct)
++		ecm_db_connection_make_defunct(feci->ci);
++}
+ 						/* Array of Number of TCP and UDP connections currently offloaded */
+ 
+ /*
+@@ -95,7 +117,6 @@ static void ecm_nss_multicast_ipv4_connection_update_callback(void *app_data, st
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
+ 
+-	/*TODO: If the response is NACK then decelerate the flow and flushes all rules */
+ 	DEBUG_TRACE("%px: update callback, response received from FW : %u\n", nim, nim->cm.response);
+ 
+ 	/*
+@@ -144,6 +165,13 @@ static void ecm_nss_multicast_ipv4_connection_update_callback(void *app_data, st
+ 	DEBUG_TRACE("%px: flow_ip: %pI4h:%d\n", feci, &nircm->tuple.flow_ip, nircm->tuple.flow_ident);
+ 	DEBUG_TRACE("%px: return_ip: %pI4h:%d\n", feci, &nircm->tuple.return_ip, nircm->tuple.return_ident);
+ 	DEBUG_TRACE("%px: protocol: %d\n", feci, nircm->tuple.protocol);
++	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++		spin_lock_bh(&feci->lock);
++		feci->stats.ae_nack++;
++		feci->stats.ae_nack_total++;
++		spin_unlock_bh(&feci->lock);
++		ecm_db_connection_make_defunct(ci);
++	}
+ 
+ 	/*
+ 	 * Release the connection.
+@@ -235,6 +263,7 @@ static void ecm_nss_multicast_ipv4_connection_create_callback(void *app_data, st
+ 		 */
+ 		if (feci->is_defunct) {
+ 			result_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
++			is_defunct = true;
+ 		}
+ 
+ 		spin_lock_bh(&ecm_nss_ipv4_lock);
+@@ -242,6 +271,8 @@ static void ecm_nss_multicast_ipv4_connection_create_callback(void *app_data, st
+ 		spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 
+ 		spin_unlock_bh(&feci->lock);
++		if (is_defunct)
++			ecm_db_connection_make_defunct(ci);
+ 
+ 		/*
+ 		 * Release the connection.
+@@ -259,7 +290,7 @@ static void ecm_nss_multicast_ipv4_connection_create_callback(void *app_data, st
+ 	 * GGG TODO This is a workaround for a NSS message OOO quirk, this should eventually be removed.
+ 	 */
+ 	if (feci->stats.flush_happened) {
+-		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
++		is_defunct = feci->is_defunct;
+ 		feci->stats.flush_happened = false;
+ 
+ 		/*
+@@ -271,7 +302,14 @@ static void ecm_nss_multicast_ipv4_connection_create_callback(void *app_data, st
+ 		 * Increement the no-action counter.  Our connectin was decelerated on us with no action occurring.
+ 		 */
+ 		feci->stats.no_action_seen++;
++		spin_lock_bh(&ecm_nss_ipv4_lock);
++		_ecm_nss_ipv4_accel_pending_clear(feci, feci->is_defunct ?
++			ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT :
++			ECM_FRONT_END_ACCELERATION_MODE_DECEL);
++		spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 		spin_unlock_bh(&feci->lock);
++		if (is_defunct)
++			ecm_db_connection_make_defunct(ci);
+ 
+ 		/*
+ 		 * Release the connection.
+@@ -289,6 +327,10 @@ static void ecm_nss_multicast_ipv4_connection_create_callback(void *app_data, st
+ 	 * Clear any nack count
+ 	 */
+ 	feci->stats.ae_nack = 0;
++	if (feci->multicast_generation != ecm_interface_multicast_generation_get()) {
++		feci->is_defunct = true;
++		feci->stats.decelerate_pending = true;
++	}
+ 
+ 	/*
+ 	 * Clear the "accelerate pending" state and move to "accelerated" state bumping
+@@ -440,11 +482,6 @@ static int ecm_nss_multicast_ipv4_connection_update_accelerate(struct ecm_front_
+ 	from_nss_iface_id = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
+ 	if (from_nss_iface_id < 0) {
+                 DEBUG_TRACE("%px: from_nss_iface_id: %d\n", feci, from_nss_iface_id);
+-		spin_lock_bh(&feci->lock);
+-		if (feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL) {
+-			feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_NO_ACTION;
+-		}
+-		spin_unlock_bh(&feci->lock);
+ 		ecm_db_connection_interfaces_deref(from_ifaces, from_ifaces_first);
+ 		ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+ 		kfree(nim);
+@@ -799,7 +836,8 @@ static int ecm_nss_multicast_ipv4_connection_update_accelerate(struct ecm_front_
+ 	 * or while the acceleration rule is in flight to the nss.
+ 	 * This is only to check for consistency of rule state - not that the state is stale.
+ 	 */
+-	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci)) {
++	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci) ||
++	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+ 		kfree(nim);
+ 		return -1;
+@@ -852,7 +890,7 @@ static int ecm_nss_multicast_ipv4_connection_update_accelerate(struct ecm_front_
+ 	feci->stats.driver_fail++;
+ 	if (feci->stats.driver_fail >= feci->stats.driver_fail_limit) {
+ 		DEBUG_WARN("%px: Accel failed - driver fail limit\n", feci);
+-		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DRIVER;
++		/* Keep the installed rule destroyable; the caller makes it defunct. */
+ 	}
+ 	spin_unlock_bh(&feci->lock);
+ 	return -1;
+@@ -899,6 +937,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	int32_t interface_type_counts[ECM_DB_IFACE_TYPE_COUNT];
+ 	uint8_t dest_mac[ETH_ALEN];
+ 	bool rule_invalid;
++	bool is_defunct;
+ 	ecm_front_end_acceleration_mode_t result_mode;
+ 
+ 	DEBUG_CHECK_MAGIC(feci, ECM_FRONT_END_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", feci);
+@@ -917,6 +956,9 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 		DEBUG_TRACE("%px: Acceleration denied: %px\n", feci, feci->ci);
+ 		return;
+ 	}
++	spin_lock_bh(&feci->lock);
++	feci->multicast_rule_generation++;
++	spin_unlock_bh(&feci->lock);
+ 
+ 	/*
+ 	 * Construct an accel command.
+@@ -926,6 +968,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	 */
+ 	nim = (struct nss_ipv4_msg *)kzalloc(sizeof(struct nss_ipv4_msg), GFP_ATOMIC | __GFP_NOWARN);
+ 	if (!nim) {
++		ecm_nss_multicast_ipv4_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
+ 		return;
+ 	}
+ 
+@@ -942,8 +985,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	from_ifaces_first = ecm_db_connection_interfaces_get_and_ref(feci->ci, from_ifaces, ECM_DB_OBJ_DIR_FROM);
+ 	if (from_ifaces_first == ECM_DB_IFACE_HEIRARCHY_MAX) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no interfaces in from_interfaces list!\n", feci);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+ 	}
+ 
+ 	create->ingress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+@@ -953,8 +995,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	if (from_nss_iface_id < 0) {
+                 DEBUG_TRACE("%px: from_nss_iface_id: %d\n", feci, from_nss_iface_id);
+ 		ecm_db_connection_interfaces_deref(from_ifaces, from_ifaces_first);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+         }
+ 
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+@@ -1051,15 +1092,20 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	}
+ 
+ 	ecm_db_connection_interfaces_deref(from_ifaces, from_ifaces_first);
++	if (rule_invalid)
++		goto invalid_rule;
+ 
+ 	ret = ecm_db_multicast_connection_to_interfaces_get_and_ref_all(feci->ci, &to_ifaces, &to_ifaces_first);
+ 	if (!ret) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no multicast interfaces in to_interfaces list!\n", feci);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+ 	}
+ 
+ 	from_nat_ifaces_first = ecm_db_connection_interfaces_get_and_ref(feci->ci, from_nat_ifaces, ECM_DB_OBJ_DIR_FROM_NAT);
++	if (from_nat_ifaces_first == ECM_DB_IFACE_HEIRARCHY_MAX) {
++		ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
++		goto invalid_rule;
++	}
+ 	from_nat_ifaces_identifier = ecm_db_iface_interface_identifier_get(from_nat_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1]);
+ 	ecm_db_connection_interfaces_deref(from_nat_ifaces, from_nat_ifaces_first);
+ 	rule_invalid = false;
+@@ -1152,8 +1198,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 				if (to_nss_iface_id < 0) {
+ 					DEBUG_TRACE("%px: to_nss_iface_id: %d\n", feci, to_nss_iface_id);
+ 					ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+-					kfree(nim);
+-					return;
++					goto invalid_rule;
+ 			        }
+ 				DEBUG_TRACE("%px: Ethernet - mac: %pM, mtu %d\n", feci, to_nss_iface_address, to_mtu);
+ 				break;
+@@ -1272,8 +1317,7 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 		if (rule_invalid) {
+ 			DEBUG_WARN("%px: to/dest Rule invalid\n", feci);
+ 			ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+-			kfree(nim);
+-			return;
++			goto invalid_rule;
+ 		}
+ 
+ 		/*
+@@ -1485,10 +1529,12 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	 * Remember that the connection is marked as "accel pending state" so if a regen is flagged immediately
+ 	 * after this check passes, the connection will be decelerated and refreshed very quickly.
+ 	 */
+-	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci)) {
++	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci) ||
++	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+-		ecm_nss_ipv4_accel_pending_clear(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
++		ecm_nss_multicast_ipv4_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
+ 		kfree(nim);
++		ecm_db_connection_make_defunct(feci->ci);
+ 		return;
+ 	}
+ 
+@@ -1540,14 +1586,24 @@ static void ecm_nss_multicast_ipv4_connection_accelerate(struct ecm_front_end_co
+ 	} else {
+ 		result_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+ 	}
++	is_defunct = feci->is_defunct;
++	if (is_defunct)
++		result_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
+ 
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
+ 	_ecm_nss_ipv4_accel_pending_clear(feci, result_mode);
+ 	spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 
+ 	spin_unlock_bh(&feci->lock);
++	if (is_defunct)
++		ecm_db_connection_make_defunct(feci->ci);
+ 
+ 	kfree(nim);
++	return;
++
++invalid_rule:
++	kfree(nim);
++	ecm_nss_multicast_ipv4_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_FAIL_RULE);
+ 
+ 	return;
+ }
+@@ -1562,6 +1618,7 @@ static void ecm_nss_multicast_ipv4_connection_destroy_callback(void *app_data, s
+ 	uint32_t serial = (uint32_t)(ecm_ptr_t)app_data;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++	bool removed;
+ 
+ 	/*
+ 	 * Is this a response to a destroy message?
+@@ -1632,7 +1689,10 @@ static void ecm_nss_multicast_ipv4_connection_destroy_callback(void *app_data, s
+ 	}
+ 
+ 	DEBUG_TRACE("%px: response: %d\n", feci, nim->cm.response);
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++	removed = nim->cm.response == NSS_CMN_RESPONSE_ACK ||
++		(nim->cm.response == NSS_CMN_RESPONSE_EMSG &&
++		 nim->cm.error == NSS_IPV4_DR_NO_CONNECTION_ENTRY_ERROR);
++	if (!removed) {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DECEL;
+ 	} else {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+@@ -1651,6 +1711,8 @@ static void ecm_nss_multicast_ipv4_connection_destroy_callback(void *app_data, s
+ 	 * Mcast acceleration ends
+ 	 */
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
++	if (!removed)
++		ecm_nss_ipv4_decel_unknown_count++;
+ 	ecm_nss_multicast_ipv4_accelerated_count--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_multicast_ipv4_accelerated_count >= 0, "Bad udp accel counter\n");
+ 	ecm_nss_ipv4_accelerated_count--;		/* General running counter */
+@@ -1971,8 +2033,13 @@ static void ecm_nss_multicast_ipv4_bridge_update_connections(ip_addr_t dest_ip,
+ 		 * 	if_num > 0   An interface has either left or joined the group. Process the leave/join interface request.
+ 		 */
+ 		memset(mc_dst_dev, 0, sizeof(mc_dst_dev));
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++		if_num = ecm_interface_linux_mcs_bridge_get_if(brdev, src_ip, dest_ip,
++					ECM_DB_MULTICAST_IF_MAX, mc_dst_dev, true);
++#else
+ 		if_num = mc_bridge_ipv4_get_if(brdev, htonl(src_ip[0]), htonl(dest_ip[0]), ECM_DB_MULTICAST_IF_MAX,
+ 				mc_dst_dev, dest_mac_addr);
++#endif
+ 		if (if_num < 0) {
+ 			/*
+ 			 * This may a valid case when all the interfaces have left a multicast group.
+@@ -2060,6 +2127,7 @@ static void ecm_nss_multicast_ipv4_bridge_update_connections(ip_addr_t dest_ip,
+ 			__be32 ip_src;
+ 			__be32 ip_grp;
+ 			int dst_if_cnt;
++			u64 route_cookie;
+ 			uint32_t dst_dev[ECM_DB_MULTICAST_IF_MAX];
+ 
+ 			/*
+@@ -2081,13 +2149,14 @@ process_ipmr_entry:
+ 			memset(dst_dev, 0, sizeof(dst_dev));
+ 			ECM_IP_ADDR_TO_NIN4_ADDR(ip_src, src_ip);
+ 			ECM_IP_ADDR_TO_NIN4_ADDR(ip_grp, grp_ip);
+-			dst_if_cnt =  ipmr_find_mfc_entry(&init_net, ip_src, ip_grp, ECM_DB_MULTICAST_IF_MAX, dst_dev);
+-			if (dst_if_cnt < 0) {
++			dst_if_cnt = ipmr_find_mfc_entry(&init_net, ip_src, ip_grp,
++							ECM_DB_MULTICAST_IF_MAX, dst_dev, &route_cookie);
++			if (dst_if_cnt <= 0 || route_cookie != feci->multicast_route_cookie) {
+ 				/*
+ 				 * Decelerate the flow since there is no active ports left
+ 				 */
+ 				DEBUG_WARN("Not found a valid vif count %d\n", dst_if_cnt);
+-				feci->decelerate(feci);
++				ecm_db_connection_make_defunct(ci);
+ 				ecm_front_end_connection_deref(feci);
+ 				goto find_next_tuple;
+ 			}
+@@ -2255,7 +2324,7 @@ process_packet:
+ 		 */
+ 		ret = ecm_nss_multicast_ipv4_connection_update_accelerate(feci, &mc_update, &aci_pr);
+ 		if (ret < 0) {
+-			feci->decelerate(feci);
++			ecm_db_connection_make_defunct(ci);
+ 			ecm_front_end_connection_deref(feci);
+ 			goto find_next_tuple;
+ 		}
+@@ -2391,6 +2460,7 @@ ssize_t ecm_nss_multicast_ipv4_get_accelerated_count(struct device *dev,
+  *     destination interfaces heirarchy for the CI, and decide whether to delete an
+  *     exiting interface heirarchy or add a new heirarchy.
+  */
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ static void ecm_br_multicast_update_event_callback(struct net_device *brdev, uint32_t group)
+ {
+ 	ip_addr_t dest_ip;
+@@ -2422,8 +2492,12 @@ static void ecm_br_multicast_update_event_callback(struct net_device *brdev, uin
+  *     destination interfaces heirarchy for the CI, and decide whether to delete an
+  *     exiting interface heirarchy or add a new heirarchy.
+  */
++#endif
+ static void ecm_mfc_update_event_callback(__be32 group, __be32 origin, uint32_t max_to_dev, uint32_t to_dev_idx[], uint8_t op)
+ {
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++	ecm_interface_multicast_invalidate();
++#else
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_db_multicast_tuple_instance *tuple_instance;
+ 	struct ecm_db_multicast_tuple_instance *tuple_instance_next;
+@@ -2618,7 +2692,7 @@ static void ecm_mfc_update_event_callback(__be32 group, __be32 origin, uint32_t
+ 			 */
+ 			ret = ecm_nss_multicast_ipv4_connection_update_accelerate(feci, &mc_update, &aci_pr);
+ 			if (ret < 0) {
+-				feci->decelerate(feci);
++				ecm_db_connection_make_defunct(ci);
+ 				ecm_front_end_connection_deref(feci);
+ 				goto find_next_tuple;
+ 			}
+@@ -2694,6 +2768,7 @@ find_next_tuple:
+ 	}
+ 
+ 	return;
++#endif
+ }
+ 
+ /*
+@@ -2718,17 +2793,21 @@ int ecm_nss_multicast_ipv4_init(struct dentry *dentry)
+ 	/*
+ 	 * Register multicast update callback to MCS snooper
+ 	 */
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 	if(mc_bridge_ipv4_update_callback_register(ecm_br_multicast_update_event_callback)) {
+ 		DEBUG_ERROR("Failed to register MCS callback\n");
+ 		return -1;
+ 	}
++#endif
+ 
+ 	/*
+ 	 * Register multicast update callbacks to MFC
+ 	 */
+ 	if (!ipmr_register_mfc_event_offload_callback(ecm_mfc_update_event_callback)) {
+ 		DEBUG_ERROR("Failed to register MFC callback\n");
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 		mc_bridge_ipv4_update_callback_deregister();
++#endif
+ 		return -1;
+ 	}
+ 
+@@ -2746,5 +2825,7 @@ void ecm_nss_multicast_ipv4_exit(void)
+ 	 * MFC and MCS snooper
+ 	 */
+ 	ipmr_unregister_mfc_event_offload_callback();
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 	mc_bridge_ipv4_update_callback_deregister();
++#endif
+ }
+diff --git a/frontends/nss/ecm_nss_multicast_ipv6.c b/frontends/nss/ecm_nss_multicast_ipv6.c
+index 3c0d0bf..eb29ba3 100644
+--- a/frontends/nss/ecm_nss_multicast_ipv6.c
++++ b/frontends/nss/ecm_nss_multicast_ipv6.c
+@@ -63,7 +63,9 @@
+ #define DEBUG_LEVEL ECM_NSS_MULTICAST_IPV6_DEBUG_LEVEL
+ 
+ #include <nss_api_if.h>
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ #include <mc_ecm.h>
++#endif
+ #include "ecm_types.h"
+ #include "ecm_db_types.h"
+ #include "ecm_state.h"
+@@ -83,6 +85,26 @@
+ #include "ecm_front_end_ipv6.h"
+ 
+ static int ecm_nss_multicast_ipv6_accelerated_count = 0;
++
++/* All CREATE construction failures must release the global pending owner. */
++static void ecm_nss_multicast_ipv6_accel_abort(struct ecm_front_end_connection_instance *feci,
++					       ecm_front_end_acceleration_mode_t mode)
++{
++	bool defunct;
++
++	spin_lock_bh(&feci->lock);
++	defunct = feci->is_defunct;
++	if (defunct)
++		mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
++	if (feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL_PENDING) {
++		spin_lock_bh(&ecm_nss_ipv6_lock);
++		_ecm_nss_ipv6_accel_pending_clear(feci, mode);
++		spin_unlock_bh(&ecm_nss_ipv6_lock);
++	}
++	spin_unlock_bh(&feci->lock);
++	if (defunct)
++		ecm_db_connection_make_defunct(feci->ci);
++}
+ 						/* Number of IPv6 multicast connections currently offloaded */
+ 
+ /*
+@@ -98,7 +120,6 @@ static void ecm_nss_multicast_ipv6_connection_update_callback(void *app_data, st
+ 	ip_addr_t flow_ip;
+ 	ip_addr_t return_ip;
+ 
+-	/*TODO: If the response is NACK then decelerate the flow and flushes all rules */
+ 	DEBUG_TRACE("%px: update callback, response received from FW : %u\n", nim, nim->cm.response);
+ 
+ 	/*
+@@ -150,6 +171,13 @@ static void ecm_nss_multicast_ipv6_connection_update_callback(void *app_data, st
+ 	DEBUG_TRACE("%px: flow_ip: " ECM_IP_ADDR_OCTAL_FMT ":%d\n", feci, ECM_IP_ADDR_TO_OCTAL(flow_ip), nircm->tuple.flow_ident);
+ 	DEBUG_TRACE("%px: return_ip: " ECM_IP_ADDR_OCTAL_FMT ":%d\n", feci, ECM_IP_ADDR_TO_OCTAL(return_ip), nircm->tuple.return_ident);
+ 	DEBUG_TRACE("%px: protocol: %d\n", feci, nircm->tuple.protocol);
++	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++		spin_lock_bh(&feci->lock);
++		feci->stats.ae_nack++;
++		feci->stats.ae_nack_total++;
++		spin_unlock_bh(&feci->lock);
++		ecm_db_connection_make_defunct(ci);
++	}
+ 
+ 	/*
+ 	 * Release the connection.
+@@ -246,12 +274,15 @@ static void ecm_nss_multicast_ipv6_connection_create_callback(void *app_data, st
+ 		 */
+ 		if (feci->is_defunct) {
+ 			result_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
++			is_defunct = true;
+ 		}
+ 		spin_lock_bh(&ecm_nss_ipv6_lock);
+ 		_ecm_nss_ipv6_accel_pending_clear(feci, result_mode);
+ 		spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
+ 		spin_unlock_bh(&feci->lock);
++		if (is_defunct)
++			ecm_db_connection_make_defunct(ci);
+ 
+ 		/*
+ 		 * Release the connection.
+@@ -269,6 +300,7 @@ static void ecm_nss_multicast_ipv6_connection_create_callback(void *app_data, st
+ 	 * GGG TODO This is a workaround for a NSS message OOO quirk, this should eventually be removed.
+ 	 */
+ 	if (feci->stats.flush_happened) {
++		is_defunct = feci->is_defunct;
+ 		feci->stats.flush_happened = false;
+ 
+ 		/*
+@@ -276,10 +308,14 @@ static void ecm_nss_multicast_ipv6_connection_create_callback(void *app_data, st
+ 		 */
+ 		feci->stats.no_action_seen++;
+ 		spin_lock_bh(&ecm_nss_ipv6_lock);
+-		_ecm_nss_ipv6_accel_pending_clear(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
++		_ecm_nss_ipv6_accel_pending_clear(feci, feci->is_defunct ?
++			ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT :
++			ECM_FRONT_END_ACCELERATION_MODE_DECEL);
+ 		spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
+ 		spin_unlock_bh(&feci->lock);
++		if (is_defunct)
++			ecm_db_connection_make_defunct(ci);
+ 
+ 		/*
+ 		 * Release the connection.
+@@ -297,6 +333,10 @@ static void ecm_nss_multicast_ipv6_connection_create_callback(void *app_data, st
+ 	 * Clear any nack count
+ 	 */
+ 	feci->stats.ae_nack = 0;
++	if (feci->multicast_generation != ecm_interface_multicast_generation_get()) {
++		feci->is_defunct = true;
++		feci->stats.decelerate_pending = true;
++	}
+ 
+ 	/*
+ 	 * Clear the "accelerate pending" state and move to "accelerated" state bumping
+@@ -803,7 +843,8 @@ static int ecm_nss_multicast_ipv6_connection_update_accelerate(struct ecm_front_
+ 	 * or while the acceleration rule is in flight to the nss.
+ 	 * This is only to check for consistency of rule state - not that the state is stale.
+ 	 */
+-	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci)) {
++	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci) ||
++	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+ 		kfree(nim);
+ 		return -1;
+@@ -856,7 +897,7 @@ static int ecm_nss_multicast_ipv6_connection_update_accelerate(struct ecm_front_
+ 	feci->stats.driver_fail++;
+ 	if (feci->stats.driver_fail >= feci->stats.driver_fail_limit) {
+ 		DEBUG_WARN("%px: Accel failed - driver fail limit\n", feci);
+-		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DRIVER;
++		/* Keep the installed rule destroyable; the caller makes it defunct. */
+ 	}
+ 	spin_unlock_bh(&feci->lock);
+ 	return -1;
+@@ -899,6 +940,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	int32_t interface_type_counts[ECM_DB_IFACE_TYPE_COUNT];
+ 	uint8_t dest_mac[ETH_ALEN];
+ 	bool rule_invalid;
++	bool is_defunct;
+ 	ecm_front_end_acceleration_mode_t result_mode;
+ 
+ 	DEBUG_CHECK_MAGIC(feci, ECM_FRONT_END_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", feci);
+@@ -917,6 +959,9 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 		DEBUG_TRACE("%px: Acceleration denied: %px\n", feci, feci->ci);
+ 		return;
+ 	}
++	spin_lock_bh(&feci->lock);
++	feci->multicast_rule_generation++;
++	spin_unlock_bh(&feci->lock);
+ 
+ 	/*
+ 	 * Construct an accel command.
+@@ -926,6 +971,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	 */
+ 	nim = (struct nss_ipv6_msg *)kzalloc(sizeof(struct nss_ipv6_msg), GFP_ATOMIC | __GFP_NOWARN);
+ 	if (!nim) {
++		ecm_nss_multicast_ipv6_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
+ 		return;
+ 	}
+ 
+@@ -942,8 +988,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	from_ifaces_first = ecm_db_connection_interfaces_get_and_ref(feci->ci, from_ifaces, ECM_DB_OBJ_DIR_FROM);
+ 	if (from_ifaces_first == ECM_DB_IFACE_HEIRARCHY_MAX) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no interfaces in from_interfaces list!\n", feci);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+ 	}
+ 
+ 	create->ingress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+@@ -954,8 +999,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	if (from_nss_iface_id < 0) {
+ 		DEBUG_TRACE("%px: from_nss_iface_id: %d\n", feci, from_nss_iface_id);
+ 		ecm_db_connection_interfaces_deref(from_ifaces, from_ifaces_first);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+ 	}
+ 
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+@@ -1055,12 +1099,13 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	}
+ 
+ 	ecm_db_connection_interfaces_deref(from_ifaces, from_ifaces_first);
++	if (rule_invalid)
++		goto invalid_rule;
+ 
+ 	ret = ecm_db_multicast_connection_to_interfaces_get_and_ref_all(feci->ci, &to_ifaces, &to_ifaces_first);
+ 	if (!ret) {
+ 		DEBUG_WARN("%px: Accel attempt failed - no multicast interfaces in to_interfaces list!\n", feci);
+-		kfree(nim);
+-		return;
++		goto invalid_rule;
+ 	}
+ 
+ 	/*
+@@ -1144,8 +1189,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 				if (to_nss_iface_id < 0) {
+ 					DEBUG_TRACE("%px: to_nss_iface_id: %d\n", feci, to_nss_iface_id);
+ 					ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+-					kfree(nim);
+-					return;
++					goto invalid_rule;
+ 			        }
+ 
+ 				DEBUG_TRACE("%px: Ethernet - mac: %pM\n", feci, to_nss_iface_address);
+@@ -1265,8 +1309,7 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 		if (rule_invalid) {
+ 			DEBUG_WARN("%px: to/dest Rule invalid\n", feci);
+ 			ecm_db_multicast_connection_to_interfaces_deref_all(to_ifaces, to_ifaces_first);
+-			kfree(nim);
+-			return;
++			goto invalid_rule;
+ 		}
+ 
+ 		/*
+@@ -1458,10 +1501,12 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	 * Remember that the connection is marked as "accel pending state" so if a regen is flagged immediately
+ 	 * after this check passes, the connection will be decelerated and refreshed very quickly.
+ 	 */
+-	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci)) {
++	if (regen_occurrances != ecm_db_connection_regeneration_occurrances_get(feci->ci) ||
++	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+-		ecm_nss_ipv6_accel_pending_clear(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
++		ecm_nss_multicast_ipv6_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_DECEL);
+ 		kfree(nim);
++		ecm_db_connection_make_defunct(feci->ci);
+ 		return;
+ 	}
+ 
+@@ -1514,14 +1559,23 @@ static void ecm_nss_multicast_ipv6_connection_accelerate(struct ecm_front_end_co
+ 	} else {
+ 		result_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+ 	}
++	is_defunct = feci->is_defunct;
++	if (is_defunct)
++		result_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT;
+ 
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
+ 	_ecm_nss_ipv6_accel_pending_clear(feci, result_mode);
+ 	spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
+ 	spin_unlock_bh(&feci->lock);
++	if (is_defunct)
++		ecm_db_connection_make_defunct(feci->ci);
+ 	kfree(nim);
+ 	return;
++
++invalid_rule:
++	kfree(nim);
++	ecm_nss_multicast_ipv6_accel_abort(feci, ECM_FRONT_END_ACCELERATION_MODE_FAIL_RULE);
+ }
+ 
+ /*
+@@ -1534,6 +1588,7 @@ static void ecm_nss_multicast_ipv6_connection_destroy_callback(void *app_data, s
+ 	uint32_t serial = (uint32_t)(ecm_ptr_t)app_data;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++	bool removed;
+ 	ip_addr_t flow_ip;
+ 	ip_addr_t return_ip;
+ 
+@@ -1609,7 +1664,10 @@ static void ecm_nss_multicast_ipv6_connection_destroy_callback(void *app_data, s
+ 	}
+ 
+ 	DEBUG_TRACE("%px: response: %d\n", feci, nim->cm.response);
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++	removed = nim->cm.response == NSS_CMN_RESPONSE_ACK ||
++		(nim->cm.response == NSS_CMN_RESPONSE_EMSG &&
++		 nim->cm.error == NSS_IPV6_DR_NO_CONNECTION_ENTRY_ERROR);
++	if (!removed) {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DECEL;
+ 	} else {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+@@ -1628,6 +1686,8 @@ static void ecm_nss_multicast_ipv6_connection_destroy_callback(void *app_data, s
+ 	 * Multicast acceleration ends
+ 	 */
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
++	if (!removed)
++		ecm_nss_ipv6_decel_unknown_count++;
+ 	ecm_nss_multicast_ipv6_accelerated_count--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_multicast_ipv6_accelerated_count >= 0, "Bad udp accel counter\n");
+ 	ecm_nss_ipv6_accelerated_count--;		/* General running counter */
+@@ -1950,8 +2010,13 @@ static void ecm_nss_multicast_ipv6_bridge_update_connections(ip_addr_t dest_ip,
+ 		 * 	if_num == 0  All slaves have left the group. Deacel the flow.
+ 		 * 	if_num > 0   An interface leave/Join the group. Process the leave/join interface request.
+ 		 */
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++		if_num = ecm_interface_linux_mcs_bridge_get_if(brdev, src_ip, dest_ip,
++					ECM_DB_MULTICAST_IF_MAX, mc_dst_dev, false);
++#else
+ 		if_num = mc_bridge_ipv6_get_if (brdev, &origin6, &group6, ECM_DB_MULTICAST_IF_MAX,
+ 				mc_dst_dev, dest_mac_addr);
++#endif
+ 		if (if_num < 0) {
+ 			/*
+ 			 * This may a valid case when all the interface has left a multicast group.
+@@ -2037,6 +2102,7 @@ static void ecm_nss_multicast_ipv6_bridge_update_connections(ip_addr_t dest_ip,
+ 			struct in6_addr ip_src;
+ 			struct in6_addr ip_grp;
+ 			int  dst_if_cnt;
++			u64 route_cookie;
+ 			uint32_t dst_dev[ECM_DB_MULTICAST_IF_MAX];
+ 
+ 			/*
+@@ -2058,13 +2124,14 @@ process_ipmr_entry:
+ 			memset(dst_dev, 0, sizeof(dst_dev));
+ 			ECM_IP_ADDR_TO_NIN6_ADDR(ip_src, src_ip);
+ 			ECM_IP_ADDR_TO_NIN6_ADDR(ip_grp, grp_ip);
+-			dst_if_cnt =  ip6mr_find_mfc_entry(&init_net, &ip_src, &ip_grp, ECM_DB_MULTICAST_IF_MAX, dst_dev);
+-			if (dst_if_cnt < 0) {
++			dst_if_cnt = ip6mr_find_mfc_entry(&init_net, &ip_src, &ip_grp,
++							ECM_DB_MULTICAST_IF_MAX, dst_dev, &route_cookie);
++			if (dst_if_cnt <= 0 || route_cookie != feci->multicast_route_cookie) {
+ 				/*
+ 				 * Decelerate the flow since there is no active ports left
+ 				 */
+ 				DEBUG_WARN("Not found a valid vif count %d\n", dst_if_cnt);
+-				feci->decelerate(feci);
++				ecm_db_connection_make_defunct(ci);
+ 				ecm_front_end_connection_deref(feci);
+ 				goto find_next_tuple;
+ 			}
+@@ -2218,7 +2285,7 @@ process_packet:
+ 
+ 		ret = ecm_nss_multicast_ipv6_connection_update_accelerate(feci, &mc_sync, &aci_pr);
+ 		if (ret < 0) {
+-			feci->decelerate(feci);
++			ecm_db_connection_make_defunct(ci);
+ 			ecm_front_end_connection_deref(feci);
+ 			goto find_next_tuple;
+ 		}
+@@ -2334,6 +2401,7 @@ struct ecm_front_end_connection_instance *ecm_nss_multicast_ipv6_connection_inst
+  *     destination interfaces heirarchy for the CI, and decide whether to delete an
+  *     exiting interface heirarchy or add a new heirarchy.
+  */
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ static void ecm_nss_multicast_ipv6_br_update_event_callback(struct net_device *brdev, struct in6_addr *group)
+ {
+ 	ip_addr_t dest_ip;
+@@ -2368,8 +2436,12 @@ static void ecm_nss_multicast_ipv6_br_update_event_callback(struct net_device *b
+  *     destination interfaces heirarchy for the CI, and decide whether to delete an
+  *     exiting interface heirarchy or add a new heirarchy.
+  */
++#endif
+ static void ecm_nss_multicast_ipv6_mfc_update_event_callback(struct in6_addr *group, struct in6_addr *origin, uint32_t max_to_dev, uint32_t to_dev_idx[], uint8_t op)
+ {
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++	ecm_interface_multicast_invalidate();
++#else
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_db_multicast_tuple_instance *tuple_instance;
+ 	struct ecm_db_multicast_tuple_instance *tuple_instance_next;
+@@ -2575,7 +2647,7 @@ static void ecm_nss_multicast_ipv6_mfc_update_event_callback(struct in6_addr *gr
+ 			 */
+ 			ret = ecm_nss_multicast_ipv6_connection_update_accelerate(feci, &mc_sync, &aci_pr);
+ 			if (ret < 0) {
+-				feci->decelerate(feci);
++				ecm_db_connection_make_defunct(ci);
+ 				ecm_front_end_connection_deref(feci);
+ 				ecm_db_multicast_connection_deref(tuple_instance);
+ 				return;
+@@ -2651,6 +2723,7 @@ static void ecm_nss_multicast_ipv6_mfc_update_event_callback(struct in6_addr *gr
+ 	}
+ 
+ 	return;
++#endif
+ }
+ 
+ /*
+@@ -2675,17 +2748,21 @@ int ecm_nss_multicast_ipv6_init(struct dentry *dentry)
+ 	/*
+ 	 * Register multicast update callback to MCS snooper
+ 	 */
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 	if (mc_bridge_ipv6_update_callback_register(ecm_nss_multicast_ipv6_br_update_event_callback)) {
+ 		DEBUG_ERROR("Failed to register MCS callback\n");
+ 		return -1;
+ 	}
++#endif
+ 
+ 	/*
+ 	 * Register multicast update callbacks to MFC
+ 	 */
+ 	if (!ip6mr_register_mfc_event_offload_callback(ecm_nss_multicast_ipv6_mfc_update_event_callback)) {
+ 		DEBUG_ERROR("Failed to register MFC callback\n");
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 		mc_bridge_ipv6_update_callback_deregister();
++#endif
+ 		return -1;
+ 	}
+ 
+@@ -2703,5 +2780,7 @@ void ecm_nss_multicast_ipv6_exit(void)
+ 	 * MFC and MCS snooper
+ 	 */
+ 	ip6mr_unregister_mfc_event_offload_callback();
++#ifndef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 	mc_bridge_ipv6_update_callback_deregister();
++#endif
+ }
+diff --git a/frontends/nss/ecm_nss_ipv4.c b/frontends/nss/ecm_nss_ipv4.c
+index 977bca5..0c220aa 100644
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -199,7 +199,29 @@ void ecm_nss_ipv4_decel_done_time_update(struct ecm_front_end_connection_instanc
+  * ecm_nss_ipv4_process_one_conn_sync_msg()
+  *	Process one connection sync message.
+  */
+-static inline void ecm_nss_ipv4_process_one_conn_sync_msg(struct nss_ipv4_conn_sync *sync)
++#ifdef ECM_MULTICAST_ENABLE
++static bool ecm_nss_ipv4_multicast_sync_valid(struct ecm_db_connection_instance *ci,
++					      struct nss_ipv4_conn_sync *sync,
++					      unsigned long request, bool notification,
++					      u64 *route_cookie)
++{
++	struct ecm_front_end_connection_instance *feci;
++	bool valid;
++
++	feci = ecm_db_connection_front_end_get_and_ref(ci);
++	valid = ecm_interface_multicast_stats_valid(feci, request, route_cookie);
++	if (!valid && notification &&
++	    (sync->reason == NSS_IPV4_RULE_SYNC_REASON_FLUSH ||
++	     sync->reason == NSS_IPV4_RULE_SYNC_REASON_EVICT))
++		ecm_db_connection_make_defunct(ci);
++	ecm_front_end_connection_deref(feci);
++	return valid;
++}
++#endif
++
++static inline void ecm_nss_ipv4_process_one_conn_sync_msg(struct nss_ipv4_conn_sync *sync,
++							  unsigned long request,
++							  bool notification)
+ {
+ 	struct nf_conntrack_tuple_hash *h;
+ 	struct nf_conntrack_tuple tuple;
+@@ -207,6 +229,9 @@ static inline void ecm_nss_ipv4_process_one_conn_sync_msg(struct nss_ipv4_conn_s
+ 	struct nf_conn_counter *acct;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++#ifdef ECM_MULTICAST_ENABLE
++	u64 multicast_route_cookie = 0;
++#endif
+ 	struct neighbour *neigh;
+ 	ip_addr_t flow_ip;
+ 	ip_addr_t return_ip_xlate;
+@@ -268,6 +293,21 @@ static inline void ecm_nss_ipv4_process_one_conn_sync_msg(struct nss_ipv4_conn_s
+ 	}
+ 
+ 	DEBUG_TRACE("%px: Sync conn %px\n", sync, ci);
++#ifdef ECM_MULTICAST_ENABLE
++	if (ecm_ip_addr_is_multicast(return_ip)) {
++		if (!ecm_nss_ipv4_multicast_sync_valid(ci, sync, request, notification,
++						       &multicast_route_cookie)) {
++			/*
++			 * NOTIFY has no rule generation.  It must not write counters
++			 * into a new CI/MFC using an old tuple.  A flush/eviction may
++			 * invalidate the current rule; destroy it with normal ACK
++			 * ownership instead of declaring acceleration ceased.
++			 */
++			ecm_db_connection_deref(ci);
++			return;
++		}
++	}
++#endif
+ 
+ 	/*
+ 	 * Copy the sync data to the classifier sync structure to
+@@ -349,7 +389,9 @@ static inline void ecm_nss_ipv4_process_one_conn_sync_msg(struct nss_ipv4_conn_s
+ 			/*
+ 			 * Update IP multicast routing cache stats
+ 			 */
+-			ipmr_mfc_stats_update(&init_net, htonl(flow_ip[0]), htonl(return_ip[0]), sync->flow_rx_packet_count,
++			if (multicast_route_cookie)
++				ipmr_mfc_stats_update(&init_net, htonl(flow_ip[0]), htonl(return_ip[0]), multicast_route_cookie,
++											 sync->flow_rx_packet_count,
+ 										 sync->flow_rx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count);
+ 		} else {
+ 			/*
+@@ -637,7 +679,7 @@ static void ecm_nss_ipv4_net_dev_callback(void *app_data, struct nss_ipv4_msg *n
+ 		return;
+ 	}
+ 	sync = &nim->msg.conn_stats;
+-	ecm_nss_ipv4_process_one_conn_sync_msg(sync);
++	ecm_nss_ipv4_process_one_conn_sync_msg(sync, 0, true);
+ }
+ 
+ /*
+@@ -681,7 +723,8 @@ static void ecm_nss_ipv4_connection_sync_many_callback(void *app_data, struct ns
+ 
+ 	if (nim->cm.response == NSS_CMN_RESPONSE_ACK) {
+ 		for (i = 0; i < nicsm->count; i++) {
+-			ecm_nss_ipv4_process_one_conn_sync_msg(&nicsm->conn_sync[i]);
++			ecm_nss_ipv4_process_one_conn_sync_msg(&nicsm->conn_sync[i],
++					current_reply ? (unsigned long)app_data : 0, false);
+ 		}
+ 	}
+ 
+@@ -776,6 +819,9 @@ static void ecm_nss_ipv4_stats_sync_req_work(struct work_struct *work)
+ 		ecm_nss_ipv4_sync_req_pending = true;
+ 		spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 
++#ifdef ECM_MULTICAST_ENABLE
++		ecm_interface_multicast_stats_snapshot(4, ecm_nss_ipv4_sync_req_seq);
++#endif
+ 		nss_tx_status = nss_ipv4_tx_with_size(ecm_nss_ipv4_nss_ipv4_mgr, ecm_nss_ipv4_sync_req_msg, PAGE_SIZE);
+ 		if (nss_tx_status == NSS_TX_SUCCESS) {
+ 			ecm_nss_ipv4_stats_request_success++;
+diff --git a/frontends/nss/ecm_nss_ipv6.c b/frontends/nss/ecm_nss_ipv6.c
+index d68132f..702c905 100644
+--- a/frontends/nss/ecm_nss_ipv6.c
++++ b/frontends/nss/ecm_nss_ipv6.c
+@@ -66,7 +66,7 @@
+ #define DEBUG_LEVEL ECM_NSS_IPV6_DEBUG_LEVEL
+ 
+ #include <nss_api_if.h>
+-#ifdef ECM_MULTICAST_ENABLE
++#if defined(ECM_MULTICAST_ENABLE) && !defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+ #include <mc_ecm.h>
+ #endif
+ 
+@@ -204,7 +204,29 @@ void ecm_nss_ipv6_decel_done_time_update(struct ecm_front_end_connection_instanc
+  * ecm_nss_ipv6_process_one_conn_sync_msg()
+  *	Process one connection sync message.
+  */
+-static inline void ecm_nss_ipv6_process_one_conn_sync_msg(struct nss_ipv6_conn_sync *sync)
++#ifdef ECM_MULTICAST_ENABLE
++static bool ecm_nss_ipv6_multicast_sync_valid(struct ecm_db_connection_instance *ci,
++					      struct nss_ipv6_conn_sync *sync,
++					      unsigned long request, bool notification,
++					      u64 *route_cookie)
++{
++	struct ecm_front_end_connection_instance *feci;
++	bool valid;
++
++	feci = ecm_db_connection_front_end_get_and_ref(ci);
++	valid = ecm_interface_multicast_stats_valid(feci, request, route_cookie);
++	if (!valid && notification &&
++	    (sync->reason == NSS_IPV6_RULE_SYNC_REASON_FLUSH ||
++	     sync->reason == NSS_IPV6_RULE_SYNC_REASON_EVICT))
++		ecm_db_connection_make_defunct(ci);
++	ecm_front_end_connection_deref(feci);
++	return valid;
++}
++#endif
++
++static inline void ecm_nss_ipv6_process_one_conn_sync_msg(struct nss_ipv6_conn_sync *sync,
++							  unsigned long request,
++							  bool notification)
+ {
+ 	struct nf_conntrack_tuple_hash *h;
+ 	struct nf_conntrack_tuple tuple;
+@@ -212,6 +234,9 @@ static inline void ecm_nss_ipv6_process_one_conn_sync_msg(struct nss_ipv6_conn_s
+ 	struct nf_conn_counter *acct;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++#ifdef ECM_MULTICAST_ENABLE
++	u64 multicast_route_cookie = 0;
++#endif
+ 	struct neighbour *neigh;
+ 	struct ecm_classifier_instance *assignments[ECM_CLASSIFIER_TYPES];
+ 	int aci_index;
+@@ -250,6 +275,21 @@ static inline void ecm_nss_ipv6_process_one_conn_sync_msg(struct nss_ipv6_conn_s
+ 	}
+ 
+ 	DEBUG_TRACE("%px: Sync conn %px\n", sync, ci);
++#ifdef ECM_MULTICAST_ENABLE
++	if (ecm_ip_addr_is_multicast(return_ip)) {
++		if (!ecm_nss_ipv6_multicast_sync_valid(ci, sync, request, notification,
++						       &multicast_route_cookie)) {
++			/*
++			 * NOTIFY has no rule generation.  It must not write counters
++			 * into a new CI/MFC using an old tuple.  A flush/eviction may
++			 * invalidate the current rule; destroy it with normal ACK
++			 * ownership instead of declaring acceleration ceased.
++			 */
++			ecm_db_connection_deref(ci);
++			return;
++		}
++	}
++#endif
+ 
+ 	/*
+ 	 * Copy the sync data to the classifier sync structure to
+@@ -329,7 +369,9 @@ static inline void ecm_nss_ipv6_process_one_conn_sync_msg(struct nss_ipv6_conn_s
+ 			/*
+ 			 * Update IP multicast routing cache stats
+ 			 */
+-			ip6mr_mfc_stats_update(&init_net, &origin6, &group6, sync->flow_rx_packet_count,
++			if (multicast_route_cookie)
++				ip6mr_mfc_stats_update(&init_net, &origin6, &group6, multicast_route_cookie,
++									 sync->flow_rx_packet_count,
+ 								 sync->flow_rx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count);
+ 		} else {
+ 
+@@ -616,7 +658,7 @@ static void ecm_nss_ipv6_net_dev_callback(void *app_data, struct nss_ipv6_msg *n
+ 		return;
+ 	}
+ 	sync = &nim->msg.conn_stats;
+-	ecm_nss_ipv6_process_one_conn_sync_msg(sync);
++	ecm_nss_ipv6_process_one_conn_sync_msg(sync, 0, true);
+ }
+ 
+ /*
+@@ -660,7 +702,8 @@ static void ecm_nss_ipv6_connection_sync_many_callback(void *app_data, struct ns
+ 
+ 	if (nim->cm.response == NSS_CMN_RESPONSE_ACK) {
+ 		for (i = 0; i < nicsm->count; i++) {
+-			ecm_nss_ipv6_process_one_conn_sync_msg(&nicsm->conn_sync[i]);
++			ecm_nss_ipv6_process_one_conn_sync_msg(&nicsm->conn_sync[i],
++					current_reply ? (unsigned long)app_data : 0, false);
+ 		}
+ 	}
+ 
+@@ -755,6 +798,9 @@ static void ecm_nss_ipv6_stats_sync_req_work(struct work_struct *work)
+ 		ecm_nss_ipv6_sync_req_pending = true;
+ 		spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
++#ifdef ECM_MULTICAST_ENABLE
++		ecm_interface_multicast_stats_snapshot(6, ecm_nss_ipv6_sync_req_seq);
++#endif
+ 		nss_tx_status = nss_ipv6_tx_with_size(ecm_nss_ipv6_nss_ipv6_mgr, ecm_nss_ipv6_sync_req_msg, PAGE_SIZE);
+ 		if (nss_tx_status == NSS_TX_SUCCESS) {
+ 			ecm_nss_ipv6_stats_request_success++;
+diff --git a/frontends/nss/ecm_nss_ipv4.h b/frontends/nss/ecm_nss_ipv4.h
+index 3b1c040..90669f1 100644
+--- a/frontends/nss/ecm_nss_ipv4.h
++++ b/frontends/nss/ecm_nss_ipv4.h
+@@ -103,6 +103,13 @@ static inline bool ecm_nss_ipv4_accel_pending_set(struct ecm_front_end_connectio
+ 		spin_unlock_bh(&feci->lock);
+ 		return false;
+ 	}
++#ifdef ECM_MULTICAST_ENABLE
++	if (feci->multicast_generation && ecm_nss_ipv4_decel_unknown_count) {
++		spin_unlock_bh(&ecm_nss_ipv4_lock);
++		spin_unlock_bh(&feci->lock);
++		return false;
++	}
++#endif
+ 	if (ecm_nss_ipv4_accel_limit_mode & ECM_FRONT_END_ACCEL_LIMIT_MODE_FIXED) {
+ 		if ((ecm_nss_ipv4_pending_accel_count + ecm_nss_ipv4_accelerated_count) >= nss_ipv4_max_conn_count()) {
+ 			spin_unlock_bh(&ecm_nss_ipv4_lock);
+diff --git a/frontends/nss/ecm_nss_ipv6.h b/frontends/nss/ecm_nss_ipv6.h
+index 9e31ba5..2c488a1 100644
+--- a/frontends/nss/ecm_nss_ipv6.h
++++ b/frontends/nss/ecm_nss_ipv6.h
+@@ -103,6 +103,13 @@ static inline bool ecm_nss_ipv6_accel_pending_set(struct ecm_front_end_connectio
+ 		spin_unlock_bh(&feci->lock);
+ 		return false;
+ 	}
++#ifdef ECM_MULTICAST_ENABLE
++	if (feci->multicast_generation && ecm_nss_ipv6_decel_unknown_count) {
++		spin_unlock_bh(&ecm_nss_ipv6_lock);
++		spin_unlock_bh(&feci->lock);
++		return false;
++	}
++#endif
+ 	if (ecm_nss_ipv6_accel_limit_mode & ECM_FRONT_END_ACCEL_LIMIT_MODE_FIXED) {
+ 		if ((ecm_nss_ipv6_pending_accel_count + ecm_nss_ipv6_accelerated_count) >= nss_ipv6_max_conn_count()) {
+ 			spin_unlock_bh(&ecm_nss_ipv6_lock);

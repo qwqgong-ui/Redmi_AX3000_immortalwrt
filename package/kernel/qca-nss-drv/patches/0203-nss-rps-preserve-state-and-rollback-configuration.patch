@@ -1,0 +1,90 @@
+--- a/nss_rps.c
++++ b/nss_rps.c
+@@ -125,19 +125,9 @@
+-	char w_buf[5];
+-	unsigned int pri;
+-	int core, res;
+-
+-	/*
+-	 * Buffer length cannot be different than 4 or 5.
+-	 */
+-	if (*lenp < 4 || *lenp > 5) {
+-		nss_warning("Buffer is not correct. Invalid lenght: %d\n", (int)*lenp);
+-		return -EINVAL;
+-	}
+-
+-	/*
+-	 * It's a write operation
+-	 */
+-	if (*lenp >= sizeof(w_buf)) {
+-		nss_warning("Input too large: %zu\n", *lenp);
+-		return -EINVAL;
+-	}
++	char w_buf[6];
++	unsigned int pri;
++	int core, res;
++
++	/* Accept a one-digit priority/CPU, including -1 and an optional newline. */
++	if (*lenp < 3 || *lenp >= sizeof(w_buf)) {
++		nss_warning("Invalid priority map length: %zu\n", *lenp);
++		return -EINVAL;
++	}
+@@ -424,9 +414,15 @@
+-	if (nss_rps_config == 0) {
+-		nss_info_always("Runtime disabling of NSS RPS not supported\n");
+-		return ret;
+-	}
+-
+-	if (nss_rps_config != 1) {
+-		nss_info_always("Invalid input value. Valid values are 0 and 1\n");
+-		return ret;
+-	}
++	if (nss_rps_config != 0 && nss_rps_config != 1) {
++		nss_rps_config = current_state;
++		nss_info_always("Invalid input value. Valid values are 0 and 1\n");
++		return -EINVAL;
++	}
++
++	if (nss_rps_config == 0) {
++		if (current_state) {
++			/* Firmware queues cannot be disabled without reinitialization. */
++			nss_rps_config = current_state;
++			nss_info_always("Runtime disabling of NSS RPS not supported\n");
++			return -EOPNOTSUPP;
++		}
++		return NSS_SUCCESS;
++	}
+@@ -448,1 +444,1 @@
+-			return ret_rps;
++			return -EIO;
+@@ -477,5 +473,7 @@
+-#if !defined(NSS_DRV_IPV4_ENABLE) || !defined(NSS_DRV_IPV6_ENABLE)
+-	nss_info_always("%px: Feature is not supported\n", nss_ctx);
+-	return 0;
+-#else
+-	if (nss_rps_hash_bitmap <= (NSS_RPS_MAX_CORE_HASH_BITMAP)) {
++#if !defined(NSS_DRV_IPV4_ENABLE) || !defined(NSS_DRV_IPV6_ENABLE)
++	nss_rps_hash_bitmap = current_state;
++	nss_info_always("%px: Feature is not supported\n", nss_ctx);
++	return -EOPNOTSUPP;
++#else
++	if (nss_rps_hash_bitmap >= 0 &&
++	    nss_rps_hash_bitmap <= NSS_RPS_MAX_CORE_HASH_BITMAP) {
+@@ -491,1 +489,1 @@
+-				return ret_ipv4;
++				return -EIO;
+@@ -503,1 +501,1 @@
+-				if (nss_rps_ipv4_hash_bitmap_cfg(nss_ctx, nss_rps_hash_bitmap != NSS_SUCCESS)) {
++				if (nss_rps_ipv4_hash_bitmap_cfg(nss_ctx, nss_rps_hash_bitmap) != NSS_SUCCESS) {
+@@ -506,1 +504,1 @@
+-				return ret_ipv6;
++				return -EIO;
+@@ -513,2 +511,3 @@
+-	nss_info_always("Invalid input value. Valid values are less than %d\n", (NSS_RPS_MAX_CORE_HASH_BITMAP));
+-	return ret;
++	nss_rps_hash_bitmap = current_state;
++	nss_info_always("Invalid input value. Valid bitmaps are 0 through %d\n", NSS_RPS_MAX_CORE_HASH_BITMAP);
++	return -EINVAL;
+@@ -550,1 +549,1 @@
+-	return ret_pri_map;
++	return ret_pri_map == NSS_SUCCESS ? NSS_SUCCESS : -EIO;

@@ -1,0 +1,47 @@
+Subject: [PATCH] ecm: require teardown events before accelerating a flow
+
+Connections created before ECM enables conntrack events may lack an event
+cache. Keep those connections on the host: taking them over would leave
+ECM without reliable destruction notifications. Do not flush unrelated
+conntrack entries merely to make them eligible for acceleration.
+
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -38,3 +38,4 @@
+ #include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
+ #include <net/netfilter/nf_conntrack_helper.h>
+@@ -349,6 +350,12 @@ static void ecm_nss_ported_ipv4_connection_accelerate(
+ 	regen_occurrances = ecm_db_connection_regeneration_occurrances_get(feci->ci);
+ 
++	/* Existing flows without an event cache must retain host teardown. */
++	if (!ct || !nf_ct_ecache_find(ct)) {
++		DEBUG_TRACE("Conntrack event cache absent; keep host forwarding\n");
++		return;
++	}
++
+ 	/*
+ 	 * Test if acceleration is permitted
+ 	 */
+ 	if (!ecm_nss_ipv4_accel_pending_set(feci)) {
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -38,3 +38,4 @@
+ #include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
+ #include <net/netfilter/nf_conntrack_helper.h>
+@@ -354,6 +355,12 @@ static void ecm_nss_ported_ipv6_connection_accelerate(
+ 	regen_occurrances = ecm_db_connection_regeneration_occurrances_get(feci->ci);
+ 
++	/* Existing flows without an event cache must retain host teardown. */
++	if (!ct || !nf_ct_ecache_find(ct)) {
++		DEBUG_TRACE("Conntrack event cache absent; keep host forwarding\n");
++		return;
++	}
++
+ 	/*
+ 	 * Test if acceleration is permitted
+ 	 */
+ 	if (!ecm_nss_ipv6_accel_pending_set(feci)) {

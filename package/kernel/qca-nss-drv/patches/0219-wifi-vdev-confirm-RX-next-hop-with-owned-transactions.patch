@@ -1,0 +1,75 @@
+NSS VAP ingress shaping: use the Wi-Fi RX next-hop with a tracked ACK.
+
+--- a/nss_wifi_vdev.c
++++ b/nss_wifi_vdev.c
+@@ -277,6 +277,57 @@
+ }
+ EXPORT_SYMBOL(nss_wifi_vdev_set_next_hop);
+ 
++struct nss_wifi_vdev_next_hop_wait {
++	struct completion done;
++	nss_tx_status_t response;
++};
++
++static void nss_wifi_vdev_next_hop_response(void *data, struct nss_cmn_msg *cm)
++{
++	struct nss_wifi_vdev_next_hop_wait *wait = data;
++
++	wait->response = cm->response == NSS_CMN_RESPONSE_ACK && !cm->error ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	complete(&wait->done);
++}
++
++nss_tx_status_t nss_wifi_vdev_set_next_hop_sync(struct nss_ctx_instance *ctx,
++					     int if_num, int next_hop)
++{
++	struct nss_wifi_vdev_next_hop_wait wait;
++	struct nss_wifi_vdev_msg *msg;
++	nss_tx_status_t status;
++	uint32_t cookie = 0;
++	bool replied = false;
++
++	if (if_num < NSS_DYNAMIC_IF_START ||
++	    if_num >= NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES ||
++	    next_hop < 0 || next_hop >= NSS_MAX_NET_INTERFACES ||
++	    nss_dynamic_interface_get_type(ctx, if_num) != NSS_DYNAMIC_INTERFACE_TYPE_VAP)
++		return NSS_TX_FAILURE_BAD_PARAM;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg)
++		return NSS_TX_FAILURE;
++	init_completion(&wait.done);
++	wait.response = NSS_TX_FAILURE;
++	nss_wifi_vdev_msg_init(msg, if_num, NSS_WIFI_VDEV_SET_NEXT_HOP,
++			       sizeof(msg->msg.next_hop),
++			       (nss_wifi_vdev_msg_callback_t *)nss_wifi_vdev_next_hop_response, &wait);
++	msg->msg.next_hop.ifnumber = next_hop;
++	status = nss_wifi_vdev_tx_msg_tracked(ctx, msg, &cookie);
++	if (status == NSS_TX_SUCCESS)
++		replied = wait_for_completion_timeout(&wait.done,
++						    msecs_to_jiffies(NSS_IF_TX_TIMEOUT)) != 0;
++	/* Remove an undispatched reply and drain any callback before stack expiry. */
++	if (cookie)
++		nss_wifi_vdev_cancel_msg(cookie);
++	if (status == NSS_TX_SUCCESS)
++		status = replied ? wait.response : NSS_TX_FAILURE;
++	kfree(msg);
++	return status;
++}
++EXPORT_SYMBOL(nss_wifi_vdev_set_next_hop_sync);
++
+ /*
+  * nss_wifi_vdev_base_set_next_hop()
+  */
+--- a/exports/nss_wifi_vdev.h
++++ b/exports/nss_wifi_vdev.h
+@@ -1381,6 +1381,10 @@
+  */
+ nss_tx_status_t nss_wifi_vdev_set_next_hop(struct nss_ctx_instance *nss_ctx, int if_num, int next_hop);
+ 
++/* Process context: waits for a matched ACK and drains timed-out callbacks. */
++nss_tx_status_t nss_wifi_vdev_set_next_hop_sync(struct nss_ctx_instance *nss_ctx,
++					     int if_num, int next_hop);
++
+ /**
+  * nss_wifi_vdev_base_set_next_hop
+  *	Sends the next hop message to Wi-Fi virtual access point.

@@ -4,6 +4,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import tarfile
 
 
@@ -32,10 +33,20 @@ def main():
             assert data == bytes(redaction["bytes"]), redaction["property"]
     inventory = json.loads((ROOT / "docs/nss/features.json").read_text())
     assert len(inventory["features"]) == 44
-    enabled = {f["symbol"] for f in inventory["features"] if f["profile_value"] == "y"}
-    assert enabled == {"NSS_DRV_WIFIOFFLOAD_ENABLE", "NSS_DRV_WIFI_EXT_VDEV_ENABLE", "NSS_DRV_VIRT_IF_ENABLE"}
+    source = (ROOT / "package/kernel/qca-nss-drv/Config.in").read_text()
+    profile = (ROOT / "configs/redmi-ax3000-nss-wifi.config").read_text()
+    definitions = re.findall(r"(?m)^config (NSS_DRV_\w+)$", source)
+    symbols = {f["symbol"] for f in inventory["features"]}
+    assert len(symbols) == len(definitions) == 44
+    assert symbols == set(definitions), "feature definitions differ from Config.in"
+    for feature in inventory["features"]:
+        symbol = re.escape(feature["symbol"])
+        selected = re.search(r"(?m)^CONFIG_" + symbol + r"=(.*)$", profile)
+        disabled = re.search(r"(?m)^# CONFIG_" + symbol + r" is not set$", profile)
+        expected = selected.group(1) if selected else "n" if disabled else None
+        assert feature["profile_value"] == expected, feature["symbol"]
     print(f"PASS: {len(manifest['files'])} snapshot hashes; {firmware} router firmware checksums; "
-          f"{len(redactions)} redactions; 44 feature definitions")
+          f"{len(redactions)} redactions; 44 feature definitions and profile selections")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,201 @@
+Subject: [PATCH] nss-dp: preserve live MAC and firmware DMA ring positions
+
+--- a/include/nss_dp_dev.h
++++ b/include/nss_dp_dev.h
+@@ -223,6 +223,11 @@
+ 	uint32_t vsi;			/* vsi number */
+ 	unsigned long flags;		/* Status flags */
+ 	unsigned long drv_flags;	/* Driver specific feature flags */
++	bool handoff_link_preserved;
++	/* Syn GMAC MP firmware ring ownership survives host restoration. */
++	u32 syn_host_rx_base, syn_host_tx_base;
++	u32 syn_fw_rx_base, syn_fw_tx_base, syn_fw_rx_resume, syn_fw_tx_resume;
++	bool syn_fw_known, syn_fw_resume_valid, syn_fw_active;
+ 
+ 	/* Phy related stuff */
+ 	struct device_node *phy_node;	/* Phy device OF node */
+--- a/exports/nss_dp_api_if.h
++++ b/exports/nss_dp_api_if.h
+@@ -118,6 +118,8 @@
+ 	int (*deinit)(struct nss_dp_data_plane_ctx *dpc);
+ 	/* Host HAL method, also usable after an overlay's core is halted. */
+ 	int (*quiesce_dma)(struct nss_dp_data_plane_ctx *dpc);
++	int (*prepare_override_open)(struct nss_dp_data_plane_ctx *dpc);
++	int (*complete_override_open)(struct nss_dp_data_plane_ctx *dpc);
+ };
+ 
+ /**
+--- a/nss_dp_attach.c
++++ b/nss_dp_attach.c
+@@ -100,7 +100,22 @@
+ 
+     netif_tx_disable(netdev);
+     if (was_up) {
+-        ret = netdev->netdev_ops->ndo_stop(netdev);
++        struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
++
++        if (host->prepare_override_open) {
++            /* MP must see a live GMAC/PHY on its first OPEN. Close only the
++             * host DMA/NAPI path; the PHY and carrier remain operational.
++             */
++            if (!netif_carrier_ok(netdev))
++                return -EAGAIN;
++            ret = dp_dev->data_plane_ops->close(dp_dev->dpc);
++            if (!ret) {
++                clear_bit(__NSS_DP_UP, &dp_dev->flags);
++                dp_dev->handoff_link_preserved = true;
++            }
++        } else {
++            ret = netdev->netdev_ops->ndo_stop(netdev);
++        }
+         if (ret)
+             return ret;
+     }
+@@ -192,6 +207,7 @@
+     }
+     if (dp_dev->phydev)
+         phy_stop(dp_dev->phydev);
++    dp_dev->handoff_link_preserved = false;
+     dp_dev->link_state = __NSS_DP_LINK_DOWN;
+     ret = dp_dev->data_plane_ops->deinit(dp_dev->dpc);
+     if (ret)
+@@ -243,7 +259,6 @@
+     if (dp_global_data_plane_ctx[nss_dp_get_idx_from_macid(dp_dev->macid)].dev != netdev)
+         return -ENODEV;
+     netif_tx_disable(netdev);
+-    netif_carrier_off(netdev);
+     return host->quiesce_dma(
+         &dp_global_data_plane_ctx[nss_dp_get_idx_from_macid(dp_dev->macid)]);
+ }
+--- a/nss_dp_main.c
++++ b/nss_dp_main.c
+@@ -451,11 +451,23 @@
+ 		return -EAGAIN;
+ 	}
+ 
++	if (dp_priv->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE)) {
++		struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
++
++		if (host->prepare_override_open && host->prepare_override_open(dp_priv->dpc))
++			return -EIO;
++	}
+ 	if (dp_priv->data_plane_ops->open(dp_priv->dpc, 0, 0, 0)) {
+ 		netdev_dbg(netdev, "Data plane open failed\n");
+ 		return -EAGAIN;
+ 	}
+ 
++	if (dp_priv->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE)) {
++		struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
++
++		if (host->complete_override_open && host->complete_override_open(dp_priv->dpc))
++			return -EIO;
++	}
+ 	/*
+ 	 * Notify GMAC to start receive/transmit
+ 	 */
+@@ -467,7 +479,7 @@
+ 	}
+ 
+ 
+-	if (!dp_priv->phydev) {
++	if (!dp_priv->phydev || dp_priv->handoff_link_preserved) {
+ 		/* Notify data plane link is up */
+ 		if (dp_priv->data_plane_ops->link_state(dp_priv->dpc, 1)) {
+ 			netdev_dbg(netdev, "Data plane set link failed\n");
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp.c
+@@ -445,19 +445,80 @@
+ 	u32 status;
+ 	int ret;
+ 
+-	if (gmac->gmac_hal_ops->stop) {
+-		ret = gmac->gmac_hal_ops->stop(gmac->gmac_hal_ctx);
+-		if (ret)
+-			return ret < 0 ? ret : -EIO;
+-	}
+ 	syn_disable_dma_interrupt(base);
+ 	syn_disable_dma_rx(base);
+ 	syn_disable_dma_tx(base);
+ 	ret = readl_poll_timeout(base + SYN_DMA_STATUS, status,
+ 		!(status & (SYN_DMA_TX_STATE | SYN_DMA_RX_STATE)), 10, 50000);
+-	if (ret)
++	if (ret) {
+ 		netdev_err(dpc->dev, "DMA did not stop: status=%#x\n", status);
+-	return ret;
++		return ret;
++	}
++	if (!(gmac->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE))) {
++		gmac->syn_host_rx_base = readl(base + SYN_DMA_RX_DESCRIPTOR_LIST_ADDRESS);
++		gmac->syn_host_tx_base = readl(base + SYN_DMA_TX_DESCRIPTOR_LIST_ADDRESS);
++	} else if (gmac->syn_fw_active) {
++		gmac->syn_fw_resume_valid = false;
++		if (readl(base + SYN_DMA_RX_DESCRIPTOR_LIST_ADDRESS) != gmac->syn_fw_rx_base ||
++		    readl(base + SYN_DMA_TX_DESCRIPTOR_LIST_ADDRESS) != gmac->syn_fw_tx_base)
++			return -EUCLEAN;
++		gmac->syn_fw_rx_resume = readl(base + SYN_DMA_CURRENT_HOST_RX_DESCRIPTOR);
++		gmac->syn_fw_tx_resume = readl(base + SYN_DMA_CURRENT_HOST_TX_DESCRIPTOR);
++		if (!gmac->syn_fw_rx_resume)
++			gmac->syn_fw_rx_resume = gmac->syn_fw_rx_base;
++		if (!gmac->syn_fw_tx_resume)
++			gmac->syn_fw_tx_resume = gmac->syn_fw_tx_base;
++		gmac->syn_fw_resume_valid = true;
++		gmac->syn_fw_active = false;
++	}
++	return 0;
++}
++
++/* MP restores its own rings only at the first OPEN. Keep the DMA's saved
++ * position on later OPENs; resetting to slot zero desynchronises FW indices.
++ * Sequence follows qca-dwmac-nss bb783538744ff9f2b924da8af8288eab409d5cf1.
++ */
++static int syn_dp_prepare_override_open(struct nss_dp_data_plane_ctx *dpc)
++{
++	struct nss_dp_dev *gmac = netdev_priv(dpc->dev);
++	void __iomem *base = gmac->gmac_hal_ctx->mac_base;
++
++	if (!gmac->syn_fw_known)
++		return 0;
++	if (!gmac->syn_fw_resume_valid)
++		return -EUCLEAN;
++	if (gmac->gmac_hal_ops->stop && gmac->gmac_hal_ops->stop(gmac->gmac_hal_ctx))
++		return -EIO;
++	writel(gmac->syn_fw_rx_resume, base + SYN_DMA_RX_DESCRIPTOR_LIST_ADDRESS);
++	writel(gmac->syn_fw_tx_resume, base + SYN_DMA_TX_DESCRIPTOR_LIST_ADDRESS);
++	return 0;
++}
++
++static int syn_dp_complete_override_open(struct nss_dp_data_plane_ctx *dpc)
++{
++	struct nss_dp_dev *gmac = netdev_priv(dpc->dev);
++	void __iomem *base = gmac->gmac_hal_ctx->mac_base;
++	u32 rx = readl(base + SYN_DMA_RX_DESCRIPTOR_LIST_ADDRESS);
++	u32 tx = readl(base + SYN_DMA_TX_DESCRIPTOR_LIST_ADDRESS);
++
++	if (!gmac->syn_fw_known) {
++		if (!rx || !tx || rx == gmac->syn_host_rx_base || tx == gmac->syn_host_tx_base) {
++			netdev_err(dpc->dev, "FW OPEN did not install DMA rings: rx=%#x tx=%#x\n", rx, tx);
++			return -EIO;
++		}
++		gmac->syn_fw_rx_base = rx;
++		gmac->syn_fw_tx_base = tx;
++		gmac->syn_fw_known = true;
++		netdev_info(dpc->dev, "FW DMA rings: rx=%#x tx=%#x\n", rx, tx);
++	} else {
++		if (!gmac->syn_fw_resume_valid)
++			return -EUCLEAN;
++		writel(gmac->syn_fw_rx_base, base + SYN_DMA_RX_DESCRIPTOR_LIST_ADDRESS);
++		writel(gmac->syn_fw_tx_base, base + SYN_DMA_TX_DESCRIPTOR_LIST_ADDRESS);
++		gmac->syn_fw_resume_valid = false;
++	}
++	gmac->syn_fw_active = true;
++	return 0;
+ }
+ 
+ /*
+@@ -477,4 +538,6 @@
+ 	.get_stats	= syn_dp_if_get_stats,
+ 	.deinit		= syn_dp_if_deinit,
+ 	.quiesce_dma	= syn_dp_quiesce_dma,
++	.prepare_override_open = syn_dp_prepare_override_open,
++	.complete_override_open = syn_dp_complete_override_open,
+ };

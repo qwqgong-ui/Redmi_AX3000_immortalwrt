@@ -1,0 +1,59 @@
+Subject: [PATCH] nss: pin physical ownership until confirmed detach
+
+--- a/nss_data_plane/hal/include/nss_data_plane_hal.h
++++ b/nss_data_plane/hal/include/nss_data_plane_hal.h
+@@ -43,6 +43,7 @@
+ 	struct nss_dp_gmac_stats gmac_stats;	/* SoC specific stats for GMAC */
+ 	bool may_own_dma;
+ 	bool attached;
++	bool module_held;
+ 	bool headroom_saved;
+ 	unsigned int saved_headroom;
+ 	int notify_open;			/* This data plane interface has been opened or not */
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -276,6 +276,11 @@
+     ret = nss_phys_if_register_handler(nss_ctx, if_num);
+     if (ret)
+         goto clear;
++    /* A callback/context or DMA ownership cannot survive unloading this
++     * provider. Failed restore deliberately retains this reference.
++     */
++    __module_get(THIS_MODULE);
++    ndpp->module_held = true;
+     ret = nss_dp_override_data_plane(netdev, &dp_ops, &ndpp->dpc);
+     if (ret)
+         goto restore;
+@@ -299,6 +304,8 @@
+     nss_core_unregister_handler(nss_ctx, if_num);
+     synchronize_net();
+ clear:
++    if (ndpp->module_held)
++        module_put(THIS_MODULE);
+     memset(ndpp, 0, sizeof(*ndpp));
+     return false;
+ }
+@@ -323,6 +330,8 @@
+         nss_core_unregister_subsys_dp(&top->nss[core], if_num);
+     nss_core_unregister_handler(dp->nss_ctx, if_num);
+     synchronize_net();
++    if (dp->module_held)
++        module_put(THIS_MODULE);
+     memset(dp, 0, sizeof(*dp));
+     return 0;
+ }
+--- a/nss_init.c
++++ b/nss_init.c
+@@ -189,6 +189,12 @@
+ #endif
+ 	.driver	= {
+ 		.name	= "qca-nss",
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++		/* This on-chip DMA provider is detached through its ownership API.
++		 * Do not expose raw sysfs unbind while GMAC memory is still owned.
++		 */
++		.suppress_bind_attrs = true,
++#endif
+ 		.owner	= THIS_MODULE,
+ #if (NSS_DT_SUPPORT == 1)
+ 		.of_match_table = of_match_ptr(nss_dt_ids),

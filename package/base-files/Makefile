@@ -15,7 +15,8 @@ PKG_NAME:=base-files
 PKG_FLAGS:=nonshared
 PKG_RELEASE:=$(COMMITCOUNT)
 
-PKG_FILE_DEPENDS:=$(PLATFORM_DIR)/ $(GENERIC_PLATFORM_DIR)/base-files/
+# A local revision override may change without changing HEAD/COMMITCOUNT.
+PKG_FILE_DEPENDS:=$(wildcard $(TOPDIR)/version) $(PLATFORM_DIR)/ $(GENERIC_PLATFORM_DIR)/base-files/
 PKG_BUILD_DEPENDS:=usign/host ucert/host
 PKG_LICENSE:=GPL-2.0
 

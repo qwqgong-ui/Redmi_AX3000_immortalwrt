@@ -1,0 +1,581 @@
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -22,6 +22,7 @@
+ struct hal_tcl_status_ring;
+ struct ath11k_ext_irq_grp;
+ struct ath11k_reo_query;
++struct ath11k_reo_pn_update;
+ 
+ enum ath11k_reo_queue_phase {
+ 	ATH11K_REO_QUEUE_PREPARED,
+@@ -97,6 +98,7 @@
+ enum ath11k_reo_cmd_kind {
+ 	ATH11K_REO_CMD_RETIRE,
+ 	ATH11K_REO_CMD_QUERY,
++	ATH11K_REO_CMD_PN_UPDATE,
+ };
+ 
+ struct dp_reo_cmd {
+@@ -106,6 +108,7 @@
+ 	u16 status_tag;
+ 	enum ath11k_reo_cmd_kind kind;
+ 	struct ath11k_reo_query *query;
++	struct ath11k_reo_pn_update *pn_update;
+ 	void (*handler)(struct ath11k_dp *, void *,
+ 			enum hal_reo_cmd_status status);
+ };
+@@ -359,6 +362,38 @@
+ 	struct ath11k_reo_query_result result;
+ };
+ 
++/* An execution barrier, not a descriptor-retirement command. The waiter and
++ * command share a DMA pin, with no borrowed peer/TID/key pointer in the callback.
++ */
++struct ath11k_reo_pn_update {
++	refcount_t refs;
++	struct completion done;
++	struct ath11k_reo_queue *queue;
++	u64 submit_epoch;
++	u16 cmd_num;
++	u8 tid;
++	int error;
++	enum hal_reo_cmd_status status;
++};
++
++/* Protected by reo_cmd_lock; no key material or PN values are exported. */
++struct ath11k_reo_pn_stats {
++	u64 transactions;
++	u64 succeeded;
++	u64 failed;
++	u64 submitted;
++	u64 completed;
++	u64 status[4];
++	u64 drained;
++	u64 status_unknown;
++	u64 timed_out;
++	u64 stale;
++	u64 last_epoch;
++	u32 last_queues;
++	u32 last_wait_ms;
++	int last_errno;
++};
++
+ /* Numeric diagnostics only: no queue/peer references or callback ownership. */
+ struct ath11k_reo_update_stats {
+ 	u64 epoch;
+@@ -446,6 +481,8 @@
+ 	u16 reo_cmd_status_tag[DP_REO_CMD_RING_SIZE + 1];
+ 	struct ath11k_reo_cmd_stats reo_cmd_stats;
+ 	bool reo_query_outstanding;
++	u32 reo_pn_outstanding;
++	struct ath11k_reo_pn_stats reo_pn_stats;
+ 	/* Sticky until this ab is destroyed: NSS RESET ACK is not a WLAN DMA fence. */
+ 	bool reo_ownership_uncertain;
+ 	u32 reo_wmi_inflight;
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -1154,7 +1154,8 @@
+ 	spin_lock_bh(&dp->reo_cmd_lock);
+ 	/* Previous callbacks and owners must be retired before reopening. */
+ 	if (dp->reo_cmd_accepting || dp->reo_cmd_stats.pending ||
+-	    dp->reo_query_outstanding || dp->reo_retained_count || dp->reo_wmi_inflight ||
++	    dp->reo_query_outstanding || dp->reo_pn_outstanding ||
++	    dp->reo_retained_count || dp->reo_wmi_inflight ||
+ 	    !list_empty(&dp->reo_cmd_list) ||
+ 	    !list_empty(&dp->reo_cmd_cache_flush_list) ||
+ 	    !list_empty(&dp->reo_cmd_update_rx_queue_list)) {
+@@ -1164,6 +1165,7 @@
+ 	}
+ 	memset(dp->reo_cmd_status_tag, 0, sizeof(dp->reo_cmd_status_tag));
+ 	memset(&dp->reo_cmd_stats, 0, sizeof(dp->reo_cmd_stats));
++	memset(&dp->reo_pn_stats, 0, sizeof(dp->reo_pn_stats));
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
+ 	spin_unlock_bh(&dp->reo_cmd_update_queue_lock);
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -965,6 +965,11 @@
+ 			refcount_inc(&entry->query->refs);
+ 			entry->query->cmd_num = cmd_num;
+ 			dp->reo_query_outstanding = true;
++		} else if (entry->kind == ATH11K_REO_CMD_PN_UPDATE) {
++			refcount_inc(&entry->pn_update->refs);
++			entry->pn_update->cmd_num = cmd_num;
++			dp->reo_pn_outstanding++;
++			dp->reo_pn_stats.submitted++;
+ 		}
+ 		list_add_tail(&entry->list, &dp->reo_cmd_list);
+ 		dp->reo_cmd_stats.callbacks_registered++;
+@@ -1040,6 +1045,42 @@
+ 	if (observe)
+ 		ath11k_dp_reo_update_record(dp, &input, cmd_num);
+ 	return cmd_num > 0 ? 0 : cmd_num;
++}
++
++int ath11k_dp_tx_reo_pn_update(struct ath11k_base *ab,
++			     struct ath11k_reo_pn_update *update,
++			     struct ath11k_hal_reo_cmd *cmd)
++{
++	struct ath11k_dp *dp = &ab->dp;
++	struct ath11k_reo_update_input input = ath11k_dp_reo_update_input(cmd);
++	struct dp_reo_cmd *entry;
++	int ret;
++
++	lockdep_assert_held(&ab->base_lock);
++	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
++	if (!entry) {
++		spin_lock_bh(&dp->reo_cmd_lock);
++		dp->reo_cmd_stats.allocation_failed++;
++		spin_unlock_bh(&dp->reo_cmd_lock);
++		ret = -ENOMEM;
++		goto out;
++	}
++	entry->kind = ATH11K_REO_CMD_PN_UPDATE;
++	entry->pn_update = update;
++	entry->status_tag = HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;
++	spin_lock_bh(&dp->reo_cmd_lock);
++	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags) ||
++	    READ_ONCE(dp->reo_ownership_uncertain))
++		ret = -ESHUTDOWN;
++	else
++		ret = ath11k_dp_tx_reo_submit_locked(ab, HAL_REO_CMD_UPDATE_RX_QUEUE,
++					    cmd, entry, update->submit_epoch);
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	if (ret < 0)
++		kfree(entry);
++out:
++	ath11k_dp_reo_update_record(dp, &input, ret);
++	return ret > 0 ? 0 : ret;
+ }
+ 
+ int ath11k_dp_tx_reo_query(struct ath11k_base *ab, struct ath11k_reo_query *query)
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.h
+@@ -221,6 +221,9 @@
+ 		 struct ath11k_sta *arsta, struct sk_buff *skb);
+ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id);
+ int ath11k_dp_tx_reo_query(struct ath11k_base *ab, struct ath11k_reo_query *query);
++int ath11k_dp_tx_reo_pn_update(struct ath11k_base *ab,
++			     struct ath11k_reo_pn_update *update,
++			     struct ath11k_hal_reo_cmd *cmd);
+ int ath11k_dp_reo_aging_read(struct ath11k *ar, u64 *epoch, u32 raw[4]);
+ int ath11k_dp_reo_aging_replace(struct ath11k *ar, u64 epoch,
+ 			      const u32 expected[4], const u32 desired[4]);
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -19,6 +19,7 @@
+ #include "dp_tx.h"
+ #include "peer.h"
+ #include "nss.h"
++#include "mac.h"
+ 
+ #define ATH11K_DP_RX_FRAGMENT_TIMEOUT_MS (2 * HZ)
+ 
+@@ -817,6 +818,23 @@
+ 	kfree(query);
+ }
+ 
++void ath11k_dp_reo_pn_update_put(struct ath11k_reo_pn_update *update)
++{
++	if (!update || !refcount_dec_and_test(&update->refs))
++		return;
++	ath11k_dp_reo_queue_put(update->queue);
++	kfree(update);
++}
++
++static void ath11k_dp_reo_pn_update_complete(struct ath11k_reo_pn_update *update,
++					 enum hal_reo_cmd_status status)
++{
++	update->status = status;
++	update->error = status == HAL_REO_CMD_SUCCESS ? 0 :
++		status == HAL_REO_CMD_DRAIN ? -ESHUTDOWN : -EIO;
++	complete(&update->done);
++}
++
+ void ath11k_dp_reo_query_quarantine(struct ath11k_base *ab)
+ {
+ 	struct ath11k_dp *dp = &ab->dp;
+@@ -828,7 +846,8 @@
+ 	if (live)
+ 		spin_lock_bh(&srng->lock);
+ 	spin_lock_bh(&dp->reo_cmd_lock);
+-	unresolved = dp->reo_query_outstanding || dp->reo_retained_count ||
++	unresolved = dp->reo_query_outstanding || dp->reo_pn_outstanding ||
++		     dp->reo_retained_count ||
+ 		     dp->reo_wmi_inflight;
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
+ 	if (unresolved) {
+@@ -913,7 +932,12 @@
+ 		rx_tid = &cmd->data;
+ 		if (cmd->kind == ATH11K_REO_CMD_QUERY)
+ 			ath11k_dp_reo_query_put(cmd->query);
+-		else {
++		else if (cmd->kind == ATH11K_REO_CMD_PN_UPDATE) {
++			dp->reo_pn_stats.drained++;
++			ath11k_dp_reo_pn_update_complete(cmd->pn_update, HAL_REO_CMD_DRAIN);
++			ath11k_dp_reo_pn_update_put(cmd->pn_update);
++			dp->reo_pn_outstanding--;
++		} else {
+ 			ath11k_dp_reo_queue_retired(rx_tid->reo_queue);
+ 			ath11k_dp_reo_tid_drop(rx_tid);
+ 		}
+@@ -1659,18 +1683,41 @@
+ {
+ 	struct ath11k *ar = arvif->ar;
+ 	struct ath11k_base *ab = ar->ab;
++	struct ath11k_dp *dp = &ab->dp;
++	struct ath11k_reo_pn_update *updates[IEEE80211_NUM_TIDS + 1] = {};
+ 	struct ath11k_hal_reo_cmd cmd = {};
+ 	struct ath11k_peer *peer;
+ 	struct dp_rx_tid *rx_tid;
++	unsigned long started = jiffies, deadline = started + msecs_to_jiffies(1000);
++	unsigned long now, remaining;
++	u64 epoch = 0;
++	u32 queued = 0, timed_out = 0;
+ 	u8 tid;
+ 	int ret = 0;
+ 
++	lockdep_assert_held(&ar->conf_mutex);
+ 	/* NOTE: Enable PN/TSC replay check offload only for unicast frames.
+ 	 * We use mac80211 PN/TSC replay check functionality for bcast/mcast
+ 	 * for now.
+ 	 */
+ 	if (!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+ 		return 0;
++
++	/* Allocate waiter state before publication; callbacks never borrow a key,
++	 * peer or rx_tid, and a timeout cannot cancel an already published command.
++	 */
++	for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
++		updates[tid] = kzalloc(sizeof(*updates[tid]), GFP_KERNEL);
++		if (!updates[tid]) {
++			ret = -ENOMEM;
++			goto out;
++		}
++		refcount_set(&updates[tid]->refs, 1);
++		init_completion(&updates[tid]->done);
++		updates[tid]->tid = tid;
++		updates[tid]->error = -EINPROGRESS;
++		updates[tid]->status = HAL_REO_CMD_DRAIN;
++	}
+ 
+ 	cmd.flag |= HAL_REO_CMD_FLG_NEED_STATUS;
+ 	cmd.upd0 |= HAL_REO_CMD_UPD0_PN |
+@@ -1695,31 +1742,125 @@
+ 	}
+ 
+ 	spin_lock_bh(&ab->base_lock);
+-
++	spin_lock_bh(&dp->reo_cmd_lock);
++	epoch = dp->reo_cmd_epoch;
++	if (!ath11k_mac_key_install_available_locked(ar) ||
++	    !dp->reo_cmd_accepting || READ_ONCE(dp->reo_ownership_uncertain) ||
++	    READ_ONCE(ab->nss.ownership_uncertain) ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags))
++		ret = -ESHUTDOWN;
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	if (ret)
++		goto unlock;
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
+-	if (!peer || peer != key_peer) {
++	if (!peer || peer != key_peer || !peer->dp_setup_done) {
+ 		ath11k_warn(ab, "failed to find the peer to configure pn replay detection\n");
+-		spin_unlock_bh(&ab->base_lock);
+-		return -ENOENT;
+-	}
+-
++		ret = -ENOENT;
++		goto unlock;
++	}
++
++	/* Validate and pin the whole current set before changing any descriptor. */
+ 	for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
+ 		rx_tid = &peer->rx_tid[tid];
+ 		if (!rx_tid->active)
+ 			continue;
+-		cmd.addr_lo = lower_32_bits(rx_tid->paddr);
+-		cmd.addr_hi = upper_32_bits(rx_tid->paddr);
+-		ret = ath11k_dp_tx_send_reo_cmd(ab, rx_tid,
+-						HAL_REO_CMD_UPDATE_RX_QUEUE,
+-						&cmd, NULL);
++		if (!rx_tid->reo_queue || READ_ONCE(rx_tid->reo_queue->retiring) ||
++		    READ_ONCE(rx_tid->reo_queue->wmi_inflight) ||
++		    READ_ONCE(rx_tid->reo_queue->phase) != ATH11K_REO_QUEUE_PUBLISHED) {
++			ret = -EAGAIN;
++			goto unlock;
++		}
++		updates[tid]->queue = rx_tid->reo_queue;
++		ath11k_dp_reo_queue_get(updates[tid]->queue);
++		updates[tid]->submit_epoch = epoch;
++	}
++	deadline = jiffies + msecs_to_jiffies(1000);
++	for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
++		/* HAL encodes fields in place: do not reuse its mutated command. */
++		struct ath11k_hal_reo_cmd tid_cmd = cmd;
++
++		if (!updates[tid]->queue)
++			continue;
++		tid_cmd.addr_lo = lower_32_bits(updates[tid]->queue->paddr);
++		tid_cmd.addr_hi = upper_32_bits(updates[tid]->queue->paddr);
++		ret = ath11k_dp_tx_reo_pn_update(ab, updates[tid], &tid_cmd);
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to configure rx tid %d queue for pn replay detection %d\n",
+ 				    tid, ret);
+ 			break;
+ 		}
+-	}
+-
++		queued++;
++	}
++unlock:
+ 	spin_unlock_bh(&ab->base_lock);
++	/* All published TIDs share one deadline. Even after a partial submission
++	 * error, consume completed results without cancelling any unresolved owner.
++	 */
++	for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
++		if (!updates[tid]->cmd_num)
++			continue;
++		now = jiffies;
++		remaining = time_before(now, deadline) ? deadline - now : 0;
++		if (!wait_for_completion_timeout(&updates[tid]->done, remaining)) {
++			timed_out++;
++			if (!ret)
++				ret = -ETIMEDOUT;
++		} else if (!ret && updates[tid]->error) {
++			ret = updates[tid]->error;
++		}
++	}
++	if (!ret && !queued)
++		ret = -EAGAIN;
++	if (!ret) {
++		/* conf_mutex does not serialize firmware unmap or a closed REO epoch. */
++		spin_lock_bh(&ab->base_lock);
++		peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
++		spin_lock_bh(&dp->reo_cmd_lock);
++		if (!ath11k_mac_key_install_available_locked(ar) ||
++		    !dp->reo_cmd_accepting || dp->reo_cmd_epoch != epoch ||
++		    READ_ONCE(dp->reo_ownership_uncertain) ||
++		    READ_ONCE(ab->nss.ownership_uncertain) ||
++		    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++		    test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags))
++			ret = -ESHUTDOWN;
++		else if (!peer || peer != key_peer || !peer->dp_setup_done)
++			ret = -ESTALE;
++		else {
++			for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
++				rx_tid = &peer->rx_tid[tid];
++				if (!updates[tid]->queue && !rx_tid->active)
++					continue;
++				if (!updates[tid]->queue || !rx_tid->active ||
++				    rx_tid->reo_queue != updates[tid]->queue ||
++				    READ_ONCE(updates[tid]->queue->retiring) ||
++				    READ_ONCE(updates[tid]->queue->wmi_inflight) ||
++				    READ_ONCE(updates[tid]->queue->phase) !=
++					ATH11K_REO_QUEUE_PUBLISHED) {
++					ret = -ESTALE;
++					break;
++				}
++			}
++		}
++		spin_unlock_bh(&dp->reo_cmd_lock);
++		spin_unlock_bh(&ab->base_lock);
++	}
++out:
++	spin_lock_bh(&dp->reo_cmd_lock);
++	dp->reo_pn_stats.transactions++;
++	if (ret)
++		dp->reo_pn_stats.failed++;
++	else
++		dp->reo_pn_stats.succeeded++;
++	dp->reo_pn_stats.timed_out += timed_out;
++	dp->reo_pn_stats.stale += ret == -ESTALE;
++	dp->reo_pn_stats.last_epoch = epoch;
++	dp->reo_pn_stats.last_queues = queued;
++	dp->reo_pn_stats.last_wait_ms = jiffies_to_msecs(jiffies - started);
++	dp->reo_pn_stats.last_errno = ret;
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++)
++		ath11k_dp_reo_pn_update_put(updates[tid]);
+ 
+ 	return ret;
+ }
+@@ -5862,6 +6003,8 @@
+ 		list_del(&cmd->list);
+ 		if (cmd->kind == ATH11K_REO_CMD_QUERY)
+ 			dp->reo_query_outstanding = false;
++		else if (cmd->kind == ATH11K_REO_CMD_PN_UPDATE)
++			dp->reo_pn_outstanding--;
+ 		dp->reo_cmd_stats.callbacks_claimed++;
+ 		break;
+ 	}
+@@ -5920,8 +6063,7 @@
+ 			continue;
+ 		}
+ 		/* Validate the common header before parsers can change HAL resources. */
+-		if (tag == HAL_REO_GET_QUEUE_STATS_STATUS &&
+-		    FIELD_GET(HAL_TLV_HDR_LEN, *reo_desc) < sizeof(struct hal_reo_status_hdr)) {
++		if (FIELD_GET(HAL_TLV_HDR_LEN, *reo_desc) < sizeof(struct hal_reo_status_hdr)) {
+ 			spin_lock_bh(&dp->reo_cmd_lock);
+ 			dp->reo_cmd_stats.unexpected_status++;
+ 			spin_unlock_bh(&dp->reo_cmd_lock);
+@@ -5965,11 +6107,24 @@
+ 			break;
+ 		}
+ 
++		if (cmd && cmd->kind == ATH11K_REO_CMD_PN_UPDATE) {
++			dp->reo_pn_stats.completed++;
++			if (reo_status.uniform_hdr.cmd_status == HAL_REO_CMD_DRAIN)
++				dp->reo_pn_stats.drained++;
++			else if (reo_status.uniform_hdr.cmd_status < ARRAY_SIZE(dp->reo_pn_stats.status))
++				dp->reo_pn_stats.status[reo_status.uniform_hdr.cmd_status]++;
++			else
++				dp->reo_pn_stats.status_unknown++;
++		}
+ 		spin_unlock_bh(&dp->reo_cmd_lock);
+ 		if (cmd) {
+ 			if (cmd->kind == ATH11K_REO_CMD_QUERY) {
+ 				ath11k_dp_reo_query_complete(cmd->query, &reo_status);
+ 				ath11k_dp_reo_query_put(cmd->query);
++			} else if (cmd->kind == ATH11K_REO_CMD_PN_UPDATE) {
++				ath11k_dp_reo_pn_update_complete(cmd->pn_update,
++							 reo_status.uniform_hdr.cmd_status);
++				ath11k_dp_reo_pn_update_put(cmd->pn_update);
+ 			} else {
+ 				cmd->handler(dp, (void *)&cmd->data,
+ 					     reo_status.uniform_hdr.cmd_status);
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.h
+@@ -127,6 +127,7 @@
+ void ath11k_dp_reo_tid_clone(struct dp_rx_tid *dst, const struct dp_rx_tid *src);
+ void ath11k_dp_reo_tid_drop(struct dp_rx_tid *tid);
+ void ath11k_dp_reo_query_put(struct ath11k_reo_query *query);
++void ath11k_dp_reo_pn_update_put(struct ath11k_reo_pn_update *update);
+ void ath11k_dp_reo_query_quarantine(struct ath11k_base *ab);
+ int ath11k_dp_reo_queue_query(struct ath11k_base *ab, u32 vdev_id,
+ 			    const u8 *mac, u8 tid, struct ath11k_reo_query_result *result);
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4540,7 +4540,7 @@
+ 		wait_for_completion_timeout(&ar->install_key_done, HZ));
+ }
+ 
+-static bool ath11k_mac_key_install_available_locked(struct ath11k *ar)
++bool ath11k_mac_key_install_available_locked(struct ath11k *ar)
+ {
+ 	lockdep_assert_held(&ar->ab->base_lock);
+ 	return ar->ab->wmi_key_admitting && !ar->install_key.closed &&
+@@ -4919,6 +4919,9 @@
+ 			goto exit;
+ 		}
+ 
++		/* Each current REO queue must report PN UPDATE success before NSS
++		 * cipher installation/authorization; submission alone is insufficient.
++		 */
+ 		ret = change_pn ?
+ 			ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key,
+ 							 key_peer) : 0;
+@@ -5004,6 +5007,10 @@
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
+ 	if (!peer || peer != key_peer) {
+ 		ret = cmd == SET_KEY ? -ENOENT : 0;
++		goto unlock;
++	}
++	if (cmd == SET_KEY && !ath11k_mac_key_install_available_locked(ar)) {
++		ret = -ESHUTDOWN;
+ 		goto unlock;
+ 	}
+ 
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -175,6 +175,7 @@
+ int ath11k_mac_wait_tx_complete(struct ath11k *ar);
+ int ath11k_mac_key_install_open(struct ath11k *ar);
+ void ath11k_mac_key_install_close(struct ath11k *ar);
++bool ath11k_mac_key_install_available_locked(struct ath11k *ar);
+ bool ath11k_mac_key_install_event(struct ath11k *ar,
+ 		const struct wmi_vdev_install_key_complete_arg *event);
+ int ath11k_mac_vif_set_keepalive(struct ath11k_vif *arvif,
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -328,6 +328,11 @@
+ 	lockdep_assert_held(&ab->base_lock);
+ 	if (!state)
+ 		return ab->nss.enabled ? -ESHUTDOWN : 0;
++	/* Serialized with key-channel close through base_lock, including the
++	 * final NSS enqueue after PN completion and every intervening ACK wait.
++	 */
++	if (!ath11k_mac_key_install_available_locked(ar))
++		return -ESHUTDOWN;
+ 	if (!ab->nss.enabled || ab->nss.quiescing ||
+ 	    ab->nss.ownership_uncertain || !ab->nss.registered)
+ 		return -ESHUTDOWN;
+@@ -4355,6 +4360,12 @@
+ 		phase = "peer authorize";
+ 		ret = ath11k_nss_set_peer_authorize(ar, peer, state);
+ 	}
++	if (!ret) {
++		/* A final ACK may arrive after unmap or key-channel close. */
++		spin_lock_bh(&ar->ab->base_lock);
++		ret = ath11k_nss_key_check(ar, peer, state);
++		spin_unlock_bh(&ar->ab->base_lock);
++	}
+ 	if (ret)
+ 		ath11k_warn(ar->ab, "NSS key config vdev %u peer %u %s failed: %d\n",
+ 			    state->vdev_id, state->peer_id, phase, ret);
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -805,6 +805,44 @@
+ 
+ static const struct file_operations fops_reo_update_stats = {
+ 	.read = ath11k_debugfs_reo_update_stats,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
++static ssize_t ath11k_debugfs_reo_pn_stats(struct file *file,
++					char __user *user_buf, size_t count, loff_t *ppos)
++{
++	struct ath11k_base *ab = file->private_data;
++	struct ath11k_dp *dp = &ab->dp;
++	struct ath11k_reo_pn_stats stats;
++	char buf[1024];
++	u32 outstanding;
++	int len;
++
++	spin_lock_bh(&dp->reo_cmd_lock);
++	stats = dp->reo_pn_stats;
++	outstanding = dp->reo_pn_outstanding;
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	len = scnprintf(buf, sizeof(buf),
++		"transactions: %llu\nsucceeded: %llu\nfailed: %llu\n"
++		"submitted: %llu\ncompleted: %llu\noutstanding: %u\n"
++		"status_success: %llu\nstatus_blocked: %llu\nstatus_failed: %llu\n"
++		"status_resource_blocked: %llu\nstatus_drain: %llu\nstatus_unknown: %llu\n"
++		"timed_out: %llu\nstale: %llu\n"
++		"last_epoch: %llu\nlast_queues: %u\nlast_wait_ms: %u\nlast_errno: %d\n",
++		stats.transactions, stats.succeeded, stats.failed, stats.submitted,
++		stats.completed, outstanding, stats.status[HAL_REO_CMD_SUCCESS],
++		stats.status[HAL_REO_CMD_BLOCKED], stats.status[HAL_REO_CMD_FAILED],
++		stats.status[HAL_REO_CMD_RESOURCE_BLOCKED], stats.drained,
++		stats.status_unknown, stats.timed_out,
++		stats.stale, stats.last_epoch, stats.last_queues, stats.last_wait_ms,
++		stats.last_errno);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations fops_reo_pn_stats = {
++	.read = ath11k_debugfs_reo_pn_stats,
+ 	.open = simple_open,
+ 	.owner = THIS_MODULE,
+ 	.llseek = default_llseek,
+@@ -1211,6 +1249,8 @@
+ 			    &fops_reo_update_stats);
+ 	debugfs_create_file("reo_cmd_stats", 0400, ab->debugfs_soc, ab,
+ 			    &fops_reo_cmd_stats);
++	debugfs_create_file("reo_pn_stats", 0400, ab->debugfs_soc, ab,
++			    &fops_reo_pn_stats);
+ 	debugfs_create_file("reo_queue_targets", 0400, ab->debugfs_soc, ab,
+ 			    &fops_reo_queue_targets);
+ 	debugfs_create_file("reo_queue_query", 0600, ab->debugfs_soc, ab,

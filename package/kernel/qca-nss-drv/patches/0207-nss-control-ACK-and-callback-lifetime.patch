@@ -1,0 +1,246 @@
+Subject: [PATCH] nss: keep callbacks alive and control registration private
+
+--- a/nss_vlan.c
++++ b/nss_vlan.c
+@@ -31,6 +31,7 @@
+ 	bool registered;
+ 	nss_ptr_t serial;
+ 	bool waiting;
++	bool callback_active;
+ } vlan_pvt;
+ static DEFINE_SPINLOCK(vlan_sync_lock);
+ 
+@@ -134,16 +135,18 @@
+     }
+     callback = (nss_vlan_msg_callback_t)vlan_pvt.cb;
+     data = vlan_pvt.app_data;
++    vlan_pvt.waiting = false;
++    vlan_pvt.callback_active = true;
+     spin_unlock_bh(&vlan_sync_lock);
+     if (callback)
+         callback(data, msg);
+     spin_lock_bh(&vlan_sync_lock);
+-    if (vlan_pvt.waiting && serial == vlan_pvt.serial) {
++    if (vlan_pvt.callback_active && serial == vlan_pvt.serial) {
+         vlan_pvt.response = msg->cm.response == NSS_CMN_RESPONSE_ACK ?
+                              NSS_TX_SUCCESS : NSS_TX_FAILURE;
+         vlan_pvt.cb = NULL;
+         vlan_pvt.app_data = NULL;
+-        vlan_pvt.waiting = false;
++        vlan_pvt.callback_active = false;
+         complete(&vlan_pvt.complete);
+     }
+     spin_unlock_bh(&vlan_sync_lock);
+@@ -186,6 +189,7 @@
+ nss_tx_status_t nss_vlan_tx_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_vlan_msg *msg)
+ {
+     nss_tx_status_t status;
++    bool active;
+ 
+     if (!READ_ONCE(vlan_pvt.registered))
+         return NSS_TX_FAILURE_NOT_READY;
+@@ -205,6 +209,16 @@
+     if (status == NSS_TX_SUCCESS)
+         wait_for_completion_timeout(&vlan_pvt.complete,
+             msecs_to_jiffies(NSS_VLAN_TX_TIMEOUT));
++    /* A claimed callback owns the caller's original app_data until it
++     * returns. Timeout must not let that storage disappear underneath it.
++     */
++    spin_lock_bh(&vlan_sync_lock);
++    active = vlan_pvt.callback_active;
++    if (!active)
++        vlan_pvt.waiting = false;
++    spin_unlock_bh(&vlan_sync_lock);
++    if (active)
++        wait_for_completion(&vlan_pvt.complete);
+     spin_lock_bh(&vlan_sync_lock);
+     if (status == NSS_TX_SUCCESS)
+         status = vlan_pvt.response;
+--- a/nss_bridge.c
++++ b/nss_bridge.c
+@@ -31,6 +31,7 @@
+ 	bool registered;
+ 	nss_ptr_t serial;
+ 	bool waiting;
++	bool callback_active;
+ } bridge_pvt;
+ static DEFINE_SPINLOCK(bridge_sync_lock);
+ 
+@@ -117,16 +118,18 @@
+     }
+     callback = (nss_bridge_msg_callback_t)bridge_pvt.cb;
+     data = bridge_pvt.app_data;
++    bridge_pvt.waiting = false;
++    bridge_pvt.callback_active = true;
+     spin_unlock_bh(&bridge_sync_lock);
+     if (callback)
+         callback(data, msg);
+     spin_lock_bh(&bridge_sync_lock);
+-    if (bridge_pvt.waiting && serial == bridge_pvt.serial) {
++    if (bridge_pvt.callback_active && serial == bridge_pvt.serial) {
+         bridge_pvt.response = msg->cm.response == NSS_CMN_RESPONSE_ACK ?
+                              NSS_TX_SUCCESS : NSS_TX_FAILURE;
+         bridge_pvt.cb = NULL;
+         bridge_pvt.app_data = NULL;
+-        bridge_pvt.waiting = false;
++        bridge_pvt.callback_active = false;
+         complete(&bridge_pvt.complete);
+     }
+     spin_unlock_bh(&bridge_sync_lock);
+@@ -187,6 +190,7 @@
+ nss_tx_status_t nss_bridge_tx_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_bridge_msg *msg)
+ {
+     nss_tx_status_t status;
++    bool active;
+ 
+     if (!READ_ONCE(bridge_pvt.registered))
+         return NSS_TX_FAILURE_NOT_READY;
+@@ -206,6 +210,16 @@
+     if (status == NSS_TX_SUCCESS)
+         wait_for_completion_timeout(&bridge_pvt.complete,
+             msecs_to_jiffies(NSS_BRIDGE_TX_TIMEOUT));
++    /* A claimed callback owns the caller's original app_data until it
++     * returns. Timeout must not let that storage disappear underneath it.
++     */
++    spin_lock_bh(&bridge_sync_lock);
++    active = bridge_pvt.callback_active;
++    if (!active)
++        bridge_pvt.waiting = false;
++    spin_unlock_bh(&bridge_sync_lock);
++    if (active)
++        wait_for_completion(&bridge_pvt.complete);
+     spin_lock_bh(&bridge_sync_lock);
+     if (status == NSS_TX_SUCCESS)
+         status = bridge_pvt.response;
+--- a/nss_phys_if.c
++++ b/nss_phys_if.c
+@@ -42,7 +42,9 @@
+ 	struct completion complete;
+ 	int response;
+ 	nss_ptr_t serial;
++	bool waiting;
+ } phif;
++static DEFINE_SPINLOCK(phif_sync_lock);
+ 
+ static int nss_phys_if_sem_init_done;
+ 
+@@ -161,32 +163,17 @@
+  */
+ static void nss_phys_if_callback(void *app_data, struct nss_phys_if_msg *nim)
+ {
+-	/*
+-	 * A request that timed out is abandoned by its sender but stays in
+-	 * flight, so its response can arrive after the next request has already
+-	 * been sent. Answering that one with this response would report the
+-	 * wrong result for it and, worse, leave the completion signalled with
+-	 * no waiter, after which every later request returns immediately with
+-	 * its predecessor's status - permanently, because nothing resets it.
+-	 * The serial is stamped into app_data by the sender, so a response that
+-	 * is no longer the one being waited for is simply dropped here.
+-	 */
+-	if ((nss_ptr_t)app_data != phif.serial) {
++	spin_lock_bh(&phif_sync_lock);
++	if (!phif.waiting || (nss_ptr_t)app_data != phif.serial) {
+ 		phif_stale_responses++;
+-		nss_warning("phys_if stale response for serial %px, current %px\n",
+-				app_data, (void *)phif.serial);
++		spin_unlock_bh(&phif_sync_lock);
+ 		return;
+ 	}
+-
+-	if(nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("phys_if Error response %d\n", nim->cm.response);
+-		phif.response = NSS_TX_FAILURE;
+-		complete(&phif.complete);
+-		return;
+-	}
+-
+-	phif.response = NSS_TX_SUCCESS;
++	phif.response = nim->cm.response == NSS_CMN_RESPONSE_ACK ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	phif.waiting = false;
+ 	complete(&phif.complete);
++	spin_unlock_bh(&phif_sync_lock);
+ }
+ 
+ /*
+@@ -221,7 +208,6 @@
+ nss_tx_status_t nss_phys_if_msg(struct nss_ctx_instance *nss_ctx, struct nss_phys_if_msg *nim)
+ {
+ 	struct nss_cmn_msg *ncm = &nim->cm;
+-	struct net_device *dev;
+ 
+ 	NSS_VERIFY_CTX_MAGIC(nss_ctx);
+ 
+@@ -238,11 +224,12 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	dev = nss_ctx->subsys_dp_register[ncm->interface].ndev;
+-	if (!dev) {
+-		nss_warning("%px: Unregister physical interface %d: no context", nss_ctx, ncm->interface);
++	/* Control registration precedes the dataplane's public netdev mapping.
++	 * OPEN/MAC/MTU need an RX control handler, not a published data path.
++	 */
++	if (READ_ONCE(nss_ctx->nss_rx_interface_handlers[ncm->interface].cb) !=
++	    nss_phys_if_msg_handler)
+ 		return NSS_TX_FAILURE_BAD_PARAM;
+-	}
+ 
+ 	return nss_core_send_cmd(nss_ctx, nim, sizeof(*nim), NSS_NBUF_PAYLOAD_SIZE);
+ }
+@@ -257,36 +244,27 @@
+ 	int ret = 0;
+ 
+ 	down(&phif.sem);
+-
+-	/*
+-	 * Identify this request and start from a cleared completion, so that a
+-	 * late response belonging to an earlier, timed-out request cannot be
+-	 * mistaken for this one's.
+-	 */
+-	phif.serial++;
++	reinit_completion(&phif.complete);
++	spin_lock_bh(&phif_sync_lock);
++	if (!++phif.serial)
++		++phif.serial;
++	phif.waiting = true;
++	phif.response = NSS_TX_FAILURE;
+ 	nim->cm.app_data = phif.serial;
+-	reinit_completion(&phif.complete);
+-
++	spin_unlock_bh(&phif_sync_lock);
+ 	status = nss_phys_if_msg(nss_ctx, nim);
+-	if(status != NSS_TX_SUCCESS)
+-	{
+-		nss_warning("%px: nss_phys_if_msg failed\n", nss_ctx);
+-		up(&phif.sem);
+-		return status;
+-	}
+-
+-	ret = wait_for_completion_timeout(&phif.complete, msecs_to_jiffies(NSS_PHYS_IF_TX_TIMEOUT));
+-
+-	if(!ret)
+-	{
+-		phif_timeouts++;
+-		nss_warning("%px: phys_if tx failed due to timeout\n", nss_ctx);
+-		phif.response = NSS_TX_FAILURE;
+-	}
+-
+-	status = phif.response;
++	if (status == NSS_TX_SUCCESS)
++		ret = wait_for_completion_timeout(&phif.complete,
++			msecs_to_jiffies(NSS_PHYS_IF_TX_TIMEOUT));
++	spin_lock_bh(&phif_sync_lock);
++	if (status == NSS_TX_SUCCESS) {
++		if (!ret && phif.waiting)
++			phif_timeouts++;
++		status = phif.response;
++	}
++	phif.waiting = false;
++	spin_unlock_bh(&phif_sync_lock);
+ 	up(&phif.sem);
+-
+ 	return status;
+ }
+ 

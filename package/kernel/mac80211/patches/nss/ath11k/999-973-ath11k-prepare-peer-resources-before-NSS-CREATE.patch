@@ -1,0 +1,234 @@
+Subject: [PATCH] ath11k: prepare peer resources before NSS CREATE
+
+Finish host allocations and STATIC AST insertion before enqueueing CREATE,
+so an allocation error cannot release DMA already submitted to firmware.
+Unwind only the new AST and clear failed allocation fields. Match peer DMA
+unmap direction to its map direction.
+
+Record local submission failure in both HTT map paths, initialize the legacy
+AST list, and handle failure in the existing process-context create cleanup.
+Do not sleep or unlock twice from the HTT receive callback. Successful
+submission remains distinct from a firmware ACK; response instance ownership
+and DELETE timeout handling still require separate work.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -298,7 +298,7 @@
+ 			continue;
+ 
+ 		dma_unmap_single(ab->dev, peer->nss.paddr,
+-				 WIFILI_NSS_PEER_BYTE_SIZE, DMA_FROM_DEVICE);
++				 WIFILI_NSS_PEER_BYTE_SIZE, DMA_TO_DEVICE);
+ 
+ 		kfree(peer->nss.vaddr);
+ 		if (peer->nss.nss_stats) {
+@@ -3859,7 +3859,7 @@
+ 
+ free_peer:
+ 	dma_unmap_single(ar->ab->dev, peer->nss.paddr,
+-		 WIFILI_NSS_PEER_BYTE_SIZE, DMA_FROM_DEVICE);
++		 WIFILI_NSS_PEER_BYTE_SIZE, DMA_TO_DEVICE);
+ 	kfree(peer->nss.vaddr);
+ 	if (peer->nss.nss_stats) {
+ 		kfree(peer->nss.nss_stats);
+@@ -3872,6 +3872,7 @@
+ int ath11k_nss_peer_create(struct ath11k *ar, struct ath11k_peer *peer)
+ {
+ 	struct ath11k_base *ab = ar->ab;
++	struct ath11k_ast_entry *ast_entry;
+ 	struct nss_wifili_peer_msg *peer_msg;
+ 	struct nss_wifili_msg *wlmsg = NULL;
+ 	nss_wifili_msg_callback_t msg_cb;
+@@ -3881,10 +3882,20 @@
+ 	if (!ab->nss.enabled)
+ 		return -ENOTSUPP;
+ 
++	lockdep_assert_held(&ab->base_lock);
++	if (peer->nss.vaddr || peer->nss.nss_stats || peer->self_ast_entry)
++		return -EALREADY;
++
+ 	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_ATOMIC);
+ 	if (!wlmsg)
+ 		return -ENOMEM;
+ 
++	peer->nss.nss_stats = kzalloc(sizeof(*peer->nss.nss_stats), GFP_ATOMIC);
++	if (!peer->nss.nss_stats) {
++		ret = -ENOMEM;
++		goto msg_free;
++	}
++
+ 	peer_msg = &wlmsg->msg.peermsg;
+ 
+ 	peer_msg->vdev_id = peer->vdev_id;
+@@ -3900,8 +3911,8 @@
+ 
+ 	if (!peer->nss.vaddr) {
+ 		ath11k_warn(ab, "failed to allocate memory for nss peer info\n");
+-		kfree(wlmsg);
+-		return -ENOMEM;
++		ret = -ENOMEM;
++		goto stats_free;
+ 	}
+ 
+ 	peer->nss.paddr = dma_map_single(ab->dev, peer->nss.vaddr,
+@@ -3910,10 +3921,19 @@
+ 	ret = dma_mapping_error(ab->dev, peer->nss.paddr);
+ 	if (ret) {
+ 		ath11k_warn(ab, "error during nss peer info  memalloc\n");
+-		kfree(peer->nss.vaddr);
+ 		ret = -ENOMEM;
+-		goto msg_free;
++		goto peer_mem_free;
++	}
++
++	/* All local allocations must finish before firmware can own this DMA.
++	 * STATIC AST creation is host-only and does not submit NSS/WMI work.
++	 */
++	ret = ath11k_peer_add_ast(ar, peer, peer->addr, ATH11K_AST_TYPE_STATIC);
++	if (ret) {
++		ath11k_warn(ab, "failed to add STATIC ast: %d\n", ret);
++		goto peer_dma_unmap;
+ 	}
++	ast_entry = peer->self_ast_entry;
+ 
+ 	peer_msg->nss_peer_mem = peer->nss.paddr;
+ 	peer_msg->psta_vdev_id = peer->vdev_id;
+@@ -3930,7 +3950,7 @@
+ 		ret = -EINVAL;
+ 		ath11k_warn(ab, "nss send peer (%pM) create msg tx error: %d\n",
+ 			    peer->addr, status);
+-		goto peer_mem_free;
++		goto ast_free;
+ 	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS,
+@@ -3938,26 +3958,24 @@
+ 		   peer_msg->peer_mac_addr, peer_msg->vdev_id, peer_msg->peer_id,
+ 		   peer_msg->hw_ast_idx, peer_msg->tx_ast_hash);
+ 
+-	ret = ath11k_peer_add_ast(ar, peer, peer->addr,
+-				  ATH11K_AST_TYPE_STATIC);
+-	if (ret) {
+-		ath11k_warn(ab, "failed to add STATIC ast: %d\n", ret);
+-		goto peer_mem_free;
+-	}
+-
+-	peer->nss.nss_stats = kzalloc(sizeof(*peer->nss.nss_stats), GFP_ATOMIC);
+-	if (!peer->nss.nss_stats) {
+-		ret = -ENOMEM;
+-		ath11k_warn(ab, "Unable to create nss stats memory\n");
+-		goto peer_mem_free;
+-	}
+-
+-	goto msg_free;
++	/* Submission is not ACK-ready. Retain the peer memory for the response. */
++	kfree(wlmsg);
++	return 0;
+ 
+-peer_mem_free:
++ast_free:
++	if (peer->self_ast_entry == ast_entry)
++		peer->self_ast_entry = NULL;
++	ath11k_peer_del_ast(ar, ast_entry);
++peer_dma_unmap:
+ 	dma_unmap_single(ab->dev, peer->nss.paddr,
+-			 WIFILI_NSS_PEER_BYTE_SIZE, DMA_FROM_DEVICE);
++			 WIFILI_NSS_PEER_BYTE_SIZE, DMA_TO_DEVICE);
++peer_mem_free:
+ 	kfree(peer->nss.vaddr);
++	peer->nss.vaddr = NULL;
++	peer->nss.paddr = 0;
++stats_free:
++	kfree(peer->nss.nss_stats);
++	peer->nss.nss_stats = NULL;
+ msg_free:
+ 	kfree(wlmsg);
+ 	return ret;
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -169,6 +169,8 @@
+ struct ath11k_nss_peer {
+ 	uint32_t *vaddr;
+ 	dma_addr_t paddr;
++	/* Local CREATE submission result; this does not imply a firmware ACK. */
++	int create_result;
+ 	bool ext_vdev_up;
+ 	struct ieee80211_vif *ext_vif;
+ 	struct peer_stats *nss_stats;
+--- a/drivers/net/wireless/ath/ath11k/peer.c
++++ b/drivers/net/wireless/ath/ath11k/peer.c
+@@ -490,6 +490,7 @@
+ {
+ 	struct ath11k_peer *peer;
+ 	struct ath11k_base *ab = ar->ab;
++	int ret;
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 	peer = ath11k_peer_find(ar, vdev_id, mac_addr);
+@@ -504,9 +505,16 @@
+ 		peer->hw_peer_id = hw_peer_id;
+ 		ether_addr_copy(peer->addr, mac_addr);
+ 		list_add(&peer->list, &ar->peers);
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++		INIT_LIST_HEAD(&peer->ast_entry_list);
++#endif
++		if (ab->nss.enabled) {
++			ret = ath11k_nss_peer_create(ar, peer);
++			peer->nss.create_result = ret;
++			if (ret)
++				ath11k_warn(ab, "failed to submit nss peer create: %d\n", ret);
++		}
+ 		wake_up(&ar->peer_mapping_wq);
+-		if (ab->nss.enabled && ar)
+-			ath11k_nss_peer_create(ar, peer);
+ 	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_DP_HTT, "peer map vdev %d peer %pM id %d\n",
+@@ -545,11 +553,10 @@
+ #endif
+ 		if (ab->nss.enabled && ar) {
+ 			ret = ath11k_nss_peer_create(ar, peer);
+-			if (ret) {
++			peer->nss.create_result = ret;
++			if (ret)
+ 				ath11k_warn(ab, "failed to do nss peer create: %d\n",
+ 					    ret);
+-				goto peer_free;
+-			}
+ 		}
+ 		wake_up(&ar->peer_mapping_wq);
+ 	}
+@@ -563,13 +570,6 @@
+ 	ath11k_dbg(ab, ATH11K_DBG_DP_HTT, "htt peer map vdev %d peer %pM id %d is_wds %d\n",
+ 		   vdev_id, mac_addr, peer_id, is_wds);
+ 
+-	goto exit;
+-
+-peer_free:
+-	spin_unlock_bh(&ab->base_lock);
+-	mutex_lock(&ar->conf_mutex);
+-	ath11k_peer_delete(ar, vdev_id, mac_addr);
+-	mutex_unlock(&ar->conf_mutex);
+ exit:
+ 	spin_unlock_bh(&ab->base_lock);
+ }
+@@ -937,6 +937,18 @@
+ 		goto cleanup;
+ 	}
+ 
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++	/* HTT map runs in receive context. Handle local submission failure here,
++	 * where conf_mutex is held and the existing WMI delete path may sleep.
++	 */
++	if (ab->nss.enabled && peer->nss.create_result) {
++		ret = peer->nss.create_result;
++		spin_unlock_bh(&ab->base_lock);
++		mutex_unlock(&ar->tbl_mtx_lock);
++		goto cleanup;
++	}
++#endif
++
+ 	ret = ath11k_peer_rhash_add(ar, peer);
+ 	if (ret) {
+ 		spin_unlock_bh(&ab->base_lock);
+

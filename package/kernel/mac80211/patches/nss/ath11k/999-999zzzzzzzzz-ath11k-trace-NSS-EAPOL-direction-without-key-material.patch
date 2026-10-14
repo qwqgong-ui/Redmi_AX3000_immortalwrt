@@ -1,0 +1,274 @@
+From: Redmi AX3000 NSS relay debugging
+Subject: [PATCH] ath11k: observe NSS EAPOL direction with bounded headers
+
+Default-off trace for first association. Cover normal VDEV RX, converted
+netdev submission, TX submission, and special exceptions without dumping
+WPA key material. Snapshot TX headers before the skb is consumed. Expose
+the number of suppressed trace events so missing logs are not proof of loss.
+Packet routing and decryption decisions are unchanged.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -6,6 +6,9 @@
+ #include <linux/refcount.h>
+ #include <linux/debugfs.h>
+ #include <linux/uaccess.h>
++#include <linux/module.h>
++#include <linux/ratelimit.h>
++#include <linux/unaligned.h>
+ 
+ #include "debug.h"
+ #include "mac.h"
+@@ -25,6 +28,123 @@
+ #endif
+ 
+ /*-----------------------------ATH11K-NSS Helpers--------------------------*/
++
++/* Existing DP packet dumps can disclose WPA key material. Keep this trace
++ * separate: it only reports direction, gates and bounded non-secret headers.
++ */
++static bool nss_relay_trace;
++module_param_named(nss_relay_trace, nss_relay_trace, bool, 0600);
++MODULE_PARM_DESC(nss_relay_trace, "Trace NSS EAPOL direction and non-secret headers");
++static DEFINE_RATELIMIT_STATE(nss_relay_trace_limit, HZ, 32);
++static atomic_t nss_relay_suppressed = ATOMIC_INIT(0);
++
++static int ath11k_nss_trace_suppressed_get(char *buffer,
++					const struct kernel_param *parameter)
++{
++	return scnprintf(buffer, PAGE_SIZE, "%d\n", atomic_read(&nss_relay_suppressed));
++}
++
++static const struct kernel_param_ops nss_relay_suppressed_ops = {
++	.get = ath11k_nss_trace_suppressed_get,
++};
++module_param_cb(nss_relay_trace_suppressed, &nss_relay_suppressed_ops, NULL, 0400);
++
++static bool ath11k_nss_trace_allowed(void)
++{
++	if (__ratelimit(&nss_relay_trace_limit))
++		return true;
++	atomic_inc(&nss_relay_suppressed);
++	return false;
++}
++
++static bool ath11k_nss_eapol_header(struct sk_buff *skb, u8 *header)
++{
++	u16 declared;
++
++	if (skb->len < 31 || skb_copy_bits(skb, 0, header, 31) ||
++	    get_unaligned_be16(header + 12) != ETH_P_PAE || header[15] != 3)
++		return false;
++	declared = get_unaligned_be16(header + 16);
++	return declared >= 13 && declared <= skb->len - ETH_HLEN - 4;
++}
++
++static void ath11k_nss_trace_eapol_tx(struct ath11k_vif *arvif,
++				    const u8 *header, const char *stage, int status)
++{
++	if (!READ_ONCE(nss_relay_trace) ||
++	    !ath11k_nss_trace_allowed())
++		return;
++	/* The skb may have been consumed by NSS. Only use the copied prefix. */
++	ath11k_info(arvif->ar->ab,
++		    "NSS EAPOL TX stage=%s status=%d if=%u vdev=%u src=%pM dst=%pM version=%u descriptor=%u declared=%u key_info=%04x replay=%llu\n",
++		    stage, status, arvif->nss.if_num, arvif->vdev_id,
++		    header + ETH_ALEN, header, header[14], header[18],
++		    get_unaligned_be16(header + 16), get_unaligned_be16(header + 19),
++		    get_unaligned_be64(header + 23));
++}
++
++static void ath11k_nss_trace_eapol(struct ath11k_vif *arvif,
++				 struct sk_buff *skb,
++				 struct nss_wifi_vdev_per_packet_metadata *metadata,
++				 const char *stage, int result)
++{
++	unsigned char header[31];
++	u16 declared, key_info;
++	u64 replay;
++	bool ethernet;
++
++	if (!READ_ONCE(nss_relay_trace) ||
++	    metadata->pkt_type != NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_EAPOL ||
++	    !ath11k_nss_trace_allowed())
++		return;
++
++	ath11k_info(arvif->ar->ab,
++		    "NSS EAPOL stage=%s result=%d dev=%s if=%u vdev=%u dir=%u peer=%u len=%u decap=%u created=%u ready=%u format_failed=%u key_failed=%u\n",
++		    stage, result, skb->dev->name, arvif->nss.if_num,
++		    arvif->vdev_id, metadata->metadata.eapol_metadata.dir,
++		    metadata->metadata.eapol_metadata.peer_id, skb->len,
++		    READ_ONCE(arvif->nss.decap), READ_ONCE(arvif->nss.created),
++		    smp_load_acquire(&arvif->nss.format_ready),
++		    READ_ONCE(arvif->nss.format_failed), READ_ONCE(arvif->nss.key_failed));
++	/* Never interpret RAW/native bytes as Ethernet. Copying this fixed prefix
++	 * also supports non-linear skbs without changing the receive operation.
++	 */
++	ethernet = smp_load_acquire(&arvif->nss.format_ready) &&
++		READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET;
++	if (!ethernet || skb->len < sizeof(header) ||
++	    skb_copy_bits(skb, 0, header, sizeof(header)) ||
++	    get_unaligned_be16(header + 12) != ETH_P_PAE || header[15] != 3)
++		return;
++	declared = get_unaligned_be16(header + 16);
++	if (declared < 13 || declared > skb->len - ETH_HLEN - 4)
++		return;
++	key_info = get_unaligned_be16(header + 19);
++	replay = get_unaligned_be64(header + 23);
++	ath11k_info(arvif->ar->ab,
++		    "NSS EAPOL header stage=%s src=%pM dst=%pM version=%u descriptor=%u declared=%u key_info=%04x replay=%llu\n",
++		    stage, header + ETH_ALEN, header, header[14], header[18],
++		    declared, key_info, replay);
++}
++
++static void ath11k_nss_trace_eapol_rx(struct ath11k_vif *arvif,
++				    struct sk_buff *skb, bool ethernet,
++				    const char *stage, int result)
++{
++	u8 header[31];
++
++	if (!READ_ONCE(nss_relay_trace) || !ethernet ||
++	    !ath11k_nss_eapol_header(skb, header) ||
++	    !ath11k_nss_trace_allowed())
++		return;
++	/* Normal RX has no special-packet metadata; never invent a direction. */
++	ath11k_info(arvif->ar->ab,
++		    "NSS EAPOL RX stage=%s result=%d dir=unavailable if=%u vdev=%u ready=%u format_failed=%u key_failed=%u src=%pM dst=%pM key_info=%04x replay=%llu\n",
++		    stage, result, arvif->nss.if_num, arvif->vdev_id,
++		    smp_load_acquire(&arvif->nss.format_ready),
++		    READ_ONCE(arvif->nss.format_failed), READ_ONCE(arvif->nss.key_failed),
++		    header + ETH_ALEN, header, get_unaligned_be16(header + 19),
++		    get_unaligned_be64(header + 23));
++}
+ 
+ static enum ath11k_nss_opmode
+ ath11k_nss_get_vdev_opmode(struct ath11k_vif *arvif)
+@@ -1246,6 +1366,8 @@
+ 	u8 *qc;
+ 
+ 	if (ath11k_nss_vdev_key_failed(ath11k_vif_to_arvif(vif))) {
++		ath11k_nss_trace_eapol_rx(ath11k_vif_to_arvif(vif), skb, eth,
++					"deliver_gate_drop", -ESHUTDOWN);
+ 		dev_kfree_skb_any(skb);
+ 		return -ESHUTDOWN;
+ 	}
+@@ -1271,6 +1393,8 @@
+ 	}
+ 
+ deliver_msdu:
++	ath11k_nss_trace_eapol_rx(ath11k_vif_to_arvif(vif), skb, true,
++				"netdev_submit", 0);
+ 	ath11k_nss_rx_eapol_to_pae_group(vif, skb);
+ 	skb->protocol = eth_type_trans(skb, dev);
+ 	napi_gro_receive(napi, skb);
+@@ -1292,6 +1416,8 @@
+ 
+ 	while (!skb_queue_empty(&subframe_list)) {
+ 		subframe = __skb_dequeue(&subframe_list);
++		ath11k_nss_trace_eapol_rx(ath11k_vif_to_arvif(vif), subframe, true,
++					"amsdu_netdev_submit", 0);
+ 		ath11k_nss_rx_eapol_to_pae_group(vif, subframe);
+ 		subframe->protocol = eth_type_trans(subframe, dev);
+ 		napi_gro_receive(napi, subframe);
+@@ -1632,7 +1758,9 @@
+ 
+ 	wifi_metadata = (struct nss_wifi_vdev_per_packet_metadata *)(skb->head +
+ 			 NSS_WIFI_VDEV_PER_PACKET_METADATA_OFFSET);
++	ath11k_nss_trace_eapol(arvif, skb, wifi_metadata, "entry", 0);
+ 	if (ath11k_nss_vdev_key_failed(arvif)) {
++		ath11k_nss_trace_eapol(arvif, skb, wifi_metadata, "gate_drop", -ESHUTDOWN);
+ 		dev_kfree_skb_any(skb);
+ 		return;
+ 	}
+@@ -1643,6 +1771,7 @@
+ 
+ 	ret = ath11k_nss_undecap(arvif, skb, &data_offs, &eth_decap);
+ 	if (ret) {
++		ath11k_nss_trace_eapol(arvif, skb, wifi_metadata, "undecap_drop", ret);
+ 		ath11k_warn(ab, "error in nss rx undecap, type %d err %d\n",
+ 			    arvif->nss.decap, ret);
+ 		dev_kfree_skb_any(skb);
+@@ -1652,6 +1781,7 @@
+ 	switch(wifi_metadata->pkt_type) {
+ 	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_IGMP:
+ 	case NSS_WIFI_VDEV_EXT_DATA_PKT_TYPE_EAPOL:
++		ath11k_nss_trace_eapol(arvif, skb, wifi_metadata, "host_submit", 0);
+ 		ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap,
+ 				      data_offs, napi);
+ 		break;
+@@ -1726,11 +1856,17 @@
+ 	skb->dev = dev;
+ 
+ 	/* log the original skb received from nss */
++	ath11k_nss_trace_eapol_rx(arvif, skb,
++				READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET,
++				"normal_entry", 0);
+ 	ath11k_dbg_dump(ab, ATH11K_DBG_DP_RX, "", "dp rx msdu from nss: ",
+ 			skb->data, skb->len);
+ 
+ 	ret = ath11k_nss_undecap(arvif, skb, &data_offs, &eth_decap);
+ 	if (ret) {
++		ath11k_nss_trace_eapol_rx(arvif, skb,
++			READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET,
++			"normal_undecap_drop", ret);
+ 		ath11k_warn(ab, "error in nss rx undecap, type %d err %d\n",
+ 			    arvif->nss.decap, ret);
+ 		dev_kfree_skb_any(skb);
+@@ -1739,6 +1875,7 @@
+ 
+ 	if ((arvif->vif->type == NL80211_IFTYPE_STATION && wdev->use_4addr) &&
+ 	    ath11k_nss_vdev_data_receive_mec_check(arvif->ar, skb, eth_decap)) {
++		ath11k_nss_trace_eapol_rx(arvif, skb, eth_decap, "normal_mec_drop", -EINVAL);
+ 		dev_kfree_skb_any(skb);
+ 		return;
+ 	}
+@@ -2892,10 +3029,17 @@
+ 	int encap_type = ath11k_dp_tx_get_encap_type(arvif, skb);
+ 	struct ath11k_soc_dp_stats *soc_stats = &ar->ab->soc_stats;
+ 	char dump_msg[100] = {0};
++	u8 eapol_header[31];
++	bool trace_eapol = READ_ONCE(nss_relay_trace) &&
++		encap_type == HAL_TCL_ENCAP_TYPE_ETHERNET &&
++		ath11k_nss_eapol_header(skb, eapol_header);
+ 	int ret;
+ 
+-	if (ath11k_nss_vdev_key_failed(arvif))
++	if (ath11k_nss_vdev_key_failed(arvif)) {
++		if (trace_eapol)
++			ath11k_nss_trace_eapol_tx(arvif, eapol_header, "gate_drop", -ESHUTDOWN);
+ 		return -ESHUTDOWN;
++	}
+ 
+ 	if (!arvif->ar->ab->nss.debug_mode && encap_type != arvif->nss.encap) {
+ 		ath11k_dbg(ar->ab, ATH11K_DBG_DP_TX, "encap mismatch in nss tx skb encap type %d" \
+@@ -2908,8 +3052,11 @@
+ 	if (encap_type == HAL_TCL_ENCAP_TYPE_ETHERNET) {
+ 		ath11k_nss_me_tx_observe(arvif, skb, encap_type);
+ 		ret = ath11k_nss_me_tx(arvif, skb);
+-		if (ret != -EOPNOTSUPP)
++		if (ret != -EOPNOTSUPP) {
++			if (trace_eapol)
++				ath11k_nss_trace_eapol_tx(arvif, eapol_header, "me_result", ret);
+ 			return ret;
++		}
+ 		goto send;
+ 	}
+ 
+@@ -2959,6 +3106,8 @@
+ 		}
+ 	}
+ 
++	if (trace_eapol)
++		ath11k_nss_trace_eapol_tx(arvif, eapol_header, "submit_result", status);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		ath11k_dbg(ar->ab, (ATH11K_DBG_NSS | ATH11K_DBG_DP_TX),
+ 			   "nss tx failure: %d\n", status);
+@@ -2967,6 +3116,8 @@
+ 
+ 	return status;
+ drop:
++	if (trace_eapol)
++		ath11k_nss_trace_eapol_tx(arvif, eapol_header, "encap_drop", -EINVAL);
+ 	atomic_inc(&soc_stats->tx_err.misc_fail);
+ 	if(ar->ab->nss.debug_mode)
+ 	  WARN_ON_ONCE(1);

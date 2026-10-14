@@ -1,0 +1,42 @@
+Subject: [PATCH] ath11k: keep RX buffer size independent of ring depth
+
+The HTT RX ring selection command takes a buffer size in bytes. Host RX
+and monitor buffers are allocated with DP_RX_BUFFER_SIZE, but the compact
+memory profile passed the refill ring entry count instead. The 256 MB
+profile reduces that count to 512 while buffers remain 2048 bytes, leaving
+firmware and the host with different receive-buffer bounds.
+
+Use the allocation size for host and monitor rings. Keep the NSS-specific
+buffer size unchanged.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -5474,7 +5474,7 @@ static int ath11k_dp_rxdma_ring_sel_config(struct ath11k *ar)
+ 	if (!ar->ab->nss.enabled)
+ 		ret = ath11k_dp_tx_htt_rx_filter_setup(ar->ab, ring_id, dp->mac_id,
+ 						       HAL_RXDMA_BUF,
+-						       DP_RXDMA_REFILL_RING_SIZE,
++						       DP_RX_BUFFER_SIZE,
+ 						       &tlv_filter);
+ 	else
+ 		ret = ath11k_dp_tx_htt_rx_filter_setup(ar->ab, ring_id, dp->mac_id,
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -1410,7 +1410,7 @@ int ath11k_dp_tx_htt_rx_monitor_mode_ring_config(struct ath11k *ar, bool reset)
+ 	if (ab->hw_params.rxdma1_enable) {
+ 		ret = ath11k_dp_tx_htt_rx_filter_setup(ar->ab, ring_id, dp->mac_id,
+ 						       HAL_RXDMA_MONITOR_BUF,
+-						       DP_RXDMA_REFILL_RING_SIZE,
++						       DP_RX_BUFFER_SIZE,
+ 						       &tlv_filter);
+ 	} else if (!reset) {
+ 		/* set in monitor mode only */
+@@ -1442,7 +1442,7 @@ int ath11k_dp_tx_htt_rx_monitor_mode_ring_config(struct ath11k *ar, bool reset)
+ 		ret = ath11k_dp_tx_htt_rx_filter_setup(ab, ring_id,
+ 						       dp->mac_id + i,
+ 						       HAL_RXDMA_MONITOR_STATUS,
+-						       DP_RXDMA_REFILL_RING_SIZE,
++						       DP_RX_BUFFER_SIZE,
+ 						       &tlv_filter);
+ 	}
+ 

@@ -1,0 +1,43 @@
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -70,6 +70,26 @@
+ 	return ncm->len >= payload_len &&
+ 	       ncm->len <= buf_len - sizeof(*ncm);
+ }
++
++static bool nss_core_wifi_vdev_cmd_status_valid(struct nss_ctx_instance *ctx,
++					      const struct nss_cmn_msg *ncm,
++					      uint32_t buf_len)
++{
++	uint32_t payload_len = sizeof(((struct nss_wifi_vdev_msg *)0)->msg.vdev_cmd);
++
++	if (buf_len < sizeof(*ncm))
++		return false;
++	if (ncm->type != NSS_WIFI_VDEV_INTERFACE_CMD_MSG ||
++	    ncm->response != NSS_CMN_RESPONSE_ACK ||
++	    ncm->interface < NSS_DYNAMIC_IF_START ||
++	    ncm->interface >= NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES ||
++	    nss_dynamic_interface_get_type(ctx, ncm->interface) != NSS_DYNAMIC_INTERFACE_TYPE_VAP)
++		return true;
++	/* The format callback inspects the echoed command. cm.len is firmware
++	 * supplied; require the real contiguous receive buffer to contain it.
++	 */
++	return ncm->len == payload_len && buf_len - sizeof(*ncm) >= payload_len;
++}
+ #endif
+ 
+ #ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
+@@ -512,6 +532,13 @@
+ 		nss_warning("%px: Message %d received with invalid interface number %d", nss_ctx, ncm->type, nss_if);
+ 		return;
+ 	}
++
++#ifdef NSS_DRV_WIFIOFFLOAD_ENABLE
++	if (!nss_core_wifi_vdev_cmd_status_valid(nss_ctx, ncm, buf_len)) {
++		nss_warning("%px: invalid wifi VDEV command response length %u", nss_ctx, buf_len);
++		return;
++	}
++#endif
+ 
+ 	cb = nss_ctx->nss_rx_interface_handlers[nss_if].cb;
+ 	app_data = nss_ctx->nss_rx_interface_handlers[nss_if].app_data;

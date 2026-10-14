@@ -1,0 +1,124 @@
+Subject: [PATCH] ath11k: use private tracked NSS VDEV CONFIG requests
+
+Do not give firmware an arvif pointer or share a completion between
+configuration attempts. Cancel and drain before releasing each wait.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -752,23 +752,28 @@
+ 	ath11k_nss_wifili_ext_callback_fn(ab, skb, napi);
+ }
+ 
++struct ath11k_nss_vdev_request {
++	struct completion complete;
++	u32 if_num;
++	int result;
++	u32 response;
++	u32 error;
++	u32 len;
++};
++
+ static void ath11k_nss_vdev_cfg_cb(void *app_data, struct nss_cmn_msg *msg)
+ {
+-	struct ath11k_vif *arvif = (struct ath11k_vif *)app_data;
+-
+-	if (!arvif)
++	struct ath11k_nss_vdev_request *request = app_data;
++
++	if (!request || msg->type != NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG ||
++	    msg->interface != request->if_num || msg->response == NSS_CMN_RESPONSE_NOTIFY)
+ 		return;
+ 
+-	ath11k_dbg(arvif->ar->ab, ATH11K_DBG_NSS, "vdev cfg msg callback received msg:%d rsp:%d\n",
+-		   msg->type, msg->response);
+-
+-	arvif->nss.config_result = msg->response == NSS_CMN_RESPONSE_ACK ? 0 : -EIO;
+-	ath11k_info(arvif->ar->ab,
+-		    "NSS VDEV config if=%d radio=%d vdev=%u txlen=%zu rxlen=%u response=%u error=%u\n",
+-		    arvif->nss.if_num, arvif->ar->nss.if_num, arvif->vdev_id,
+-		    sizeof(struct nss_wifi_vdev_config_msg), msg->len,
+-		    msg->response, msg->error);
+-	complete(&arvif->nss.complete);
++	request->result = msg->response == NSS_CMN_RESPONSE_ACK ? 0 : -EIO;
++	request->response = msg->response;
++	request->error = msg->error;
++	request->len = msg->len;
++	complete(&request->complete);
+ }
+ 
+ static void ath11k_nss_vdev_event_receive(void *dev, struct nss_cmn_msg *vdev_msg)
+@@ -2596,12 +2601,22 @@
+ 	struct ath11k *ar = arvif->ar;
+ 	struct nss_wifi_vdev_msg *vdev_msg;
+ 	struct nss_wifi_vdev_config_msg *vdev_cfg;
++	struct ath11k_nss_vdev_request *request;
+ 	nss_tx_status_t status;
++	u32 cookie = 0;
+ 	int ret;
+ 
+-	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_ATOMIC);
+-	if (!vdev_msg)
++	request = kzalloc(sizeof(*request), GFP_KERNEL);
++	if (!request)
+ 		return -ENOMEM;
++	init_completion(&request->complete);
++	request->if_num = arvif->nss.if_num;
++	request->result = -ETIMEDOUT;
++	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_KERNEL);
++	if (!vdev_msg) {
++		ret = -ENOMEM;
++		goto free_request;
++	}
+ 
+ 	vdev_cfg = &vdev_msg->msg.vdev_config;
+ 
+@@ -2614,17 +2629,14 @@
+ 	vdev_cfg->opmode = ath11k_nss_get_vdev_opmode(arvif);
+ 
+ 	ether_addr_copy(vdev_cfg->mac_addr, arvif->vif->addr);
+-
+-	reinit_completion(&arvif->nss.complete);
+-	arvif->nss.config_result = -ETIMEDOUT;
+ 
+ 	nss_wifi_vdev_msg_init(vdev_msg, arvif->nss.if_num,
+ 			       NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG,
+ 			       sizeof(struct nss_wifi_vdev_config_msg),
+ 			       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_cfg_cb,
+-			       arvif);
+-
+-	status = nss_wifi_vdev_tx_msg(ar->nss.ctx, vdev_msg);
++			       request);
++
++	status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, vdev_msg, &cookie);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		ath11k_warn(ar->ab, "failed to configure nss vdev nss_err:%d\n",
+ 			    status);
+@@ -2632,18 +2644,25 @@
+ 		goto free;
+ 	}
+ 
+-	ret = wait_for_completion_timeout(&arvif->nss.complete,
++	ret = wait_for_completion_timeout(&request->complete,
+ 					  msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
+-	if (!ret) {
++	nss_wifi_vdev_cancel_msg(cookie);
++	if (!ret && !completion_done(&request->complete)) {
+ 		ath11k_warn(ar->ab, "timeout in receiving nss vdev cfg response\n");
+ 		ret = -ETIMEDOUT;
+ 		goto free;
+ 	}
+ 
+-	ret = arvif->nss.config_result;
++	ret = request->result;
++	ath11k_info(ar->ab,
++		    "NSS VDEV config if=%d radio=%d vdev=%u txlen=%zu rxlen=%u response=%u error=%u\n",
++		    arvif->nss.if_num, ar->nss.if_num, arvif->vdev_id,
++		    sizeof(struct nss_wifi_vdev_config_msg), request->len,
++		    request->response, request->error);
+ free:
+ 	kfree(vdev_msg);
+-
++free_request:
++	kfree(request);
+ 	return ret;
+ }

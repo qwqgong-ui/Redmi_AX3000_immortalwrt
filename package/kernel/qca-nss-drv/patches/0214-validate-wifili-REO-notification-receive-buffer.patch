@@ -1,0 +1,83 @@
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -42,6 +42,35 @@
+ #include <linux/skbuff_ref.h>
+ #endif
+ #include "nss_tx_rx_common.h"
++#ifdef NSS_DRV_WIFIOFFLOAD_ENABLE
++#include "nss_wifili_if.h"
++
++static atomic64_t nss_wifili_reoq_rejected_status = ATOMIC64_INIT(0);
++
++uint64_t nss_wifili_reoq_rejected_status_count(void)
++{
++	return atomic64_read(&nss_wifili_reoq_rejected_status);
++}
++
++static bool nss_core_wifili_reoq_status_valid(const struct nss_cmn_msg *ncm,
++					    uint32_t buf_len)
++{
++	uint32_t payload_len = sizeof(((struct nss_wifili_msg *)0)->msg.reotidqmsg);
++
++	if (buf_len < sizeof(*ncm))
++		return false;
++	if (ncm->type != NSS_WIFILI_TID_REOQ_SETUP_MSG ||
++	    (ncm->interface != NSS_WIFILI_INTERNAL_INTERFACE &&
++	     ncm->interface != NSS_WIFILI_EXTERNAL_INTERFACE0 &&
++	     ncm->interface != NSS_WIFILI_EXTERNAL_INTERFACE1))
++		return true;
++	/* cm.len is payload length. Validate against the actual contiguous/frag
++	 * receive buffer before any wifili logger or client can inspect this body.
++	 */
++	return ncm->len >= payload_len &&
++	       ncm->len <= buf_len - sizeof(*ncm);
++}
++#endif
+ 
+ #ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
+ #include "nss_data_plane.h"
+@@ -463,6 +492,13 @@
+ 	/*
+ 	 * Validate message size
+ 	 */
++#ifdef NSS_DRV_WIFIOFFLOAD_ENABLE
++	if (!nss_core_wifili_reoq_status_valid(ncm, buf_len)) {
++		atomic64_inc(&nss_wifili_reoq_rejected_status);
++		nss_warning("%px: invalid wifili REO setup status buffer length %u", nss_ctx, buf_len);
++		return;
++	}
++#endif
+ 	if (ncm->len > nbuf->len) {
+ 		nss_warning("%px: Message %d for interface %d received with invalid length %d, expected length %d",
+ 							nss_ctx, ncm->type, nss_if, nbuf->len, ncm->len);
+--- a/nss_tx_rx_common.h
++++ b/nss_tx_rx_common.h
+@@ -94,6 +94,7 @@
+ extern void nss_trustsec_tx_register_handler(void);
+ extern void nss_trustsec_rx_register_handler(void);
+ extern void nss_wifili_register_handler(void);
++extern uint64_t nss_wifili_reoq_rejected_status_count(void);
+ extern void nss_ppe_register_handler(void);
+ extern void nss_gre_redir_mark_register_handler(void);
+ extern void nss_ppe_vp_register_handler(void);
+--- a/nss_wifili_stats.c
++++ b/nss_wifili_stats.c
+@@ -108,7 +108,7 @@
+ 	}
+ 
+ 	max_output_lines = (((NSS_WIFILI_STATS_MAX + 9) * max_pdev) +
+-				NSS_WIFILI_STATS_WBM_MAX + NSS_STATS_EXTRA_OUTPUT_LINES);
++				NSS_WIFILI_STATS_WBM_MAX + NSS_STATS_EXTRA_OUTPUT_LINES + 1);
+ 
+ 	size_al = NSS_STATS_MAX_STR_LENGTH * max_output_lines;
+ 
+@@ -246,6 +246,9 @@
+ 		size_wr += scnprintf(lbuf + size_wr, size_al - size_wr, "\n");
+ 	}
+ 
++	size_wr += scnprintf(lbuf + size_wr, size_al - size_wr,
++		"driver_reoq_rejected_status_total = %llu\n",
++		(unsigned long long)nss_wifili_reoq_rejected_status_count());
+ 	bytes_read = simple_read_from_buffer(ubuf, sz, ppos, lbuf, strlen(lbuf));
+ 	kfree(lbuf);
+ 

@@ -1,0 +1,886 @@
+NSS IPQ5018 control-plane and lifetime fixes for Linux 6.12.
+
+--- a/nss_qdisc/igs/nss_ifb.c
++++ b/nss_qdisc/igs/nss_ifb.c
+@@ -33,12 +33,6 @@
+  * nss_ifb_msg_response
+  *	NSS firmware message response structure.
+  */
+-static struct nss_ifb_msg_response {
+-	struct semaphore sem;
+-	wait_queue_head_t wq;
+-	enum nss_cmn_response response;
+-	bool cond;
+-} msg_response;
+ 
+ /*
+  * nss_ifb_igs_ip_pre_routing_hook()
+@@ -157,8 +151,14 @@
+ void nss_ifb_list_del(struct nss_ifb_info *ifb_info)
+ {
+ 	spin_lock_bh(&nss_ifb_list_lock);
+-	list_del(&ifb_info->map_list);
+-	spin_unlock_bh(&nss_ifb_list_lock);
++	list_del_init(&ifb_info->map_list);
++	spin_unlock_bh(&nss_ifb_list_lock);
++	if (ifb_info->map_dev)
++		dev_put(ifb_info->map_dev);
++	if (ifb_info->ifb_dev)
++		dev_put(ifb_info->ifb_dev);
++	kfree(ifb_info);
++	module_put(THIS_MODULE);
+ }
+ 
+ /*
+@@ -172,6 +172,36 @@
+ 	spin_unlock_bh(&nss_ifb_list_lock);
+ }
+ 
++/* Only before a SET was submitted, or after a confirmed RESET/CLEAR pair. */
++void nss_ifb_abort_bind(struct nss_ifb_info *ifb_info)
++{
++	struct net_device *dev = ifb_info->map_dev;
++
++	ifb_info->map_dev = NULL;
++	ifb_info->is_mapped = false;
++	if (dev)
++		dev_put(dev);
++}
++
++/* A failed firmware rollback must not stall Linux netdevice unregister. */
++void nss_ifb_forget_dev(struct nss_ifb_info *ifb_info, struct net_device *dev)
++{
++	ifb_info->quarantined = true;
++	if (ifb_info->map_dev == dev) {
++		ifb_info->map_dev = NULL;
++		dev_put(dev);
++	}
++	if (ifb_info->ifb_dev == dev) {
++		if (ifb_info->ifb_ifnum >= 0) {
++			nss_igs_unregister_if(ifb_info->ifb_ifnum);
++			synchronize_net();
++		}
++		ifb_info->ifb_dev = NULL;
++		dev_put(dev);
++	}
++	/* Keep the module/firmware identity until reset; no raw device remains. */
++}
++
+ /*
+  * nss_ifb_is_mapped()
+  *	Returns the map status of the given ifb bind structure.
+@@ -200,56 +230,16 @@
+  * nss_ifb_clear_config_cb()
+  *	CLEAR configure handler for an IFB mapped interface.
+  */
+-static void nss_ifb_clear_config_cb(void *app_data, struct nss_if_msg *nim)
+-{
+-	struct nss_ifb_info *ifb_info = (struct nss_ifb_info *)app_data;
+-	bool ret;
+-
+-	/*
+-	 * A CLEAR sent to unwind a half-applied mapping has no ifb_info to
+-	 * update - there is no bound entry yet. Nothing to do but check the
+-	 * response.
+-	 */
+-	if (!ifb_info) {
+-		if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-			nss_igs_error("Response error: %d\n", nim->cm.response);
+-		}
+-		return;
+-	}
+-
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_igs_error("Response error: %d\n", nim->cm.response);
+-		return;
+-	}
+-
+-	do {
+-		ret = spin_trylock_bh(&nss_ifb_list_lock);
+-	} while (!ret);
+-	ifb_info->is_mapped = false;
+-	spin_unlock_bh(&nss_ifb_list_lock);
+-}
+ 
+ /*
+  * nss_ifb_async_cb()
+  *	IFB asynchronous handler for an IFB mapped interface.
+  */
+-static void nss_ifb_async_cb(void *app_data, struct nss_if_msg *nim)
+-{
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_igs_error("Response error: %d\n", nim->cm.response);
+-	}
+-}
+ 
+ /*
+  * nss_ifb_wake_up_cb()
+  *	IFB wake up handler for an IFB mapped interface.
+  */
+-static void nss_ifb_wake_up_cb(void *app_data, struct nss_if_msg *nim)
+-{
+-	msg_response.response = nim->cm.response;
+-	msg_response.cond = 0;
+-	wake_up(&msg_response.wq);
+-}
+ 
+ /*
+  * nss_ifb_config_msg_fill()
+@@ -258,7 +248,9 @@
+ static bool nss_ifb_config_msg_fill(struct nss_if_msg *nim_ptr, struct net_device *dev,
+ 		int32_t ifb_num, enum nss_ifb_if_config config, void *cb)
+ {
+-	uint32_t if_src_num;
++	int32_t if_src_num;
++
++	memset(nim_ptr, 0, sizeof(*nim_ptr));
+ 
+ 	if (netif_is_ifb_dev(dev)) {
+ 		if_src_num = nss_cmn_get_interface_number_by_dev_and_type(dev, NSS_DYNAMIC_INTERFACE_TYPE_IGS);
+@@ -277,27 +269,27 @@
+ 	switch (config) {
+ 	case NSS_IFB_SET_IGS_NODE:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_SET_IGS_NODE,
+-			sizeof(struct nss_if_igs_config), nss_ifb_wake_up_cb, cb);
++			sizeof(struct nss_if_igs_config), NULL, NULL);
+ 		nim_ptr->msg.config_igs.igs_num = ifb_num;
+ 		break;
+ 	case NSS_IFB_CLEAR_IGS_NODE:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_CLEAR_IGS_NODE,
+-			sizeof(struct nss_if_igs_config), nss_ifb_clear_config_cb, cb);
++			sizeof(struct nss_if_igs_config), NULL, NULL);
+ 		nim_ptr->msg.config_igs.igs_num = ifb_num;
+ 		break;
+ 	case NSS_IFB_SET_NEXTHOP:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_SET_NEXTHOP,
+-			sizeof(struct nss_if_set_nexthop), nss_ifb_wake_up_cb, cb);
++			sizeof(struct nss_if_set_nexthop), NULL, NULL);
+ 		nim_ptr->msg.set_nexthop.nexthop = ifb_num;
+ 		break;
+ 	case NSS_IFB_RESET_NEXTHOP:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_RESET_NEXTHOP,
+-			sizeof(struct nss_if_set_nexthop), nss_ifb_async_cb, cb);
++			sizeof(struct nss_if_set_nexthop), NULL, NULL);
+ 		nim_ptr->msg.set_nexthop.nexthop = ifb_num;
+ 		break;
+ 	case NSS_IFB_OPEN:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_OPEN,
+-			sizeof(struct nss_if_open), nss_ifb_async_cb, cb);
++			sizeof(struct nss_if_open), NULL, NULL);
+ 		/*
+ 		 * Reset the elements of interface's open configuration.
+ 		 */
+@@ -305,7 +297,7 @@
+ 		break;
+ 	case NSS_IFB_CLOSE:
+ 		nss_ifb_config_msg_init(nim_ptr, if_src_num, NSS_IF_CLOSE,
+-			sizeof(struct nss_if_close), nss_ifb_async_cb, cb);
++			sizeof(struct nss_if_close), NULL, NULL);
+ 		/*
+ 		 * Reset the elements of interface's close configuration.
+ 		 */
+@@ -355,37 +347,9 @@
+ 		return -1;
+ 	}
+ 
+-	down(&msg_response.sem);
+-
+-	/*
+-	 * Arm the wait before ringing the doorbell, not after: nss_if_tx_msg()
+-	 * hands the message to a firmware that answers in microseconds, and the
+-	 * ACK callback runs from the N2H softirq. An ACK landing between the two
+-	 * finds an empty wait queue, and the store below would then re-arm a
+-	 * condition nothing will ever clear again - an uninterruptible sleep for
+-	 * the whole timeout with rtnl_lock held, since this is only ever reached from
+-	 * act_nssmirred's init under the classifier's RTNL section.
+-	 */
+-	msg_response.cond = 1;
+-	ret = nss_if_tx_msg(nss_igs_get_context(), &nim);
+-	if (ret != NSS_TX_SUCCESS) {
+-		up(&msg_response.sem);
+-		nss_igs_error("failed to send config message\n");
+-		return -1;
+-	}
+-
+-	if (!wait_event_timeout(msg_response.wq, msg_response.cond == 0, NSS_IFB_MSG_TIMEOUT)) {
+-		nss_igs_error("config for attach interface msg timeout\n");
+-		up(&msg_response.sem);
+-		return -1;
+-	} else if (msg_response.response != NSS_CMN_RESPONSE_ACK) {
+-		up(&msg_response.sem);
+-		nss_igs_error("config for attach interface msg return with response: %d\n", msg_response.response);
+-		return -1;
+-	}
+-
+-	up(&msg_response.sem);
+-	return 0;
++	/* Driver-owned callback/cookie remains valid after a client timeout/unload. */
++	ret = nss_if_msg_sync(nss_igs_get_context(), &nim);
++	return ret == NSS_TX_SUCCESS ? 0 : -EIO;
+ }
+ 
+ /*
+@@ -395,6 +359,9 @@
+ bool nss_ifb_reset_nexthop(struct nss_ifb_info *ifb_info)
+ {
+ 	int32_t if_num;
++
++	if (!ifb_info->map_dev || !ifb_info->ifb_dev)
++		return !ifb_info->is_mapped;
+ 
+ 	spin_lock_bh(&nss_ifb_list_lock);
+ 	if (!(ifb_info->is_mapped)) {
+@@ -409,14 +376,15 @@
+ 	if_num = nss_cmn_get_interface_number_by_dev_and_type(ifb_info->ifb_dev, NSS_DYNAMIC_INTERFACE_TYPE_IGS);
+ 	if (if_num < 0) {
+ 		nss_igs_error("No %s IFB device found in NSS firmware\n", ifb_info->ifb_dev->name);
+-	}
+-
+-	if (nss_ifb_config_msg_tx(ifb_info->map_dev, if_num, NSS_IFB_RESET_NEXTHOP, NULL) < 0) {
++		spin_unlock_bh(&nss_ifb_list_lock);
++		return false;
++	}
++	spin_unlock_bh(&nss_ifb_list_lock);
++
++	if (nss_ifb_config_msg_tx_sync(ifb_info->map_dev, if_num, NSS_IFB_RESET_NEXTHOP, NULL) < 0) {
+ 		nss_igs_error("Sending RESET NEXTHOP config to %s dev failed\n", ifb_info->map_dev->name);
+-		spin_unlock_bh(&nss_ifb_list_lock);
+-		return false;
+-	}
+-	spin_unlock_bh(&nss_ifb_list_lock);
++		return false;
++	}
+ 	return true;
+ }
+ 
+@@ -427,6 +395,9 @@
+ bool nss_ifb_down(struct nss_ifb_info *ifb_info)
+ {
+ 	int32_t ifb_num;
++
++	if (ifb_info->quarantined || !ifb_info->map_dev || !ifb_info->ifb_dev)
++		return false;
+ 
+ 	spin_lock_bh(&nss_ifb_list_lock);
+ 	if (!(ifb_info->is_mapped)) {
+@@ -462,6 +433,9 @@
+ {
+ 	int32_t ifb_num;
+ 
++	if (ifb_info->quarantined || !ifb_info->map_dev || !ifb_info->ifb_dev)
++		return false;
++
+ 	spin_lock_bh(&nss_ifb_list_lock);
+ 	if (!(ifb_info->is_mapped)) {
+ 		nss_igs_info("%s IFB device mapped flag is not set\n", ifb_info->ifb_dev->name);
+@@ -495,6 +469,10 @@
+ bool nss_ifb_clear_igs_node(struct nss_ifb_info *ifb_info)
+ {
+ 	int32_t if_num;
++	struct net_device *map_dev;
++
++	if (!ifb_info->map_dev || !ifb_info->ifb_dev)
++		return !ifb_info->is_mapped;
+ 
+ 	spin_lock_bh(&nss_ifb_list_lock);
+ 	if (!(ifb_info->is_mapped)) {
+@@ -509,14 +487,21 @@
+ 	if_num = nss_cmn_get_interface_number_by_dev_and_type(ifb_info->ifb_dev, NSS_DYNAMIC_INTERFACE_TYPE_IGS);
+ 	if (if_num < 0) {
+ 		nss_igs_error("No %s IFB device found in NSS firmware\n", ifb_info->ifb_dev->name);
+-	}
+-
+-	if (nss_ifb_config_msg_tx(ifb_info->map_dev, if_num, NSS_IFB_CLEAR_IGS_NODE, ifb_info) < 0) {
++		spin_unlock_bh(&nss_ifb_list_lock);
++		return false;
++	}
++	spin_unlock_bh(&nss_ifb_list_lock);
++
++	if (nss_ifb_config_msg_tx_sync(ifb_info->map_dev, if_num, NSS_IFB_CLEAR_IGS_NODE, NULL) < 0) {
+ 		nss_igs_error("Sending unassign to %s dev failed\n", ifb_info->map_dev->name);
+-		spin_unlock_bh(&nss_ifb_list_lock);
+-		return false;
+-	}
+-	spin_unlock_bh(&nss_ifb_list_lock);
++		return false;
++	}
++	spin_lock_bh(&nss_ifb_list_lock);
++	ifb_info->is_mapped = false;
++	map_dev = ifb_info->map_dev;
++	ifb_info->map_dev = NULL;
++	spin_unlock_bh(&nss_ifb_list_lock);
++	dev_put(map_dev);
+ 	return true;
+ }
+ 
+@@ -526,8 +511,6 @@
+  */
+ void nss_ifb_init()
+ {
+-	sema_init(&msg_response.sem, 1);
+-	init_waitqueue_head(&msg_response.wq);
+ }
+ 
+ /*
+@@ -537,10 +520,13 @@
+ struct nss_ifb_info *nss_ifb_find_map_dev(struct net_device *dev)
+ {
+ 	struct nss_ifb_info *ifb_info;
++	int32_t ifnum = nss_cmn_get_interface_number_by_dev(dev);
+ 
+ 	spin_lock_bh(&nss_ifb_list_lock);
+ 	list_for_each_entry(ifb_info, &nss_ifb_list, map_list) {
+-		if (ifb_info->map_dev == dev) {
++		if (ifb_info->map_dev == dev ||
++		    (ifb_info->quarantined && ifnum >= 0 &&
++		     ifb_info->source_ifnum == ifnum)) {
+ 			spin_unlock_bh(&nss_ifb_list_lock);
+ 			return ifb_info;
+ 		}
+@@ -580,14 +566,22 @@
+ 		 * IFB not present in local LL.
+ 		 * Add the entry in LL.
+ 		 */
+-		ifb_info = kmalloc(sizeof(*ifb_info), GFP_KERNEL);
++		ifb_info = kzalloc(sizeof(*ifb_info), GFP_KERNEL);
+ 		if (!ifb_info) {
+ 			nss_igs_error("kmalloc failed\n");
+ 			return -ENOMEM;
+ 		}
++		if (!try_module_get(THIS_MODULE)) {
++			kfree(ifb_info);
++			return -ENODEV;
++		}
++		dev_hold(to_dev);
++		dev_hold(from_dev);
+ 		ifb_info->ifb_dev = to_dev;
+ 		ifb_info->map_dev = from_dev;
+ 		ifb_info->is_mapped = true;
++		ifb_info->source_ifnum = nss_cmn_get_interface_number_by_dev(from_dev);
++		ifb_info->ifb_ifnum = -1;
+ 		nss_ifb_list_add(ifb_info);
+ 	} else {
+ 		/*
+@@ -595,8 +589,14 @@
+ 		 * make the ifb_info's is_mapped to true again.
+ 		 */
+ 		spin_lock_bh(&nss_ifb_list_lock);
++		if (ifb_info->map_dev != from_dev) {
++			dev_hold(from_dev);
++			if (ifb_info->map_dev)
++				dev_put(ifb_info->map_dev);
++		}
+ 		ifb_info->map_dev = from_dev;
+ 		ifb_info->is_mapped = true;
++		ifb_info->source_ifnum = nss_cmn_get_interface_number_by_dev(from_dev);
+ 		spin_unlock_bh(&nss_ifb_list_lock);
+ 	}
+ 	return 0;
+@@ -661,6 +661,8 @@
+ void nss_ifb_delete_if(int32_t if_num)
+ {
+ 	nss_igs_unregister_if(if_num);
++	/* Finish any NOTIFY callback that fetched the client before unregister. */
++	synchronize_net();
+ 	if (nss_dynamic_interface_dealloc_node(if_num, NSS_DYNAMIC_INTERFACE_TYPE_IGS)
+ 			 != NSS_TX_SUCCESS) {
+ 		nss_igs_error("Failed to de-alloc IFB dynamic interface\n");
+--- a/nss_qdisc/igs/nss_ifb.h
++++ b/nss_qdisc/igs/nss_ifb.h
+@@ -38,6 +38,9 @@
+ 	struct net_device *map_dev;	/* Device mapped to an IFB device */
+ 	struct list_head map_list;	/* Internal list */
+ 	bool is_mapped;			/* Flag to indicate whether mapping is valid or not */
++	bool quarantined;		/* Unconfirmed firmware teardown blocks reuse. */
++	int32_t source_ifnum;		/* Identity retained if a device unregisters. */
++	int32_t ifb_ifnum;
+ };
+ 
+ /*
+@@ -62,6 +65,8 @@
+  *	API to delete member in ifb list.
+  */
+ extern void nss_ifb_list_del(struct nss_ifb_info *ifb_info);
++extern void nss_ifb_abort_bind(struct nss_ifb_info *ifb_info);
++extern void nss_ifb_forget_dev(struct nss_ifb_info *ifb_info, struct net_device *dev);
+ 
+ /*
+  * nss_ifb_is_mapped()
+--- a/nss_qdisc/igs/nss_mirred.c
++++ b/nss_qdisc/igs/nss_mirred.c
+@@ -28,6 +28,7 @@
+ static unsigned int nss_mirred_net_id;		/* NSS mirror net ID */
+ static struct tc_action_ops nss_mirred_act_ops;	/* NSS action mirror ops */
+ #endif
++static DEFINE_MUTEX(nss_mirred_config_lock);
+ 
+ /*
+  * nss_mirred_release()
+@@ -41,7 +42,7 @@
+ {
+ 	struct nss_mirred_tcf *act = nss_mirred_get(tc_act);
+ 	struct net_device *dev = rcu_dereference_protected(act->tcfm_dev, 1);
+-	struct nss_ifb_info *ifb_info = nss_ifb_find_dev(dev);
++	struct nss_ifb_info *ifb_info;
+ 
+ 	/*
+ 	 * Unlink the action from the nss mirred action list FIRST and
+@@ -56,6 +57,10 @@
+ 		list_del_init(&act->tcfm_list);
+ 	}
+ 	spin_unlock_bh(&nss_mirred_list_lock);
++	if (!dev)
++		return;
++	mutex_lock(&nss_mirred_config_lock);
++	ifb_info = nss_ifb_find_dev(dev);
+ 
+ 	if (!ifb_info) {
+ 		nss_igs_error("IFB device %s not found in the linked list \n",
+@@ -66,15 +71,14 @@
+ 	/*
+ 	 * Send IFB RESET NEXTHOP configure message to the mapped interface.
+ 	 */
+-	if (!nss_ifb_reset_nexthop(ifb_info)) {
+-		nss_igs_error("Error in sending IFB RESET NEXTHOP configure message\n");
+-	}
+-
+-	if (!nss_ifb_clear_igs_node(ifb_info)) {
+-		nss_igs_error("Error in sending IFB CLEAR configure message\n");
++	if (!nss_ifb_reset_nexthop(ifb_info) ||
++	    !nss_ifb_clear_igs_node(ifb_info)) {
++		ifb_info->quarantined = true;
++		nss_igs_error("Unconfirmed IGS teardown; mapping retained\n");
+ 	}
+ 
+ put_dev:
++	mutex_unlock(&nss_mirred_config_lock);
+ 	if (dev) {
+ 		dev_put(dev);
+ 	}
+@@ -93,231 +97,148 @@
+  *	Initialize the nss mirred action.
+  */
+ static int nss_mirred_init(struct net *net, struct nlattr *nla,
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0))
+-						struct nlattr *est, struct tc_action *tc_act, int ovr,
+-						int bind)
+-{
+-#elif (LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0))
+-						struct nlattr *est, struct tc_action **tc_act, int ovr,
+-						int bind, bool rtnl_held, struct tcf_proto *tp,
+-						u32 flags, struct netlink_ext_ack *extack)
+-{
+-#else
+-						struct nlattr *est, struct tc_action **tc_act,
+-						struct tcf_proto *tp, u32 flags, struct netlink_ext_ack *extack)
+-{
+-	bool bind = flags & TCA_ACT_FLAGS_BIND;
+-#endif
++		struct nlattr *est, struct tc_action **tc_act,
++		struct tcf_proto *tp, u32 flags, struct netlink_ext_ack *extack)
++{
+ 	struct tc_action_net *tn = net_generic(net, nss_mirred_net_id);
+-	u32 index;
+ 	struct nlattr *arr[TC_NSS_MIRRED_MAX + 1];
+ 	struct tc_nss_mirred *parm;
+ 	struct nss_mirred_tcf *act;
+-	struct net_device *to_dev, *from_dev;
++	struct net_device *from_dev, *to_dev;
+ 	struct nss_ifb_info *ifb_info;
+-	int32_t ret, ifb_num;
+-
+-	if (!nla) {
++	bool bind = flags & TCA_ACT_FLAGS_BIND;
++	bool existing, new_record, created_ifb = false;
++	u32 index;
++	int ret, ifb_num;
++
++	ASSERT_RTNL();
++	if (!nla)
+ 		return -EINVAL;
+-	}
+-
+-	/*
+-	 * Parse and validate the user configurations.
+-	 */
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0))
+-	ret = nla_parse_nested(arr, TC_NSS_MIRRED_MAX, nla, nss_mirred_policy);
+-#else
+-	ret = nla_parse_nested_deprecated(arr, TC_NSS_MIRRED_MAX, nla, nss_mirred_policy, extack);
+-#endif
+-	if (ret < 0) {
++	ret = nla_parse_nested_deprecated(arr, TC_NSS_MIRRED_MAX, nla,
++					 nss_mirred_policy, extack);
++	if (ret < 0)
+ 		return ret;
+-	}
+-	if (!arr[TC_NSS_MIRRED_PARMS]) {
++	if (!arr[TC_NSS_MIRRED_PARMS])
+ 		return -EINVAL;
+-	}
+-
+ 	parm = nla_data(arr[TC_NSS_MIRRED_PARMS]);
+-	if (!parm->from_ifindex || !parm->to_ifindex) {
+-		nss_igs_error("Invalid ifindex: from_ifindex: %u, to_ifindex: %u\n",
+-				parm->from_ifindex, parm->to_ifindex);
+-		return -EINVAL;
+-	}
+-
++	if (parm->action != TC_ACT_STOLEN)
++		return -EOPNOTSUPP;
+ 	from_dev = __dev_get_by_index(net, parm->from_ifindex);
+-	if (!from_dev) {
+-		nss_igs_error("No device found for %u ifindex\n", parm->from_ifindex);
++	to_dev = __dev_get_by_index(net, parm->to_ifindex);
++	if (!from_dev || !to_dev || netif_is_ifb_dev(from_dev) ||
++	    !netif_is_ifb_dev(to_dev) ||
++	    nss_cmn_get_interface_number_by_dev(from_dev) < 0)
+ 		return -ENODEV;
+-	}
+-
+-	if (nss_cmn_get_interface_number_by_dev(from_dev) < 0) {
+-		nss_igs_error("No NSS FW device found for %s\n", from_dev->name);
+-		return -ENODEV;
+-	}
+-
+-	if (netif_is_ifb_dev(from_dev)) {
+-		nss_igs_error("IFB device %s as from_dev\n", from_dev->name);
+-		return -ENODEV;
+-	}
+-
+-	to_dev = __dev_get_by_index(net, parm->to_ifindex);
+-	if (!to_dev) {
+-		nss_igs_error("No device found for %u ifindex\n", parm->to_ifindex);
+-		return -ENODEV;
+-	}
+-
+-	if (!netif_is_ifb_dev(to_dev)) {
+-		nss_igs_error("%s is not an IFB device\n", to_dev->name);
+-		return -ENODEV;
+-	}
+-
+-	ifb_info = nss_ifb_find_map_dev(from_dev);
+-	if (ifb_info) {
+-		if (nss_ifb_is_mapped(ifb_info)) {
+-			nss_igs_error("%s device is already mapped to the other IFB device\n",
+-					from_dev->name);
+-			return -EEXIST;
+-		}
+-	}
+-
+-	ifb_info = nss_ifb_find_dev(to_dev);
+-	if (ifb_info) {
+-		if (nss_ifb_is_mapped(ifb_info)) {
+-			nss_igs_error("%s IFB device is already mapped to the other device\n",
+-					to_dev->name);
+-			return -EEXIST;
+-		}
+-	}
+-
+-	ifb_num = nss_cmn_get_interface_number_by_dev_and_type(to_dev, NSS_DYNAMIC_INTERFACE_TYPE_IGS);
+-	if (ifb_num < 0) {
+-		/*
+-		 * Create the IFB instance in the NSS firmware.
+-		 */
+-		ifb_num = nss_ifb_create_if(to_dev);
+-		if (ifb_num < 0) {
+-			nss_igs_error("failure in IFB creation\n");
+-			return -EINVAL;
+-		}
+-	}
+-
+-	/*
+-	 * Send config message to the interface attached to an IFB interface.
+-	 */
+-	if (nss_ifb_config_msg_tx_sync(from_dev, ifb_num, NSS_IFB_SET_IGS_NODE, NULL) < 0) {
+-		nss_igs_error("Sending config to %s dev failed\n", from_dev->name);
+-
+-		/*
+-		 * A failure here is not proof the firmware ignored the message:
+-		 * a timeout means only that no ACK was seen, and the node may
+-		 * well be applied. is_mapped is set by nss_ifb_bind() below, so
+-		 * from this point the gated undo helpers would return success
+-		 * having sent nothing, and the node would sit on the physical
+-		 * port until the firmware is reloaded. Undo it directly.
+-		 */
+-		nss_ifb_config_msg_tx(from_dev, ifb_num, NSS_IFB_CLEAR_IGS_NODE, NULL);
+-		return -EINVAL;
+-	}
+-
+-	/*
+-	 * Send next hop config message to the interface attached to an IFB interface.
+-	 */
+-	if (nss_ifb_config_msg_tx_sync(from_dev, ifb_num, NSS_IFB_SET_NEXTHOP, NULL) < 0) {
+-		nss_igs_error("Sending next hop config to %s dev failed\n", from_dev->name);
+-
+-		/*
+-		 * Same reasoning, and the IGS node from the send above is
+-		 * definitely applied, so take both back.
+-		 */
+-		nss_ifb_config_msg_tx(from_dev, ifb_num, NSS_IFB_RESET_NEXTHOP, NULL);
+-		nss_ifb_config_msg_tx(from_dev, ifb_num, NSS_IFB_CLEAR_IGS_NODE, NULL);
+-		return -EINVAL;
+-	}
+-
+-	/*
+-	 * Bind an IFB device with its requested mapped interface.
+-	 */
+-	ret = nss_ifb_bind(ifb_info, from_dev, to_dev);
+-	if (ret < 0) {
+-		nss_igs_error(" Binding an IFB device failed\n");
+-		nss_ifb_delete_if(ifb_num);
+-		return ret;
+-	}
+-
+-	/*
+-	 * Return error if nss mirred action index is present in the hash.
+-	 */
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0))
+-	if (tcf_hash_check(parm->index, tc_act, bind)) {
+-		return -EEXIST;
+-	}
+-
+-	ret = tcf_hash_create(parm->index, est, tc_act, sizeof(*act),
+-			bind, true);
+-	if (ret) {
+-		return ret;
+-	}
+-
+-	act = nss_mirred_get(tc_act);
+-#else
++
++	/* Reserve the tc identity before any firmware or mapping side effect. */
+ 	index = parm->index;
+ 	ret = tcf_idr_check_alloc(tn, &index, tc_act, bind);
+-	if (ret < 0) {
++	if (ret < 0)
+ 		return ret;
+-	}
+-
+-	if (ret && bind) {
+-		return 0;
+-	}
+-
+-	if (!ret) {
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0))
+-		ret = tcf_idr_create(tn, index, est, tc_act, &nss_mirred_act_ops,
+-				bind, true);
+-#else
+-		ret = tcf_idr_create(tn, index, est, tc_act, &nss_mirred_act_ops,
+-				bind, true, 0);
+-#endif
++	existing = ret > 0;
++	if (!existing) {
++		ret = tcf_idr_create(tn, index, est, tc_act,
++				    &nss_mirred_act_ops, bind, true, 0);
+ 		if (ret) {
+ 			tcf_idr_cleanup(tn, index);
+ 			return ret;
+ 		}
+-	}
+-
++		act = nss_mirred_get(*tc_act);
++		INIT_LIST_HEAD(&act->tcfm_list);
++	}
+ 	act = nss_mirred_get(*tc_act);
+-	if (!ret) {
+-		/*
+-		 * Freshly created action: make the list entry a valid
+-		 * empty node so the (guarded) add and delete below stay
+-		 * balanced on every path.
+-		 */
+-		INIT_LIST_HEAD(&act->tcfm_list);
+-	}
+-#endif
+-	/*
+-	 * Fill up the nss mirred tc parameters to
+-	 * its local action structure.
+-	 */
+-	ASSERT_RTNL();
+-	act->tcf_action = parm->action;
++	mutex_lock(&nss_mirred_config_lock);
++	if (existing) {
++		/* A bind or replace may reuse the same live mapping only. */
++		if (act->tcfm_from_ifindex != parm->from_ifindex ||
++		    act->tcfm_to_ifindex != parm->to_ifindex ||
++		    rcu_access_pointer(act->tcfm_dev) != to_dev) {
++			ret = -EOPNOTSUPP;
++			goto error;
++		}
++		ifb_info = nss_ifb_find_dev(to_dev);
++		if (!ifb_info || !ifb_info->is_mapped || ifb_info->quarantined) {
++			ret = -EIO;
++			goto error;
++		}
++		if (!bind && !(flags & TCA_ACT_FLAGS_REPLACE)) {
++			ret = -EEXIST;
++			goto error;
++		}
++		if (!bind)
++			WRITE_ONCE(act->tcf_action, parm->action);
++		mutex_unlock(&nss_mirred_config_lock);
++		return 0;
++	}
++
++	ifb_info = nss_ifb_find_map_dev(from_dev);
++	if (ifb_info && ifb_info->is_mapped) {
++		ret = -EBUSY;
++		goto error;
++	}
++	ifb_info = nss_ifb_find_dev(to_dev);
++	if (ifb_info && (ifb_info->is_mapped || ifb_info->quarantined)) {
++		ret = -EBUSY;
++		goto error;
++	}
++	new_record = !ifb_info;
++	ifb_num = nss_cmn_get_interface_number_by_dev_and_type(to_dev,
++						 NSS_DYNAMIC_INTERFACE_TYPE_IGS);
++	/* An untracked interface belongs to another transaction. */
++	if (new_record && ifb_num >= 0) {
++		ret = -EBUSY;
++		goto error;
++	}
++	ret = nss_ifb_bind(ifb_info, from_dev, to_dev);
++	if (ret < 0)
++		goto error;
++	ifb_info = nss_ifb_find_dev(to_dev);
++	if (ifb_num < 0) {
++		ifb_num = nss_ifb_create_if(to_dev);
++		if (ifb_num < 0) {
++			nss_ifb_abort_bind(ifb_info);
++			if (new_record)
++				nss_ifb_list_del(ifb_info);
++			ret = -EIO;
++			goto error;
++		}
++		created_ifb = true;
++	}
++	ifb_info->ifb_ifnum = ifb_num;
++	if (nss_ifb_config_msg_tx_sync(from_dev, ifb_num,
++				     NSS_IFB_SET_IGS_NODE, NULL) < 0 ||
++	    nss_ifb_config_msg_tx_sync(from_dev, ifb_num,
++				     NSS_IFB_SET_NEXTHOP, NULL) < 0) {
++		/* A timeout can mean either SET reached the firmware. */
++		if (nss_ifb_reset_nexthop(ifb_info) &&
++		    nss_ifb_clear_igs_node(ifb_info)) {
++			if (created_ifb) {
++				nss_ifb_delete_if(ifb_num);
++				nss_ifb_list_del(ifb_info);
++			}
++		} else {
++			ifb_info->quarantined = true;
++			nss_igs_error("Unconfirmed IGS rollback for %s; mapping retained\n",
++				      from_dev->name);
++		}
++		ret = -EIO;
++		goto error;
++	}
++	WRITE_ONCE(act->tcf_action, parm->action);
+ 	act->tcfm_from_ifindex = parm->from_ifindex;
+ 	act->tcfm_to_ifindex = parm->to_ifindex;
+ 	dev_hold(to_dev);
+ 	rcu_assign_pointer(act->tcfm_dev, to_dev);
+-
+-	/*
+-	 * Add the new action instance to the nss mirred action list.
+-	 * An existing action (tc replace path) is already linked.
+-	 */
+ 	spin_lock_bh(&nss_mirred_list_lock);
+-	if (list_empty(&act->tcfm_list)) {
+-		list_add(&act->tcfm_list, &nss_mirred_list);
+-	}
++	list_add(&act->tcfm_list, &nss_mirred_list);
+ 	spin_unlock_bh(&nss_mirred_list_lock);
+-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0))
+-	tcf_hash_insert(tc_act);
+-#endif
+-
++	mutex_unlock(&nss_mirred_config_lock);
+ 	return ACT_P_CREATED;
++error:
++	mutex_unlock(&nss_mirred_config_lock);
++	tcf_idr_release(*tc_act, bind);
++	*tc_act = NULL;
++	return ret;
+ }
+ 
+ /*
+@@ -474,15 +395,11 @@
+ 	/*
+ 	 * Send IFB RESET NEXTHOP configure message to the mapped interface.
+ 	 */
+-	if (!nss_ifb_reset_nexthop(ifb_info)) {
+-		nss_igs_error("Error in sending IFB RESET NEXTHOP configure message\n");
+-	}
+-
+-	/*
+-	 * Send IFB CLEAR configure message to the mapped interface.
+-	 */
+-	if (!nss_ifb_clear_igs_node(ifb_info)) {
+-		nss_igs_error("Error in sending IFB CLEAR configure message\n");
++	if (!nss_ifb_reset_nexthop(ifb_info) ||
++	    !nss_ifb_clear_igs_node(ifb_info)) {
++		nss_igs_error("IGS device unregister has an unconfirmed rollback\n");
++		nss_ifb_forget_dev(ifb_info, dev);
++		return;
+ 	}
+ 	if (netif_is_ifb_dev(dev)) {
+ 		int32_t ifb_num = nss_cmn_get_interface_number_by_dev_and_type(dev, NSS_DYNAMIC_INTERFACE_TYPE_IGS);
+@@ -558,6 +475,7 @@
+ 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+ 	struct nss_mirred_tcf *act;
+ 
++	mutex_lock(&nss_mirred_config_lock);
+ 	switch (event) {
+ 	case NETDEV_UNREGISTER:
+ 		nss_mirred_unregister_event_handler(dev);
+@@ -584,6 +502,7 @@
+ 		nss_mirred_down_event_handler(dev);
+ 		break;
+ 	}
++	mutex_unlock(&nss_mirred_config_lock);
+ 
+ 	return NOTIFY_DONE;
+ }
+@@ -723,10 +642,17 @@
+ static __net_init int nss_mirred_init_net(struct net *net)
+ {
+ 	struct tc_action_net *tn = net_generic(net, nss_mirred_net_id);
+-	nf_register_net_hooks(net, nss_mirred_igs_nf_ops,
+-			ARRAY_SIZE(nss_mirred_igs_nf_ops));
+-
+-	return tc_action_net_init(net, tn, &nss_mirred_act_ops);
++	int ret;
++
++	ret = nf_register_net_hooks(net, nss_mirred_igs_nf_ops,
++				    ARRAY_SIZE(nss_mirred_igs_nf_ops));
++	if (ret)
++		return ret;
++	ret = tc_action_net_init(net, tn, &nss_mirred_act_ops);
++	if (ret)
++		nf_unregister_net_hooks(net, nss_mirred_igs_nf_ops,
++					ARRAY_SIZE(nss_mirred_igs_nf_ops));
++	return ret;
+ }
+ 
+ /*
+@@ -767,7 +693,10 @@
+  */
+ static int __init nss_mirred_init_module(void)
+ {
+-	int err = register_netdevice_notifier(&nss_mirred_device_notifier);
++	int err;
++
++	nss_ifb_init();
++	err = register_netdevice_notifier(&nss_mirred_device_notifier);
+ 	if (err) {
+ 		return err;
+ 	}
+@@ -799,7 +728,6 @@
+ 	 */
+ 	nss_igs_module_save(&nss_mirred_act_ops, THIS_MODULE);
+ 
+-	nss_ifb_init();
+ 	return 0;
+ }
+ 

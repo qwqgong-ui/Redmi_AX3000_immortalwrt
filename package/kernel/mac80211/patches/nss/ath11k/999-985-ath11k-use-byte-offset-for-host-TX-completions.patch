@@ -1,0 +1,18 @@
+Subject: [PATCH] ath11k: read HTT TX completion status at its byte offset
+
+HTT_TX_WBM_COMP_STATUS_OFFSET is an eight-byte offset in a 32-byte WBM
+entry. Adding it to a 16-byte typed pointer reads at desc+128 instead,
+possibly outside the ring and miscounting MEC notifications as host TX
+completions. Use the same byte offset as the actual HTT completion handler.
+
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -826,6 +826,7 @@
+ 	if (FIELD_GET(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE, desc->info0) ==
+ 	    HAL_WBM_REL_SRC_MODULE_FW) {
+-		status_desc = ((struct htt_tx_wbm_completion *)desc) + HTT_TX_WBM_COMP_STATUS_OFFSET;
++		status_desc = (struct htt_tx_wbm_completion *)
++			((u8 *)desc + HTT_TX_WBM_COMP_STATUS_OFFSET);
+ 
+ 		/* Dont consider HTT_TX_COMP_STATUS_MEC_NOTIFY */
+ 		if (FIELD_GET(HTT_TX_WBM_COMP_INFO0_STATUS, status_desc->info0) ==

@@ -1,0 +1,465 @@
+Subject: [PATCH] nss-drv: explicitly attach a ready Ethernet conduit
+
+Require successful open before publishing the physical interface. Preserve
+uncertain DMA ownership until a close ACK and restore headroom on detach.
+
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -18,6 +18,8 @@
+ #include "nss_core.h"
+ #include "nss_tx_rx_common.h"
+ #include "nss_data_plane_hal.h"
++#include <linux/rtnetlink.h>
++#include <net/net_namespace.h>
+ 
+ /*
+  * nss_data_plane_param
+@@ -34,28 +36,37 @@
+  */
+ static int __nss_data_plane_init(struct nss_dp_data_plane_ctx *dpc)
+ {
+-	struct net_device *netdev = dpc->dev;
+-	netdev->needed_headroom += 32;
+-	return NSS_DP_SUCCESS;
++    struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
++
++    if (!dp->headroom_saved) {
++        dp->saved_headroom = dpc->dev->needed_headroom;
++        dpc->dev->needed_headroom += 32;
++        dp->headroom_saved = true;
++    }
++    return NSS_DP_SUCCESS;
+ }
+ 
+ /*
+  * __nss_data_plane_open()
+  *	Called by nss-dp to notify open to nss-fw
+  */
++static int __nss_data_plane_close(struct nss_dp_data_plane_ctx *dpc);
++
+ static int __nss_data_plane_open(struct nss_dp_data_plane_ctx *dpc, uint32_t tx_desc_ring, uint32_t rx_desc_ring, uint32_t mode)
+ {
+-	struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
+-
+-	if (dp->notify_open) {
+-		return NSS_DP_SUCCESS;
+-	}
+-
+-	if (nss_phys_if_open(dp->nss_ctx, tx_desc_ring, rx_desc_ring, mode, dp->if_num, dp->bypass_nw_process) == NSS_TX_SUCCESS) {
+-		dp->notify_open = 1;
+-		return NSS_DP_SUCCESS;
+-	}
+-	return NSS_DP_FAILURE;
++    struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
++
++    if (dp->notify_open)
++        return NSS_DP_SUCCESS;
++    /* A prior timeout cannot authorise another DMA owner. */
++    if (dp->may_own_dma && __nss_data_plane_close(dpc))
++        return -EIO;
++    dp->may_own_dma = true;
++    if (nss_phys_if_open(dp->nss_ctx, tx_desc_ring, rx_desc_ring, mode,
++                        dp->if_num, dp->bypass_nw_process) != NSS_TX_SUCCESS)
++        return -EIO;
++    dp->notify_open = 1;
++    return NSS_DP_SUCCESS;
+ }
+ 
+ /*
+@@ -64,30 +75,15 @@
+  */
+ static int __nss_data_plane_close(struct nss_dp_data_plane_ctx *dpc)
+ {
+-	struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
+-
+-	if (!dp->notify_open) {
+-		return NSS_DP_SUCCESS;
+-	}
+-
+-	/*
+-	 * Drop the shadow before the message rather than after it succeeds.
+-	 * nss_phys_if_close() waits for the firmware's reply and reports
+-	 * failure when it times out, by which point the close itself has
+-	 * already been sent - so a failure here means the interface's state is
+-	 * unknown, not that it is still open. Leaving the shadow set would let
+-	 * the next open short-circuit and send nothing, and a firmware
+-	 * interface left shut under a host that believes it is open never
+-	 * transmits again until the box is rebooted. An open sent to an
+-	 * already-open interface costs one message; an open withheld from a
+-	 * closed one costs the port.
+-	 */
+-	dp->notify_open = 0;
+-
+-	if (nss_phys_if_close(dp->nss_ctx, dp->if_num) == NSS_TX_SUCCESS) {
+-		return NSS_DP_SUCCESS;
+-	}
+-	return NSS_DP_FAILURE;
++    struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
++
++    if (!dp->may_own_dma)
++        return NSS_DP_SUCCESS;
++    dp->notify_open = 0;
++    if (nss_phys_if_close(dp->nss_ctx, dp->if_num) != NSS_TX_SUCCESS)
++        return -EIO;
++    dp->may_own_dma = false;
++    return NSS_DP_SUCCESS;
+ }
+ 
+ /*
+@@ -155,10 +151,15 @@
+  */
+ static int __nss_data_plane_deinit(struct nss_dp_data_plane_ctx *dpc)
+ {
+-	/*
+-	 * TODO: Implement free up of NSS data plane resources
+-	 */
+-	return NSS_TX_SUCCESS;
++    struct nss_data_plane_param *dp = (struct nss_data_plane_param *)dpc;
++
++    if (dp->may_own_dma)
++        return -EBUSY;
++    if (dp->headroom_saved) {
++        dpc->dev->needed_headroom = dp->saved_headroom;
++        dp->headroom_saved = false;
++    }
++    return NSS_DP_SUCCESS;
+ }
+ 
+ /*
+@@ -252,87 +253,131 @@
+  */
+ static bool nss_data_plane_register_to_nss_dp(struct nss_ctx_instance *nss_ctx, int if_num)
+ {
+-	struct nss_data_plane_param *ndpp = &nss_data_plane_params[if_num];
+-	struct nss_top_instance *nss_top = nss_ctx->nss_top;
+-	struct net_device *netdev;
+-	bool is_open;
+-	int core;
+-
+-	netdev = nss_dp_get_netdev_by_nss_if_num(if_num);
+-	if (!netdev) {
+-		nss_info("%px: Platform don't have data plane%d enabled, \
+-				don't bring up nss_phys_if and don't register to nss-dp\n",
+-				nss_ctx, if_num);
+-		return false;
+-	}
+-
+-	is_open = nss_dp_is_in_open_state(netdev);
+-	ndpp->dpc.dev = netdev;
+-	ndpp->nss_ctx = nss_ctx;
+-	ndpp->if_num = if_num;
+-	ndpp->notify_open = 0;
+-	ndpp->features = 0;
+-
+-	/*
+-	 * Add data plane ops applicable to this SoC.
+-	 */
+-	nss_data_plane_hal_add_dp_ops(&dp_ops);
+-
+-	/*
+-	 * Check if NSS NW processing to be bypassed for this data plane
+-	 */
+-	if (nss_skip_nw_process) {
+-		ndpp->bypass_nw_process = 1;
+-	} else {
+-		ndpp->bypass_nw_process = 0;
+-	}
+-
+-	if (nss_dp_override_data_plane(netdev, &dp_ops, (struct nss_dp_data_plane_ctx *)ndpp) != NSS_DP_SUCCESS) {
+-		nss_info("%px: Override nss-dp data plane for port %dfailed\n", nss_ctx, if_num);
+-		return false;
+-	}
+-
+-	/*
+-	 * Setup the receive callback so that data pkts received form NSS-FW will
+-	 * be redirected to the nss-dp driver as we are overriding the data plane
+-	 */
+-	nss_top->phys_if_handler_id[if_num] = nss_ctx->id;
+-	nss_phys_if_register_handler(nss_ctx, if_num);
+-
+-	/*
+-	 * Packets recieved on physical interface can be exceptioned to HLOS
+-	 * from any NSS core so we need to register data plane for all
+-	 */
+-	for (core = 0; core < nss_top->num_nss; core++) {
+-		nss_core_register_subsys_dp(&nss_top->nss[core], if_num, nss_dp_receive, NULL, NULL, netdev, ndpp->features);
+-	}
+-
+-	/*
+-	 * Now we are registered and our side is ready, if the data plane was opened, ask it to start again
+-	 */
+-	if (is_open) {
+-		nss_dp_start_data_plane(netdev, (struct nss_dp_data_plane_ctx *)ndpp);
+-	}
+-	return true;
++    struct nss_data_plane_param *ndpp = &nss_data_plane_params[if_num];
++    struct nss_top_instance *nss_top = nss_ctx->nss_top;
++    struct net_device *netdev;
++    bool is_open;
++    int core, ret;
++
++    ASSERT_RTNL();
++    netdev = nss_dp_get_netdev_by_nss_if_num(if_num);
++    if (!netdev || ndpp->nss_ctx)
++        return false;
++    is_open = nss_dp_is_in_open_state(netdev);
++    ndpp->dpc.dev = netdev;
++    ndpp->nss_ctx = nss_ctx;
++    ndpp->if_num = if_num;
++    ndpp->notify_open = 0;
++    ndpp->may_own_dma = false;
++    ndpp->attached = false;
++    ndpp->features = 0;
++    ndpp->bypass_nw_process = !!nss_skip_nw_process;
++    nss_data_plane_hal_add_dp_ops(&dp_ops);
++    ret = nss_phys_if_register_handler(nss_ctx, if_num);
++    if (ret)
++        goto clear;
++    ret = nss_dp_override_data_plane(netdev, &dp_ops, &ndpp->dpc);
++    if (ret)
++        goto restore;
++    if (is_open && nss_dp_start_data_plane(netdev, &ndpp->dpc))
++        goto restore;
++
++    /* Publish only after an already-UP device's open was ACKed. */
++    nss_top->phys_if_handler_id[if_num] = nss_ctx->id;
++    for (core = 0; core < nss_top->num_nss; core++)
++        nss_core_register_subsys_dp(&nss_top->nss[core], if_num,
++                                   nss_dp_receive, NULL, NULL, netdev,
++                                   ndpp->features);
++    ndpp->attached = true;
++    return true;
++restore:
++    ret = nss_dp_restore_data_plane(netdev);
++    if (ret) {
++        nss_warning("%s: NSS ownership or host restart unresolved (%d); keeping context until recovery\n", netdev->name, ret);
++        return false;
++    }
++    nss_core_unregister_handler(nss_ctx, if_num);
++    synchronize_net();
++clear:
++    memset(ndpp, 0, sizeof(*ndpp));
++    return false;
+ }
+ 
+ /*
+  * nss_data_plane_unregister_from_nss_dp()
+  */
+-static void nss_data_plane_unregister_from_nss_dp(int if_num)
+-{
+-	/*
+-	 * Do any SoC specific un-registrations.
+-	 */
+-	nss_data_plane_hal_unregister(nss_data_plane_params[if_num].nss_ctx);
+-
+-	nss_dp_restore_data_plane(nss_data_plane_params[if_num].dpc.dev);
+-	nss_data_plane_params[if_num].dpc.dev = NULL;
+-	nss_data_plane_params[if_num].nss_ctx = NULL;
+-	nss_data_plane_params[if_num].if_num = 0;
+-	nss_data_plane_params[if_num].notify_open = 0;
+-	nss_data_plane_params[if_num].bypass_nw_process = 0;
+-}
++static int nss_data_plane_unregister_from_nss_dp(int if_num)
++{
++    struct nss_data_plane_param *dp = &nss_data_plane_params[if_num];
++    struct nss_top_instance *top;
++    int core, ret;
++
++    ASSERT_RTNL();
++    if (!dp->nss_ctx)
++        return 0;
++    top = dp->nss_ctx->nss_top;
++    ret = nss_dp_restore_data_plane(dp->dpc.dev);
++    if (ret)
++        return ret;
++    for (core = 0; core < top->num_nss; core++)
++        nss_core_unregister_subsys_dp(&top->nss[core], if_num);
++    nss_core_unregister_handler(dp->nss_ctx, if_num);
++    synchronize_net();
++    memset(dp, 0, sizeof(*dp));
++    return 0;
++}
++
++
++/* Process-context APIs. The owner must quiesce rules and hold RTNL. */
++int nss_data_plane_attach(struct net_device *dev)
++{
++    struct nss_ctx_instance *ctx = &nss_top_main.nss[0];
++    int i;
++
++    ASSERT_RTNL();
++    if (dev_net(dev) != &init_net || !netif_running(dev) ||
++        ctx->state != NSS_CORE_STATE_INITIALIZED)
++        return -EAGAIN;
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++        struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++        if (nss_dp_get_netdev_by_nss_if_num(i) != dev)
++            continue;
++        if (p->nss_ctx)
++            return p->attached && p->notify_open ? 0 : -EBUSY;
++        return nss_data_plane_register_to_nss_dp(ctx, i) ? 0 : -EIO;
++    }
++    return -ENODEV;
++}
++EXPORT_SYMBOL_GPL(nss_data_plane_attach);
++
++int nss_data_plane_detach(struct net_device *dev)
++{
++    int i;
++
++    ASSERT_RTNL();
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++)
++        if (nss_data_plane_params[i].dpc.dev == dev)
++            return nss_data_plane_unregister_from_nss_dp(i);
++    return 0;
++}
++EXPORT_SYMBOL_GPL(nss_data_plane_detach);
++
++int nss_data_plane_state(struct net_device *dev)
++{
++    int i;
++
++    ASSERT_RTNL();
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++        struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++        if (p->dpc.dev == dev && p->nss_ctx)
++            return p->attached && p->notify_open ?
++                   NSS_DATA_PLANE_READY : NSS_DATA_PLANE_UNCERTAIN;
++    }
++    return NSS_DATA_PLANE_HOST;
++}
++EXPORT_SYMBOL_GPL(nss_data_plane_state);
+ 
+ /*
+  * __nss_data_plane_register()
+@@ -346,6 +391,7 @@
+ 		return;
+ 	}
+ 
++	rtnl_lock();
+ 	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
+ 		if (!nss_data_plane_register_to_nss_dp(nss_ctx, i)) {
+ 			nss_warning("%px: Register data plane failed for data plane %d\n", nss_ctx, i);
+@@ -358,6 +404,7 @@
+ 	 * Do any SoC specific registrations.
+ 	 */
+ 	nss_data_plane_hal_register(nss_ctx);
++	rtnl_unlock();
+ }
+ 
+ /*
+@@ -365,23 +412,13 @@
+  */
+ static void __nss_data_plane_unregister(void)
+ {
+-	int i, core;
+-
+-	for (core = 0; core < nss_top_main.num_nss; core++) {
+-		for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
+-			if (nss_top_main.nss[core].subsys_dp_register[i].ndev) {
+-				/*
+-				 * The same interface is registered to every
+-				 * core's subsys_dp table; unregister from
+-				 * nss-dp only once or the second pass feeds
+-				 * a NULLed nss_ctx to the hal unregister.
+-				 */
+-				if (nss_data_plane_params[i].nss_ctx)
+-					nss_data_plane_unregister_from_nss_dp(i);
+-				nss_core_unregister_subsys_dp(&nss_top_main.nss[core], i);
+-			}
+-		}
+-	}
++    int i;
++
++    rtnl_lock();
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++)
++        if (nss_data_plane_unregister_from_nss_dp(i))
++            nss_warning("dataplane %d did not confirm shutdown\n", i);
++    rtnl_unlock();
+ }
+ 
+ /*
+--- a/nss_data_plane/hal/include/nss_data_plane_hal.h
++++ b/nss_data_plane/hal/include/nss_data_plane_hal.h
+@@ -41,6 +41,10 @@
+ 	int if_num;				/* physical interface number */
+ 	struct nss_ctx_instance *nss_ctx;	/* which nss core */
+ 	struct nss_dp_gmac_stats gmac_stats;	/* SoC specific stats for GMAC */
++	bool may_own_dma;
++	bool attached;
++	bool headroom_saved;
++	unsigned int saved_headroom;
+ 	int notify_open;			/* This data plane interface has been opened or not */
+ 	uint32_t features;			/* skb types supported by this interface */
+ 	uint32_t bypass_nw_process;		/* Do we want to bypass NW processing in NSS for this data plane? */
+--- a/exports/nss_api_if.h
++++ b/exports/nss_api_if.h
+@@ -48,6 +48,7 @@
+ #include "nss_shaper.h"
+ #include "nss_if.h"
+ #include "nss_phy_if.h"
++#include "nss_data_plane_api.h"
+ #include "nss_virt_if.h"
+ #include "nss_pppoe.h"
+ #include "nss_crypto.h"
+--- a/nss_tx_rx_common.h
++++ b/nss_tx_rx_common.h
+@@ -58,7 +58,7 @@
+ /*
+  * CB handlers for variour interfaces
+  */
+-void nss_phys_if_register_handler(struct nss_ctx_instance *nss_ctx, uint32_t if_num);
++int nss_phys_if_register_handler(struct nss_ctx_instance *nss_ctx, uint32_t if_num);
+ extern void nss_c2c_tx_register_handler(struct nss_ctx_instance *nss_ctx);
+ extern void nss_c2c_rx_register_handler(struct nss_ctx_instance *nss_ctx);
+ extern void nss_crypto_register_handler(void);
+--- a/nss_phys_if.c
++++ b/nss_phys_if.c
+@@ -341,7 +341,7 @@
+ /*
+  * nss_phys_if_register_handler()
+  */
+-void nss_phys_if_register_handler(struct nss_ctx_instance *nss_ctx, uint32_t if_num)
++int nss_phys_if_register_handler(struct nss_ctx_instance *nss_ctx, uint32_t if_num)
+ {
+ 	uint32_t ret;
+ 
+@@ -349,7 +349,7 @@
+ 
+ 	if (ret != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("Message handler FAILED to be registered for interface %d", if_num);
+-		return;
++		return -EEXIST;
+ 	}
+ 
+ 	if(!nss_phys_if_sem_init_done) {
+@@ -357,6 +357,7 @@
+ 		init_completion(&phif.complete);
+ 		nss_phys_if_sem_init_done = 1;
+ 	}
++	return 0;
+ }
+ 
+ /*
+--- /dev/null
++++ b/exports/nss_data_plane_api.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __NSS_DATA_PLANE_API_H
++#define __NSS_DATA_PLANE_API_H
++
++enum nss_data_plane_ownership {
++    NSS_DATA_PLANE_HOST,
++    NSS_DATA_PLANE_READY,
++    NSS_DATA_PLANE_UNCERTAIN,
++};
++
++/* Caller holds RTNL and quiesces all rules referring to this conduit.
++ * A failed detach preserves ownership and forbids freeing its callbacks.
++ */
++int nss_data_plane_attach(struct net_device *dev);
++int nss_data_plane_detach(struct net_device *dev);
++int nss_data_plane_state(struct net_device *dev);
++#endif

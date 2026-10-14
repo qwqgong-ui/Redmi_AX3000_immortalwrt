@@ -1,0 +1,1036 @@
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -8,6 +8,7 @@
+ 
+ #include "net/cfg80211.h"
+ #include <linux/workqueue.h>
++#include <linux/notifier.h>
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ #include <nss_api_if.h>
+ #include <nss_cmn.h>
+@@ -24,6 +25,8 @@
+ struct ath11k_ast_entry;
+ struct ath11k_sta;
+ struct ath11k_nss_peer_state;
++struct ath11k_nss_me_policy;
++struct br_mcast_flight;
+ struct ath11k_reo_queue;
+ enum ath11k_ast_entry_type;
+ struct hal_rx_mon_ppdu_info;
+@@ -215,11 +218,40 @@
+ 	u32 mdb_members;
+ 	u32 mdb_groups;
+ 	int mdb_result;
++	u8 mdb_build_stage;
++	u64 mdb_input_seq;
++	u32 mdb_input_hosts;
++	u32 mdb_input_keys;
++	bool mdb_querier4;
++	bool mdb_querier6;
++	u32 mdb_pin_peer;
++	int mdb_pin_result;
+ 	bool mdb_staged;
+ 	bool rx_mcbc_known;
+ 	u8 rx_mcbc;
+ 	atomic64_t tx_probe_group_da;
+ 	atomic64_t tx_probe_unicast_da;
++	atomic64_t tx_raw;
++	atomic64_t tx_copies;
++	atomic64_t tx_contract_drop;
++	atomic64_t tx_copy_drop;
++};
++
++/* Lifetime state is separate from the resettable control diagnostics. */
++struct ath11k_nss_me_auto {
++	struct delayed_work work;
++	struct notifier_block mdb;
++	struct ath11k_vif *arvif;
++	struct ath11k_nss_me_policy *policy;
++	struct br_mcast_flight *flight;
++	u64 generation;
++	bool initialized;
++	bool registered;
++	bool running;
++	bool closing;
++	bool active;
++	bool redirect;
++	bool retained;
+ };
+ 
+ /* Structure to hold the vif related info for nss offload support */
+@@ -242,6 +274,7 @@
+ 	bool format_failed;
+ 	/* ME control has its own state; it never changes packet-format gates. */
+ 	struct ath11k_nss_me_state me;
++	struct ath11k_nss_me_auto me_auto;
+ 	/* AP_VLAN vif context obtained on ext vdev register */
+ 	void* ctx;
+ 	/* Parent AP vif stored in case of AP_VLAN vif */
+@@ -358,6 +391,12 @@
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ void ath11k_nss_me_debugfs_register(struct ath11k *ar);
+ int ath11k_nss_me_host_rx(struct ath11k_vif *arvif);
++void ath11k_nss_me_init(struct ath11k_vif *arvif);
++void ath11k_nss_me_start(struct ath11k_vif *arvif);
++void ath11k_nss_me_stop(struct ath11k_vif *arvif, bool destroy);
++void ath11k_nss_me_dirty(struct ath11k_vif *arvif);
++void ath11k_nss_me_dirty_locked(struct ath11k_vif *arvif);
++int ath11k_nss_me_tx(struct ath11k_vif *arvif, struct sk_buff *skb);
+ void ath11k_nss_me_tx_observe(struct ath11k_vif *arvif,
+ 			    const struct sk_buff *skb, int encap_type);
+ void ath11k_nss_reoq_init(struct ath11k_base *ab);
+@@ -443,6 +482,11 @@
+ 					struct nss_wifi_mesh_rate_limit_config *nss_exc_cfg);
+ #endif
+ #else
++static inline void ath11k_nss_me_init(struct ath11k_vif *arvif) {}
++static inline void ath11k_nss_me_start(struct ath11k_vif *arvif) {}
++static inline void ath11k_nss_me_stop(struct ath11k_vif *arvif, bool destroy) {}
++static inline void ath11k_nss_me_dirty(struct ath11k_vif *arvif) {}
++static inline void ath11k_nss_me_dirty_locked(struct ath11k_vif *arvif) {}
+ static inline void ath11k_nss_reoq_init(struct ath11k_base *ab) {}
+ static inline void ath11k_nss_reoq_start(struct ath11k_base *ab) {}
+ static inline void ath11k_nss_reoq_stop(struct ath11k_base *ab) {}
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -484,6 +484,8 @@
+ 	struct ath11k_nss_peer_state *state = peer->nss.state;
+ 
+ 	lockdep_assert_held(&ar->ab->base_lock);
++	if (peer->vif)
++		ath11k_nss_me_dirty_locked(ath11k_vif_to_arvif(peer->vif));
+ 	if (state) {
+ 		/* A spontaneous WMI unmap must not erase firmware-owned DMA or
+ 		 * the independent completion that a process-context waiter uses.
+@@ -2890,6 +2892,7 @@
+ 	int encap_type = ath11k_dp_tx_get_encap_type(arvif, skb);
+ 	struct ath11k_soc_dp_stats *soc_stats = &ar->ab->soc_stats;
+ 	char dump_msg[100] = {0};
++	int ret;
+ 
+ 	if (ath11k_nss_vdev_key_failed(arvif))
+ 		return -ESHUTDOWN;
+@@ -2904,6 +2907,9 @@
+ 
+ 	if (encap_type == HAL_TCL_ENCAP_TYPE_ETHERNET) {
+ 		ath11k_nss_me_tx_observe(arvif, skb, encap_type);
++		ret = ath11k_nss_me_tx(arvif, skb);
++		if (ret != -EOPNOTSUPP)
++			return ret;
+ 		goto send;
+ 	}
+ 
+@@ -3705,6 +3711,7 @@
+ 
+ 	arvif->nss.created = true;
+ 	memset(&arvif->nss.me, 0, sizeof(arvif->nss.me));
++	ath11k_nss_me_init(arvif);
+ 	WRITE_ONCE(arvif->nss.format_ready, false);
+ 	WRITE_ONCE(arvif->nss.format_failed, false);
+ 	/* Only a newly allocated and configured VDEV clears a partial install.
+@@ -3738,9 +3745,12 @@
+ 	if (!arvif->nss.created)
+ 		return;
+ 
++	ath11k_nss_me_stop(arvif, true);
+ 	ath11k_nss_vdev_unregister(arvif);
+ 
+-	ath11k_nss_vdev_free(arvif);
++	/* An unresolved reader still refers to firmware's table. */
++	if (!arvif->nss.me_auto.retained)
++		ath11k_nss_vdev_free(arvif);
+ 
+ 	arvif->nss.created = false;
+ }
+@@ -3799,6 +3809,7 @@
+ 	}
+ 
+ 	ath11k_dbg(ar->ab, ATH11K_DBG_NSS, "nss vdev up tx msg success\n");
++	ath11k_nss_me_start(arvif);
+ 
+ 	if (arvif->vif->type == NL80211_IFTYPE_AP)
+ 		list_for_each_entry_safe(ap_vlan_arvif, tmp,
+@@ -3824,6 +3835,7 @@
+ 	/* Monitor interface is not offloaded to nss */
+ 	if (arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)
+ 		return 0;
++	ath11k_nss_me_stop(arvif, false);
+ 
+ #ifdef CPTCFG_ATH11K_NSS_MESH_SUPPORT
+ 	if (arvif->vif->type == NL80211_IFTYPE_MESH_POINT) {
+--- a/drivers/net/wireless/ath/ath11k/nss_me.c
++++ b/drivers/net/wireless/ath/ath11k/nss_me.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Clear
+-/* ACK-bound ME control. MDB publication and TX fallback are separate work. */
++/* Native bridge policy, ACK-bound ME tables and exact unicast fallback. */
+ #include <linux/debugfs.h>
+ #include <linux/etherdevice.h>
+ #include <linux/inet.h>
+@@ -15,6 +15,7 @@
+ #include <net/addrconf.h>
+ 
+ #include "core.h"
++#include "debug.h"
+ #include "debugfs.h"
+ #include "nss.h"
+ #include "peer.h"
+@@ -242,6 +243,7 @@
+ 	ip_eth_mc_map(*ip, mac);
+ 	return 0;
+ }
++#endif
+ 
+ #if IS_REACHABLE(CONFIG_BRIDGE) && IS_ENABLED(CONFIG_BRIDGE_IGMP_SNOOPING)
+ struct ath11k_nss_me_pin {
+@@ -249,6 +251,306 @@
+ 	struct ath11k_nss_peer_state *state;
+ 	u32 peer_id;
+ };
++
++struct ath11k_nss_me_policy {
++	struct br_mcast_offload_lookup_snapshot snapshot;
++	struct ath11k_nss_me_member *members;
++	struct ath11k_nss_me_pin *pins;
++	u64 cookie;
++	u32 count;
++};
++
++static atomic64_t ath11k_nss_me_cookie = ATOMIC64_INIT(0);
++
++static void ath11k_nss_me_policy_free(struct ath11k_vif *arvif,
++				    struct ath11k_nss_me_policy *policy)
++{
++	u32 i;
++
++	if (!policy)
++		return;
++	if (policy->pins)
++		for (i = 0; i < policy->count; i++) {
++			if (policy->pins[i].peer)
++				ath11k_peer_put(arvif->ar, policy->pins[i].peer);
++			ath11k_nss_key_put(policy->pins[i].state);
++		}
++	kvfree(policy->pins);
++	kvfree(policy->members);
++	kfree(policy);
++}
++
++/* mac80211's Ethernet TX entry has data at the Ethernet header. Extensions
++ * survive NAT/TC rewriting, so ownership alone is not packet identity.
++ */
++static bool ath11k_nss_me_packet_same(const struct sk_buff *skb,
++				     const struct br_mcast_packet *packet)
++{
++	struct ethhdr eth;
++	struct iphdr ip4;
++	struct ipv6hdr ip6;
++
++	if (skb_copy_bits(skb, 0, &eth, sizeof(eth)) ||
++	    eth.h_proto != packet->proto ||
++	    !ether_addr_equal(eth.h_dest, packet->group_da) ||
++	    !ether_addr_equal(eth.h_source, packet->source_mac))
++		return false;
++	if (eth.h_proto == htons(ETH_P_IP)) {
++		if (skb_copy_bits(skb, ETH_HLEN, &ip4, sizeof(ip4)) ||
++		    ip4.version != 4 || ip4.ihl < 5)
++			return false;
++		return !memcmp(packet->source_ip, &ip4.saddr, 4) &&
++		       !memcmp(packet->group_ip, &ip4.daddr, 4);
++	}
++	if (eth.h_proto == htons(ETH_P_IPV6)) {
++		if (skb_copy_bits(skb, ETH_HLEN, &ip6, sizeof(ip6)) || ip6.version != 6)
++			return false;
++		return !memcmp(packet->source_ip, &ip6.saddr, 16) &&
++		       !memcmp(packet->group_ip, &ip6.daddr, 16);
++	}
++	return true;
++}
++
++static bool ath11k_nss_me_member_accept(const struct ath11k_nss_me_member *member,
++				      const struct br_mcast_packet *packet)
++{
++	u32 i, len = packet->proto == htons(ETH_P_IP) ? 4 : 16;
++	bool listed = false;
++
++	if (member->group.proto != packet->proto ||
++	    memcmp(&member->group.dst, packet->group_ip, len))
++		return false;
++	for (i = 0; i < member->source_count; i++)
++		listed |= !memcmp(member->source[i], packet->source_ip, len);
++	return member->mode == 1 ? listed : member->mode == 2 && !listed;
++}
++
++/* Compare both directions. Hardware must not add a recipient, omit one, or
++ * apply its source-MAC suppression to a native recipient.
++ */
++static bool ath11k_nss_me_targets_same(const struct ath11k_nss_me_policy *policy,
++				      const struct br_mcast_packet *packet)
++{
++	u32 i, j, selected = 0;
++
++	if (packet->action != BR_MCAST_PACKET_HOSTS ||
++	    packet->mcu_cookie != policy->cookie || packet->seq != policy->snapshot.seq ||
++	    (packet->proto != htons(ETH_P_IP) && packet->proto != htons(ETH_P_IPV6)))
++		return false;
++	for (i = 0; i < policy->count; i++) {
++		if (!ath11k_nss_me_member_accept(&policy->members[i], packet))
++			continue;
++		if (ether_addr_equal(policy->members[i].mac, packet->source_mac))
++			return false;
++		for (j = 0; j < packet->count; j++)
++			if (ether_addr_equal(policy->members[i].mac, packet->mac[j]))
++				break;
++		if (j == packet->count)
++			return false;
++		selected++;
++	}
++	if (selected != packet->count)
++		return false;
++	for (i = 0; i < packet->count; i++) {
++		for (j = 0; j < policy->count; j++)
++			if (ath11k_nss_me_member_accept(&policy->members[j], packet) &&
++			    ether_addr_equal(policy->members[j].mac, packet->mac[i]))
++				break;
++		if (j == policy->count)
++			return false;
++	}
++	return true;
++}
++
++/* This shape excludes firmware's segmentation, virtual-buffer and odd-data
++ * replacement paths before ME. Active extensions also prohibit NSS reuse.
++ * This is a table-reader barrier, not an over-the-air completion barrier.
++ */
++static bool ath11k_nss_me_raw_shape(struct ath11k_vif *arvif,
++				  const struct sk_buff *skb)
++{
++	struct iphdr ip4;
++	struct ipv6hdr ip6;
++	struct ethhdr eth;
++
++	if (arvif->ar->ab->nss.debug_mode || ieee80211_vif_to_wdev(arvif->vif)->use_4addr ||
++	    arvif->nss.encap != HAL_TCL_ENCAP_TYPE_ETHERNET ||
++	    arvif->nss.decap != ATH11K_HW_TXRX_ETHERNET ||
++	    skb_is_nonlinear(skb) || skb_is_gso(skb) || skb_vlan_tag_present(skb) ||
++	    skb->ip_summed != CHECKSUM_NONE || ((unsigned long)skb->data & 1) ||
++	    skb->len > ETH_HLEN + 1500 || skb_copy_bits(skb, 0, &eth, sizeof(eth)))
++		return false;
++	if (eth.h_proto == htons(ETH_P_IP))
++		return !skb_copy_bits(skb, ETH_HLEN, &ip4, sizeof(ip4)) &&
++		       ip4.version == 4 && ip4.ihl == 5 &&
++		       !(ntohs(ip4.frag_off) & (IP_MF | IP_OFFSET)) &&
++		       skb->len >= ETH_HLEN + ntohs(ip4.tot_len);
++	/* Exclude extension/fragment preprocessing in the firmware's RX parser. */
++	if (eth.h_proto == htons(ETH_P_IPV6))
++		return !skb_copy_bits(skb, ETH_HLEN, &ip6, sizeof(ip6)) &&
++		       ip6.version == 6 && (ip6.nexthdr == IPPROTO_UDP || ip6.nexthdr == IPPROTO_TCP) &&
++		       skb->len >= ETH_HLEN + sizeof(ip6) + ntohs(ip6.payload_len);
++	return false;
++}
++
++struct ath11k_nss_me_target {
++	struct ath11k_peer *peer;
++	struct ath11k_nss_peer_state *state;
++	u8 mac[ETH_ALEN];
++};
++
++static int ath11k_nss_me_fallback(struct ath11k_vif *arvif, struct sk_buff *skb,
++				 const struct br_mcast_packet *packet)
++{
++	struct ath11k_base *ab = arvif->ar->ab;
++	struct ath11k_nss_me_target *targets;
++	struct ath11k_peer *peer;
++	u32 count = 0, capacity = 0, i;
++	int ret;
++
++	spin_lock_bh(&ab->base_lock);
++	ret = ath11k_nss_me_admit(arvif);
++	if (!ret && (!arvif->nss.me_auto.running || !arvif->is_up))
++		ret = -ESHUTDOWN;
++	if (ret)
++		goto unlock;
++	if (packet && packet->action == BR_MCAST_PACKET_HOSTS)
++		capacity = packet->count;
++	else
++		list_for_each_entry(peer, &arvif->ar->peers, list)
++			if (peer->vif == arvif->vif && peer->sta && peer->is_authorized)
++				capacity++;
++	targets = kcalloc(max_t(u32, capacity, 1), sizeof(*targets), GFP_ATOMIC);
++	if (!targets) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	list_for_each_entry(peer, &arvif->ar->peers, list) {
++		struct ath11k_nss_peer_state *state;
++
++		if (peer->vif != arvif->vif || !peer->sta || !peer->is_authorized)
++			continue;
++		if (packet && packet->action == BR_MCAST_PACKET_HOSTS) {
++			for (i = 0; i < packet->count; i++)
++				if (ether_addr_equal(peer->addr, packet->mac[i]))
++					break;
++			if (i == packet->count)
++				continue;
++		}
++		state = ath11k_nss_key_get(arvif->ar, peer);
++		if (IS_ERR_OR_NULL(state))
++			continue;
++		if (WARN_ON_ONCE(count == capacity)) {
++			ath11k_nss_key_put(state);
++			break;
++		}
++		ath11k_peer_get(peer);
++		targets[count].peer = peer;
++		targets[count].state = state;
++		ether_addr_copy(targets[count++].mac, peer->addr);
++	}
++	spin_unlock_bh(&ab->base_lock);
++	for (i = 0; i < count; i++) {
++		struct sk_buff *copy = skb_copy(skb, GFP_ATOMIC);
++		nss_tx_status_t status = NSS_TX_FAILURE;
++
++		if (copy) {
++			br_mcast_offload_packet_clear(copy);
++			ether_addr_copy(copy->data, targets[i].mac);
++			IEEE80211_SKB_CB(copy)->flags &= ~IEEE80211_TX_CTL_REQ_TX_STATUS;
++			ATH11K_SKB_CB(copy)->flags &= ~ATH11K_SKB_TX_STATUS;
++			spin_lock_bh(&ab->base_lock);
++			ret = ath11k_nss_me_admit(arvif);
++			if (!ret)
++				ret = ath11k_nss_key_check(arvif->ar, targets[i].peer, targets[i].state);
++			if (!ret && targets[i].peer->is_authorized && targets[i].peer->vif == arvif->vif)
++				status = nss_wifi_vdev_tx_buf(arvif->ar->nss.ctx, copy, arvif->nss.if_num);
++			spin_unlock_bh(&ab->base_lock);
++			if (status != NSS_TX_SUCCESS)
++				ieee80211_free_txskb(arvif->ar->hw, copy);
++		}
++		if (status == NSS_TX_SUCCESS)
++			atomic64_inc(&arvif->nss.me.tx_copies);
++		else
++			atomic64_inc(&arvif->nss.me.tx_copy_drop);
++		ath11k_peer_put(arvif->ar, targets[i].peer);
++		ath11k_nss_key_put(targets[i].state);
++	}
++	kfree(targets);
++	ieee80211_free_txskb(arvif->ar->hw, skb);
++	return 0;
++unlock:
++	spin_unlock_bh(&ab->base_lock);
++	return ret;
++}
++
++int ath11k_nss_me_tx(struct ath11k_vif *arvif, struct sk_buff *skb)
++{
++	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
++	struct ath11k_base *ab = arvif->ar->ab;
++	struct wireless_dev *wdev = ieee80211_vif_to_wdev(arvif->vif);
++	const struct br_mcast_packet *packet;
++	struct br_mcast_packet_ext *slot;
++	struct ethhdr eth;
++	bool raw = false;
++	u32 i;
++	int ret;
++
++	if (arvif->vif->type != NL80211_IFTYPE_AP)
++		return -EOPNOTSUPP;
++	ret = br_mcast_offload_packet_get(wdev->netdev, skb, &packet);
++	if (ret < 0 || (packet && !ath11k_nss_me_packet_same(skb, packet))) {
++		atomic64_inc(&arvif->nss.me.tx_contract_drop);
++		return ret < 0 ? ret : -ESTALE;
++	}
++	if (skb_copy_bits(skb, 0, &eth, sizeof(eth)))
++		return -EINVAL;
++	if (!is_multicast_ether_addr(eth.h_dest) ||
++	    (!READ_ONCE(auto_me->redirect) && (!packet || packet->action != BR_MCAST_PACKET_HOSTS))) {
++		br_mcast_offload_packet_clear(skb);
++		return -EOPNOTSUPP;
++	}
++	if (!skb_is_gso(skb)) {
++		if (skb->ip_summed == CHECKSUM_PARTIAL) {
++			if (skb_checksum_help(skb))
++				return ath11k_nss_me_fallback(arvif, skb, packet);
++		} else {
++			skb->ip_summed = CHECKSUM_NONE;
++		}
++	}
++	spin_lock_bh(&ab->base_lock);
++	if (packet && arvif->is_up && auto_me->active && auto_me->policy && auto_me->flight &&
++	    !arvif->nss.me.uncertain &&
++	    !ath11k_nss_me_admit(arvif) && ath11k_nss_me_raw_shape(arvif, skb) &&
++	    ath11k_nss_me_targets_same(auto_me->policy, packet)) {
++		raw = true;
++		for (i = 0; i < auto_me->policy->count; i++)
++			if (ath11k_nss_key_check(arvif->ar, auto_me->policy->pins[i].peer,
++						auto_me->policy->pins[i].state) ||
++			    !auto_me->policy->pins[i].peer->is_authorized) {
++				raw = false;
++				break;
++			}
++	}
++	if (raw) {
++		slot = skb_ext_add(skb, SKB_EXT_BR_MCAST_PACKET);
++		if (!slot) {
++			raw = false;
++		} else {
++			/* Increment and final enqueue are serialized with withdrawal. */
++			br_mcast_flight_drop(slot->flight);
++			br_mcast_flight_hold(auto_me->flight);
++			slot->flight = auto_me->flight;
++			ret = nss_wifi_vdev_tx_buf(arvif->ar->nss.ctx, skb, arvif->nss.if_num);
++			if (ret == NSS_TX_SUCCESS)
++				atomic64_inc(&arvif->nss.me.tx_raw);
++		}
++	}
++	spin_unlock_bh(&ab->base_lock);
++	if (raw)
++		return ret;
++	return ath11k_nss_me_fallback(arvif, skb, packet);
++}
+ 
+ static int ath11k_nss_me_recheck_plan(struct ath11k_vif *arvif,
+ 		struct ath11k_nss_me_pin pins[], u32 count,
+@@ -344,6 +646,379 @@
+ 	return 0;
+ }
+ 
++static struct ath11k_nss_me_policy *ath11k_nss_me_policy_build(struct ath11k_vif *arvif)
++{
++	struct ath11k_base *ab = arvif->ar->ab;
++	struct ath11k_nss_me_state *me = &arvif->nss.me;
++	struct wireless_dev *wdev = ieee80211_vif_to_wdev(arvif->vif);
++	struct br_mcast_offload_host *hosts = NULL;
++	struct br_ip *keys = NULL;
++	struct ath11k_nss_me_policy *policy;
++	u32 host_capacity, key_capacity, i;
++	int ret;
++
++	me->mdb_build_stage = 1;
++	me->mdb_input_seq = 0;
++	me->mdb_input_hosts = 0;
++	me->mdb_input_keys = 0;
++	me->mdb_querier4 = false;
++	me->mdb_querier6 = false;
++	me->mdb_pin_peer = U32_MAX;
++	me->mdb_pin_result = 0;
++	policy = kzalloc(sizeof(*policy), GFP_KERNEL);
++	if (!policy)
++		return ERR_PTR(-ENOMEM);
++	ret = br_mcast_offload_snapshot_lookups(wdev->netdev, NULL, 0, NULL, 0, &policy->snapshot);
++	me->mdb_input_seq = policy->snapshot.seq;
++	me->mdb_input_hosts = policy->snapshot.host_count;
++	me->mdb_input_keys = policy->snapshot.key_count;
++	me->mdb_querier4 = policy->snapshot.querier_ipv4;
++	me->mdb_querier6 = policy->snapshot.querier_ipv6;
++	if (ret && ret != -E2BIG)
++		goto fail;
++	host_capacity = policy->snapshot.host_count;
++	key_capacity = policy->snapshot.key_count;
++	if (!host_capacity || host_capacity > 2048 || key_capacity > 8192) {
++		ret = host_capacity ? -E2BIG : -ENODATA;
++		goto fail;
++	}
++	hosts = kvcalloc(host_capacity, sizeof(*hosts), GFP_KERNEL);
++	keys = kvcalloc(max_t(u32, key_capacity, 1), sizeof(*keys), GFP_KERNEL);
++	policy->members = kvcalloc(host_capacity, sizeof(*policy->members), GFP_KERNEL);
++	if (!hosts || !keys || !policy->members) {
++		ret = -ENOMEM;
++		goto fail;
++	}
++	ret = br_mcast_offload_snapshot_lookups(wdev->netdev, hosts, host_capacity,
++					      keys, key_capacity, &policy->snapshot);
++	me->mdb_input_seq = policy->snapshot.seq;
++	me->mdb_input_hosts = policy->snapshot.host_count;
++	me->mdb_input_keys = policy->snapshot.key_count;
++	me->mdb_querier4 = policy->snapshot.querier_ipv4;
++	me->mdb_querier6 = policy->snapshot.querier_ipv6;
++	if (ret)
++		goto fail;
++	me->mdb_build_stage = 2;
++	ret = ath11k_nss_me_plan_build(hosts, keys, &policy->snapshot,
++				     policy->members, host_capacity, &policy->count);
++	if (ret)
++		goto fail;
++	if (!policy->count) {
++		ret = -ENODATA;
++		goto fail;
++	}
++	policy->pins = kvcalloc(policy->count, sizeof(*policy->pins), GFP_KERNEL);
++	if (!policy->pins) {
++		ret = -ENOMEM;
++		goto fail;
++	}
++	for (i = 0; i < policy->count; i++) {
++		struct ath11k_peer *peer;
++		struct ath11k_nss_peer_state *state;
++
++		me->mdb_build_stage = 3;
++		spin_lock_bh(&ab->base_lock);
++		ret = ath11k_nss_me_admit(arvif);
++		peer = ret ? NULL : ath11k_peer_find(arvif->ar, arvif->vdev_id, policy->members[i].mac);
++		if (!ret && (!peer || !peer->sta || !peer->is_authorized || peer->vif != arvif->vif))
++			ret = -ENOENT;
++		if (!ret) {
++			me->mdb_pin_peer = peer->peer_id;
++			state = ath11k_nss_key_get(arvif->ar, peer);
++			if (IS_ERR_OR_NULL(state)) {
++				ret = state ? PTR_ERR(state) : -ESHUTDOWN;
++			} else {
++				ath11k_peer_get(peer);
++				policy->pins[i].peer = peer;
++				policy->pins[i].state = state;
++				policy->pins[i].peer_id = peer->peer_id;
++			}
++		}
++		me->mdb_pin_result = ret;
++		spin_unlock_bh(&ab->base_lock);
++		if (ret)
++			goto fail;
++	}
++	policy->cookie = atomic64_inc_return(&ath11k_nss_me_cookie);
++	me->mdb_build_stage = 0;
++	kvfree(keys);
++	kvfree(hosts);
++	return policy;
++fail:
++	kvfree(keys);
++	kvfree(hosts);
++	ath11k_nss_me_policy_free(arvif, policy);
++	return ERR_PTR(ret);
++}
++
++void ath11k_nss_me_dirty_locked(struct ath11k_vif *arvif)
++{
++	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
++
++	lockdep_assert_held(&arvif->ar->ab->base_lock);
++	if (!auto_me->initialized || auto_me->closing)
++		return;
++	auto_me->active = false;
++	auto_me->generation++;
++	if (auto_me->running)
++		mod_delayed_work(system_wq, &auto_me->work, msecs_to_jiffies(100));
++}
++
++void ath11k_nss_me_dirty(struct ath11k_vif *arvif)
++{
++	spin_lock_bh(&arvif->ar->ab->base_lock);
++	ath11k_nss_me_dirty_locked(arvif);
++	spin_unlock_bh(&arvif->ar->ab->base_lock);
++}
++
++static int ath11k_nss_me_notify(struct notifier_block *nb, unsigned long event, void *data)
++{
++	struct ath11k_nss_me_auto *auto_me = container_of(nb, struct ath11k_nss_me_auto, mdb);
++
++	/* The notifier runs under the bridge multicast lock. Retain no bridge
++	 * pointer and never snapshot or submit/wait for firmware here.
++	 */
++	ath11k_nss_me_dirty(auto_me->arvif);
++	return NOTIFY_DONE;
++}
++
++static void ath11k_nss_me_work(struct work_struct *work)
++{
++	struct ath11k_nss_me_auto *auto_me = container_of(to_delayed_work(work),
++							      struct ath11k_nss_me_auto, work);
++	struct ath11k_vif *arvif = auto_me->arvif;
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_nss_me_state *me = &arvif->nss.me;
++	struct wireless_dev *wdev = ieee80211_vif_to_wdev(arvif->vif);
++	struct ath11k_nss_me_policy *policy = NULL, *old;
++	struct nss_wifi_vdev_msg *msg = NULL;
++	u64 generation;
++	u32 i, groups = 0;
++	int ret = 0;
++
++	/* remove/stop holds conf_mutex while canceling work. Never wait for it. */
++	if (!mutex_trylock(&ar->conf_mutex))
++		goto requeue;
++	spin_lock_bh(&ab->base_lock);
++	if (!auto_me->running || auto_me->closing || !arvif->is_up ||
++	    arvif->nss.encap != HAL_TCL_ENCAP_TYPE_ETHERNET ||
++	    arvif->nss.decap != ATH11K_HW_TXRX_ETHERNET ||
++	    !me->rx_mcbc_known || me->rx_mcbc != 1) {
++		spin_unlock_bh(&ab->base_lock);
++		goto unlock;
++	}
++	generation = auto_me->generation;
++	old = auto_me->policy;
++	spin_unlock_bh(&ab->base_lock);
++	if (old && READ_ONCE(auto_me->active) &&
++	    !ath11k_nss_me_recheck_plan(arvif, old->pins, old->count, &old->snapshot))
++		goto unlock;
++	spin_lock_bh(&ab->base_lock);
++	auto_me->active = false;
++	spin_unlock_bh(&ab->base_lock);
++	br_mcast_offload_set_mcu(wdev->netdev, 0, 0, false);
++	/* All RAW enqueues counted under base_lock precede withdrawal. COW/free
++	 * of those independent extension references drives this exact counter.
++	 */
++	if (!wait_event_timeout(auto_me->flight->drained,
++				!atomic_read(&auto_me->flight->pending), msecs_to_jiffies(3000))) {
++		ret = -ETIMEDOUT;
++		goto finish;
++	}
++	spin_lock_bh(&ab->base_lock);
++	old = auto_me->policy;
++	auto_me->policy = NULL;
++	spin_unlock_bh(&ab->base_lock);
++	ath11k_nss_me_policy_free(arvif, old);
++	policy = ath11k_nss_me_policy_build(arvif);
++	if (IS_ERR(policy)) {
++		ret = PTR_ERR(policy);
++		policy = NULL;
++		goto finish;
++	}
++	if (!br_mcast_offload_mcu_capable(wdev->netdev)) {
++		ret = -EOPNOTSUPP;
++		goto finish;
++	}
++	if (me->uncertain) {
++		ret = -EUCLEAN;
++		goto finish;
++	}
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++	/* Adopted mode5 state has the same fallback obligations as a cold enable. */
++	spin_lock_bh(&ab->base_lock);
++	auto_me->redirect = true;
++	spin_unlock_bh(&ab->base_lock);
++	if (!me->mode_known) {
++		/* Sticky until this VDEV is destroyed, even after an ambiguous ACK:
++		 * ordinary group frames must never escape into GTK/empty ME fallback.
++		 */
++		msg->msg.vdev_cmd.cmd = NSS_WIFI_VDEV_ENABLE_ME_CMD;
++		msg->msg.vdev_cmd.value = 5;
++		ret = ath11k_nss_me_exchange(arvif, msg, NSS_WIFI_VDEV_INTERFACE_CMD_MSG,
++					    sizeof(msg->msg.vdev_cmd), NULL, NULL);
++		if (ret)
++			goto finish;
++		me->mode = 5;
++		me->global_mode = 5;
++		me->mode_known = true;
++		me->table_known = true;
++		me->table = 0;
++	}
++	if (me->mode != 5 || !me->table_known) {
++		ret = -EUCLEAN;
++		goto finish;
++	}
++	/* MP12.2 commands write 1-selector. Never disable or re-enable ME here;
++	 * re-enabling would force the data selector to zero.
++	 */
++	ret = ath11k_nss_me_fill_table(arvif, policy->members, policy->pins, policy->count, msg);
++	if (ret)
++		goto finish;
++	ret = ath11k_nss_me_recheck_plan(arvif, policy->pins, policy->count, &policy->snapshot);
++	if (ret)
++		goto finish;
++	memset(msg, 0, sizeof(*msg));
++	ret = ath11k_nss_me_exchange(arvif, msg, NSS_WIFI_VDEV_SNOOPLIST_TOGGLE_MSG, 0, NULL, NULL);
++	if (ret)
++		goto finish;
++	me->table ^= 1;
++	ret = ath11k_nss_me_recheck_plan(arvif, policy->pins, policy->count, &policy->snapshot);
++	if (ret)
++		goto finish;
++	ret = br_mcast_offload_commit_mcu(wdev->netdev, &policy->snapshot, policy->cookie);
++	if (ret)
++		goto finish;
++	spin_lock_bh(&ab->base_lock);
++	ret = ath11k_nss_me_admit(arvif);
++	if (!ret && (generation != auto_me->generation || !auto_me->running || auto_me->closing))
++		ret = -ESTALE;
++	if (!ret) {
++		auto_me->policy = policy;
++		auto_me->active = true;
++		me->mdb_seq = policy->snapshot.seq;
++		me->mdb_members = policy->count;
++		me->mdb_staged = true;
++		for (i = 0; i < policy->count; i++) {
++			u32 j;
++			for (j = 0; j < i; j++)
++				if (ath11k_nss_me_same_group(&policy->members[i].group, &policy->members[j].group))
++					break;
++			groups += j == i;
++		}
++		me->mdb_groups = groups;
++		policy = NULL;
++	}
++	spin_unlock_bh(&ab->base_lock);
++finish:
++	if (ret) {
++		me->mdb_staged = false;
++		br_mcast_offload_set_mcu(wdev->netdev, 0, 0, false);
++	}
++	me->mdb_result = ret;
++	kfree(msg);
++	ath11k_nss_me_policy_free(arvif, policy);
++unlock:
++	mutex_unlock(&ar->conf_mutex);
++requeue:
++	spin_lock_bh(&ab->base_lock);
++	if (auto_me->initialized && auto_me->running && !auto_me->closing)
++		mod_delayed_work(system_wq, &auto_me->work, HZ);
++	spin_unlock_bh(&ab->base_lock);
++}
++
++void ath11k_nss_me_init(struct ath11k_vif *arvif)
++{
++	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
++
++	lockdep_assert_held(&arvif->ar->conf_mutex);
++	if (arvif->vif->type != NL80211_IFTYPE_AP || auto_me->initialized ||
++	    (arvif->ar->ab->hw_rev != ATH11K_HW_IPQ5018_HW10 &&
++	     arvif->ar->ab->hw_rev != ATH11K_HW_QCN6122_HW10))
++		return;
++	memset(auto_me, 0, sizeof(*auto_me));
++	auto_me->flight = kzalloc(sizeof(*auto_me->flight), GFP_KERNEL);
++	if (!auto_me->flight)
++		return;
++	refcount_set(&auto_me->flight->refs, 1);
++	atomic_set(&auto_me->flight->pending, 0);
++	init_waitqueue_head(&auto_me->flight->drained);
++	auto_me->arvif = arvif;
++	INIT_DELAYED_WORK(&auto_me->work, ath11k_nss_me_work);
++	auto_me->mdb.notifier_call = ath11k_nss_me_notify;
++	if (br_mcast_offload_mdb_register_notify(&auto_me->mdb)) {
++		br_mcast_flight_put(auto_me->flight);
++		auto_me->flight = NULL;
++		return;
++	}
++	auto_me->registered = true;
++	spin_lock_bh(&arvif->ar->ab->base_lock);
++	auto_me->initialized = true;
++	spin_unlock_bh(&arvif->ar->ab->base_lock);
++}
++
++void ath11k_nss_me_start(struct ath11k_vif *arvif)
++{
++	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
++
++	lockdep_assert_held(&arvif->ar->conf_mutex);
++	ath11k_nss_me_init(arvif);
++	spin_lock_bh(&arvif->ar->ab->base_lock);
++	if (auto_me->initialized && !auto_me->closing && !auto_me->retained) {
++		auto_me->running = true;
++		ath11k_nss_me_dirty_locked(arvif);
++	}
++	spin_unlock_bh(&arvif->ar->ab->base_lock);
++}
++
++void ath11k_nss_me_stop(struct ath11k_vif *arvif, bool destroy)
++{
++	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
++	struct ath11k_nss_me_policy *old;
++	struct wireless_dev *wdev;
++
++	lockdep_assert_held(&arvif->ar->conf_mutex);
++	if (!auto_me->initialized)
++		return;
++	spin_lock_bh(&arvif->ar->ab->base_lock);
++	auto_me->active = false;
++	auto_me->running = false;
++	auto_me->closing |= destroy;
++	auto_me->generation++;
++	spin_unlock_bh(&arvif->ar->ab->base_lock);
++	if (destroy && auto_me->registered) {
++		br_mcast_offload_mdb_unregister_notify(&auto_me->mdb);
++		auto_me->registered = false;
++	}
++	cancel_delayed_work_sync(&auto_me->work);
++	wdev = ieee80211_vif_to_wdev(arvif->vif);
++	br_mcast_offload_set_mcu(wdev->netdev, 0, 0, false);
++	if (!wait_event_timeout(auto_me->flight->drained,
++				!atomic_read(&auto_me->flight->pending), msecs_to_jiffies(3000))) {
++		auto_me->retained = true;
++		arvif->nss.me.uncertain = true;
++		ath11k_warn(arvif->ar->ab, "NSS ME table reader drain timed out; retain VDEV %d\n",
++			    arvif->nss.if_num);
++	}
++	spin_lock_bh(&arvif->ar->ab->base_lock);
++	old = auto_me->policy;
++	auto_me->policy = NULL;
++	spin_unlock_bh(&arvif->ar->ab->base_lock);
++	ath11k_nss_me_policy_free(arvif, old);
++	arvif->nss.me.mdb_staged = false;
++	if (destroy) {
++		br_mcast_flight_put(auto_me->flight);
++		auto_me->flight = NULL;
++		auto_me->initialized = false;
++	}
++}
++
++#ifdef CPTCFG_ATH11K_DEBUGFS
+ /* Build both tables while ME is positively disabled. This does not publish
+  * bridge MCU or claim the data-plane fallback/automatic lifecycle is ready.
+  */
+@@ -480,14 +1155,27 @@
+ 	kfree(msg);
+ 	return ret;
+ }
++#endif
+ #else
++void ath11k_nss_me_init(struct ath11k_vif *arvif) {}
++void ath11k_nss_me_start(struct ath11k_vif *arvif) {}
++void ath11k_nss_me_stop(struct ath11k_vif *arvif, bool destroy) {}
++void ath11k_nss_me_dirty(struct ath11k_vif *arvif) {}
++void ath11k_nss_me_dirty_locked(struct ath11k_vif *arvif) {}
++int ath11k_nss_me_tx(struct ath11k_vif *arvif, struct sk_buff *skb)
++{
++	return -EOPNOTSUPP;
++}
++#ifdef CPTCFG_ATH11K_DEBUGFS
+ static int ath11k_nss_me_mdb_stage(struct ath11k_vif *arvif)
+ {
+ 	arvif->nss.me.mdb_result = -EOPNOTSUPP;
+ 	return -EOPNOTSUPP;
+ }
+ #endif
+-
++#endif
++
++#ifdef CPTCFG_ATH11K_DEBUGFS
+ /* Explicit tests only. No autonomous table publication until fallback is proven. */
+ static int ath11k_nss_me_command(struct ath11k_vif *arvif, char **argv, int argc)
+ {
+@@ -506,6 +1194,8 @@
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 	if (!READ_ONCE(nss_me_test))
+ 		return -EACCES;
++	if (READ_ONCE(arvif->nss.me_auto.redirect) || READ_ONCE(arvif->nss.me_auto.running))
++		return -EBUSY;
+ 	if (argc == 1 && !strcmp(argv[0], "mdbstage"))
+ 		return ath11k_nss_me_mdb_stage(arvif);
+ 	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+@@ -625,7 +1315,7 @@
+ 	struct ath11k *ar = seq->private;
+ 	struct ath11k_vif *arvif;
+ 
+-	seq_printf(seq, "scope: AP_RX_host_policy_and_explicit_ME_control\ntest_enabled: %u\n", READ_ONCE(nss_me_test));
++	seq_printf(seq, "scope: AP_RX_host_policy_and_automatic_ME\ntest_enabled: %u\n", READ_ONCE(nss_me_test));
+ 	mutex_lock(&ar->conf_mutex);
+ 	list_for_each_entry(arvif, &ar->arvifs, list) {
+ 		struct ath11k_nss_me_state *me = &arvif->nss.me;
+@@ -642,6 +1332,17 @@
+ 			   me->mdb_groups, me->mdb_result, me->rx_mcbc_known, me->rx_mcbc,
+ 			   atomic64_read(&me->tx_probe_group_da),
+ 			   atomic64_read(&me->tx_probe_unicast_da), arvif->nss.encap, arvif->nss.decap);
++		seq_printf(seq, "auto: vdev=%u running=%u active=%u redirect=%u generation=%llu retained=%u pending=%d raw=%lld copies=%lld contract_drop=%lld copy_drop=%lld\n",
++			   arvif->vdev_id, arvif->nss.me_auto.running, arvif->nss.me_auto.active,
++			   arvif->nss.me_auto.redirect, arvif->nss.me_auto.generation,
++			   arvif->nss.me_auto.retained,
++			   arvif->nss.me_auto.flight ? atomic_read(&arvif->nss.me_auto.flight->pending) : 0,
++			   atomic64_read(&me->tx_raw), atomic64_read(&me->tx_copies),
++			   atomic64_read(&me->tx_contract_drop), atomic64_read(&me->tx_copy_drop));
++		seq_printf(seq, "build: vdev=%u stage=%u input_seq=%llu hosts=%u keys=%u querier4=%u querier6=%u pin_peer=%u pin_result=%d\n",
++			   arvif->vdev_id, me->mdb_build_stage, me->mdb_input_seq,
++			   me->mdb_input_hosts, me->mdb_input_keys, me->mdb_querier4,
++			   me->mdb_querier6, me->mdb_pin_peer, me->mdb_pin_result);
+ 	}
+ 	mutex_unlock(&ar->conf_mutex);
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4816,6 +4816,7 @@
+ 	arvif = ath11k_vif_to_arvif(vif);
+ 
+ 	mutex_lock(&ar->conf_mutex);
++	ath11k_nss_me_dirty(arvif->nss.ap_vif ?: arvif);
+ 	if (sta) {
+ 		peer_addr = sta->addr;
+ 		arsta = ath11k_sta_to_arsta(sta);
+@@ -7264,12 +7265,15 @@
+ 	struct ath11k *ar = hw->priv;
+ 	struct htt_ppdu_stats_info *ppdu_stats, *tmp;
+ 	struct scan_chan_list_params *params;
++	struct ath11k_vif *arvif;
+ 	int ret;
+ 
+ 	ath11k_mac_key_install_close(ar);
+ 	ath11k_mac_drain_tx(ar);
+ 
+ 	mutex_lock(&ar->conf_mutex);
++	list_for_each_entry(arvif, &ar->arvifs, list)
++		ath11k_nss_me_stop(arvif, false);
+ 	if (ar->ab->nss.enabled) {
+ 		ret = ath11k_dp_rx_pkt_type_filter(ar, ATH11K_PKT_TYPE_EAP,
+ 						 ATH11K_ROUTE_EAP_METADATA, false);
+@@ -8003,6 +8007,7 @@
+ 	int i;
+ 
+ 	mutex_lock(&ar->conf_mutex);
++	ath11k_nss_me_stop(arvif, true);
+ 
+ 	if (vif->type == NL80211_IFTYPE_AP_VLAN) {
+ 		ath11k_nss_ext_vdev_delete(arvif);
+@@ -10826,6 +10831,7 @@
+ 
+ 	mutex_lock(&ar->conf_mutex);
+ 
++	ath11k_nss_me_dirty(arvif->nss.ap_vif ?: arvif);
+ 	if (old_state == IEEE80211_STA_NOTEXIST &&
+ 	    new_state == IEEE80211_STA_NONE) {
+ 		memset(arsta, 0, sizeof(*arsta));
+--- a/drivers/net/wireless/ath/ath11k/nss_me_plan.c
++++ b/drivers/net/wireless/ath/ath11k/nss_me_plan.c
+@@ -108,6 +108,20 @@
+ 	return 0;
+ }
+ 
++static bool ath11k_nss_me_protocol_ready(
++		const struct br_mcast_offload_lookup_snapshot *snapshot,
++		const struct br_ip *addr)
++{
++	if (addr->proto == htons(ETH_P_IP))
++		return snapshot->querier_ipv4;
++#if IS_ENABLED(CONFIG_IPV6)
++	if (addr->proto == htons(ETH_P_IPV6))
++		return snapshot->querier_ipv6;
++#endif
++	/* Unknown/L2 entries still go through the strict protocol validation. */
++	return true;
++}
++
+ int ath11k_nss_me_plan_build(const struct br_mcast_offload_host hosts[],
+ 		const struct br_ip keys[],
+ 		const struct br_mcast_offload_lookup_snapshot *snapshot,
+@@ -124,8 +138,13 @@
+ 	    !snapshot->forwarding || !snapshot->multicast_to_unicast ||
+ 	    snapshot->router_ipv4 || snapshot->router_ipv6)
+ 		return -EOPNOTSUPP;
+-	/* Validate the entire port before generating any candidate. */
++	/* No querier means br_input/br_dev_xmit use br_flood, even with MDB rows.
++	 * That protocol must stay ORDINARY and use exact NSS UC fallback. Keep its
++	 * rows/keys in the full snapshot for invalidation, but never in the table.
++	 */
+ 	for (i = 0; i < snapshot->host_count; i++) {
++		if (!ath11k_nss_me_protocol_ready(snapshot, &hosts[i].addr))
++			continue;
+ 		if (!(hosts[i].flags & BR_MCAST_OFFLOAD_HOST_SPECIFIC) ||
+ 		    (hosts[i].flags & ~(BR_MCAST_OFFLOAD_HOST_SPECIFIC |
+ 			BR_MCAST_OFFLOAD_PERMANENT | BR_MCAST_OFFLOAD_STAR_EXCL |
+@@ -137,9 +156,6 @@
+ 		ret = ath11k_nss_me_group_valid(&hosts[i].addr);
+ 		if (ret)
+ 			return ret;
+-		if (hosts[i].addr.proto == htons(ETH_P_IP) ?
+-		    !snapshot->querier_ipv4 : !snapshot->querier_ipv6)
+-			return -EAGAIN;
+ 		for (j = 0; j < snapshot->key_count; j++)
+ 			if (ath11k_nss_me_same_key(&hosts[i].addr, &keys[j]))
+ 				break;
+@@ -152,6 +168,8 @@
+ 		struct br_ip star = hosts[i].addr;
+ 		bool handle_mode, default_allow;
+ 
++		if (!ath11k_nss_me_protocol_ready(snapshot, &hosts[i].addr))
++			continue;
+ 		for (j = 0; j < i; j++)
+ 			if (ath11k_nss_me_same_group(&hosts[i].addr, &hosts[j].addr) &&
+ 			    ether_addr_equal(hosts[i].host_mac, hosts[j].host_mac))

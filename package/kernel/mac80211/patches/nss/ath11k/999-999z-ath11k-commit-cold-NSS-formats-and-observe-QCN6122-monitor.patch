@@ -1,0 +1,900 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -746,6 +746,26 @@
+ 	bool terminal;
+ 	bool closed;
+ 	bool reply_seen;
++};
++
++enum ath11k_monitor_observation {
++	ATH11K_MON_HEAD_RAW,
++	ATH11K_MON_HEAD_NATIVE,
++	ATH11K_MON_HEAD_ETHERNET,
++	ATH11K_MON_HEAD_8023,
++	ATH11K_MON_HEAD_UNKNOWN,
++	ATH11K_MON_MERGE_FAILED,
++	ATH11K_MON_HEADER_DATA,
++	ATH11K_MON_HEADER_CONTROL,
++	ATH11K_MON_HEADER_MANAGEMENT,
++	ATH11K_MON_HEADER_SHORT,
++	ATH11K_MON_HEADER_INVALID,
++	ATH11K_MON_BA_COMPLETE,
++	ATH11K_MON_BA_OTHER,
++	ATH11K_MON_SUBMITTED,
++	ATH11K_MON_FCS_BAD,
++	ATH11K_MON_STARTS,
++	ATH11K_MON_OBSERVATION_MAX,
+ };
+ 
+ struct ath11k {
+@@ -795,6 +815,9 @@
+ 	unsigned long dev_flags;
+ 	unsigned int filter_flags;
+ 	unsigned long monitor_flags;
++	/* Lifetime counters, not a peer or an atomic multi-field snapshot. */
++	atomic64_t monitor_observation[ATH11K_MON_OBSERVATION_MAX];
++	int monitor_last_errno;
+ 	u32 ack_timeout;
+ 	u32 min_tx_power;
+ 	u32 max_tx_power;
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2150,6 +2150,66 @@
+ 	.release = single_release,
+ };
+ 
++static int ath11k_monitor_stats_show(struct seq_file *s, void *unused)
++{
++	static const char * const names[ATH11K_MON_OBSERVATION_MAX] = {
++		[ATH11K_MON_HEAD_RAW] = "merge_head_raw",
++		[ATH11K_MON_HEAD_NATIVE] = "merge_head_native",
++		[ATH11K_MON_HEAD_ETHERNET] = "merge_head_ethernet",
++		[ATH11K_MON_HEAD_8023] = "merge_head_8023",
++		[ATH11K_MON_HEAD_UNKNOWN] = "merge_head_unknown",
++		[ATH11K_MON_MERGE_FAILED] = "merge_failed",
++		[ATH11K_MON_HEADER_DATA] = "complete_data_header",
++		[ATH11K_MON_HEADER_CONTROL] = "complete_control_header",
++		[ATH11K_MON_HEADER_MANAGEMENT] = "complete_management_header",
++		[ATH11K_MON_HEADER_SHORT] = "short_header",
++		[ATH11K_MON_HEADER_INVALID] = "invalid_header",
++		[ATH11K_MON_BA_COMPLETE] = "complete_single_tid_ba",
++		[ATH11K_MON_BA_OTHER] = "other_or_short_ba",
++		[ATH11K_MON_SUBMITTED] = "submitted_to_mac80211",
++		[ATH11K_MON_FCS_BAD] = "fcs_bad_merge",
++		[ATH11K_MON_STARTS] = "monitor_starts",
++	};
++	struct ath11k *ar = s->private;
++	struct ath11k_vif *arvif;
++	int i;
++
++	seq_puts(s, "scope: radio_lifetime_nonatomic_snapshot\n");
++	for (i = 0; i < ATH11K_MON_OBSERVATION_MAX; i++)
++		seq_printf(s, "%s: %lld\n", names[i], atomic64_read(&ar->monitor_observation[i]));
++	mutex_lock(&ar->conf_mutex);
++	seq_printf(s, "vdev_id: %d\ncreated: %u\nstarted: %u\nlast_errno: %d\nconcurrent_decap: %u\n",
++		   ar->monitor_vdev_id,
++		   test_bit(ATH11K_FLAG_MONITOR_VDEV_CREATED, &ar->monitor_flags),
++		   test_bit(ATH11K_FLAG_MONITOR_STARTED, &ar->monitor_flags),
++		   READ_ONCE(ar->monitor_last_errno),
++		   ieee80211_hw_check(ar->hw, SUPPORTS_CONC_MON_RX_DECAP));
++	list_for_each_entry(arvif, &ar->arvifs, list) {
++		if (!arvif->nss.created)
++			continue;
++		seq_printf(s, "nss_vdev: %u ifnum=%d encap=%d decap=%d ready=%u failed=%u flags=0x%x\n",
++			   arvif->vdev_id, arvif->nss.if_num,
++			   READ_ONCE(arvif->nss.encap), READ_ONCE(arvif->nss.decap),
++			   READ_ONCE(arvif->nss.format_ready), READ_ONCE(arvif->nss.format_failed),
++			   arvif->vif->offload_flags);
++	}
++	mutex_unlock(&ar->conf_mutex);
++	return 0;
++}
++
++static int ath11k_monitor_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ath11k_monitor_stats_show, inode->i_private);
++}
++
++static const struct file_operations fops_monitor_stats = {
++	.owner = THIS_MODULE,
++	.open = ath11k_monitor_stats_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ int ath11k_debugfs_register(struct ath11k *ar)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -2185,6 +2245,8 @@
+ 			    ar->debug.debugfs_pdev, ar, &fops_reo_aging);
+ 	debugfs_create_file("wmi_key_stats", 0400,
+ 			    ar->debug.debugfs_pdev, ar, &fops_wmi_key_stats);
++	debugfs_create_file("monitor_stats", 0400,
++			    ar->debug.debugfs_pdev, ar, &fops_monitor_stats);
+ 	debugfs_create_file("pktlog_filter", 0644,
+ 			    ar->debug.debugfs_pdev, ar,
+ 			    &fops_pktlog_filter);
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -6708,6 +6708,22 @@
+ 		return NULL;
+ 
+ 	decap_format = ath11k_dp_rx_h_msdu_start_decap_type(ab, rx_desc);
++	switch (decap_format) {
++	case DP_RX_DECAP_TYPE_RAW:
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEAD_RAW]);
++		break;
++	case DP_RX_DECAP_TYPE_NATIVE_WIFI:
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEAD_NATIVE]);
++		break;
++	case DP_RX_DECAP_TYPE_ETHERNET2_DIX:
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEAD_ETHERNET]);
++		break;
++	case DP_RX_DECAP_TYPE_8023:
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEAD_8023]);
++		break;
++	default:
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEAD_UNKNOWN]);
++	}
+ 
+ 	ath11k_dp_rx_h_ppdu(ar, rx_desc, rxs);
+ 
+@@ -6861,6 +6877,50 @@
+ 	rxs->mactime = ppduinfo->tsft;
+ }
+ 
++static void ath11k_dp_rx_mon_observe_header(struct ath11k *ar, struct sk_buff *skb)
++{
++	__le16 fc, ba_control;
++	u16 control;
++	int hdrlen, index;
++
++	if (skb_copy_bits(skb, 0, &fc, sizeof(fc)))
++		goto short_header;
++	if (fc & cpu_to_le16(IEEE80211_FCTL_VERS))
++		goto invalid_header;
++	hdrlen = ieee80211_hdrlen(fc);
++	if (skb->len < hdrlen)
++		goto short_header;
++	if (ieee80211_is_data(fc))
++		index = ATH11K_MON_HEADER_DATA;
++	else if (ieee80211_is_ctl(fc))
++		index = ATH11K_MON_HEADER_CONTROL;
++	else if (ieee80211_is_mgmt(fc))
++		index = ATH11K_MON_HEADER_MANAGEMENT;
++	else
++		goto invalid_header;
++	atomic64_inc(&ar->monitor_observation[index]);
++	if (!ieee80211_is_back(fc))
++		return;
++	if (skb_copy_bits(skb, 16, &ba_control, sizeof(ba_control)))
++		goto other_ba;
++	control = le16_to_cpu(ba_control);
++	if (control & IEEE80211_BAR_CTRL_MULTI_TID)
++		goto other_ba;
++	/* Single-TID BA: MAC header + control + SSN + compressed/basic bitmap. */
++	if (skb->len < ((control & IEEE80211_BAR_CTRL_CBMTID_COMPRESSED_BA) ? 28 : 148))
++		goto other_ba;
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_BA_COMPLETE]);
++	return;
++other_ba:
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_BA_OTHER]);
++	return;
++short_header:
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEADER_SHORT]);
++	return;
++invalid_header:
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_HEADER_INVALID]);
++}
++
+ static int ath11k_dp_rx_mon_deliver(struct ath11k *ar, u32 mac_id,
+ 				    struct sk_buff *head_msdu,
+ 				    struct hal_rx_mon_ppdu_info *ppduinfo,
+@@ -6882,8 +6942,10 @@
+ 
+ 	rxs->flag = 0;
+ 
+-	if (fcs_err)
++	if (fcs_err) {
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_FCS_BAD]);
+ 		rxs->flag = RX_FLAG_FAILED_FCS_CRC;
++	}
+ 
+ 	do {
+ 		skb_next = mon_skb->next;
+@@ -6899,8 +6961,10 @@
+ 			rxs->flag |= RX_FLAG_ALLOW_SAME_PN;
+ 		}
+ 		rxs->flag |= RX_FLAG_ONLY_MONITOR;
++		ath11k_dp_rx_mon_observe_header(ar, mon_skb);
+ 		ath11k_update_radiotap(ar, ppduinfo, mon_skb, rxs);
+ 
++		atomic64_inc(&ar->monitor_observation[ATH11K_MON_SUBMITTED]);
+ 		ath11k_dp_rx_deliver_msdu(ar, napi, mon_skb, rxs);
+ 		mon_skb = skb_next;
+ 	} while (mon_skb);
+@@ -6909,6 +6973,7 @@
+ 	return 0;
+ 
+ mon_deliver_fail:
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_MERGE_FAILED]);
+ 	mon_skb = head_msdu;
+ 	while (mon_skb) {
+ 		skb_next = mon_skb->next;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -11,6 +11,7 @@
+ #include <linux/bitmap.h>
+ #include <linux/if_vlan.h>
+ #include <linux/inetdevice.h>
++#include <linux/module.h>
+ #include <net/if_inet6.h>
+ #include <net/ipv6.h>
+ 
+@@ -27,6 +28,14 @@
+ #include "hif.h"
+ #include "wow.h"
+ #include "nss.h"
++
++/* Target validation only: keep STA Ethernet decap while independently
++ * configuring the QCN6122 monitor VDEV. Off until its actual RX TLVs and
++ * normal NSS traffic have both been checked on the target firmware.
++ */
++static bool nss_monitor_test;
++module_param(nss_monitor_test, bool, 0444);
++MODULE_PARM_DESC(nss_monitor_test, "Experimental QCN6122 NSS concurrent monitor validation");
+ 
+ #define CHAN2G(_channel, _freq, _flags) { \
+ 	.band                   = NL80211_BAND_2GHZ, \
+@@ -1116,6 +1125,12 @@
+ 		return ret;
+ 	}
+ 
++	ret = ath11k_wmi_vdev_set_param_cmd(ar, ar->monitor_vdev_id,
++					    WMI_VDEV_PARAM_RX_DECAP_TYPE,
++					    ATH11K_HW_TXRX_RAW);
++	if (ret)
++		goto err_vdev_del;
++
+ 	nss = get_num_chains(ar->cfg_tx_chainmask) ? : 1;
+ 	ret = ath11k_wmi_vdev_set_param_cmd(ar, ar->monitor_vdev_id,
+ 					    WMI_VDEV_PARAM_NSS, nss);
+@@ -1203,6 +1218,7 @@
+ 
+ 	ret = ath11k_mac_monitor_vdev_start(ar, ar->monitor_vdev_id, chandef);
+ 	if (ret) {
++		WRITE_ONCE(ar->monitor_last_errno, ret);
+ 		ath11k_warn(ar->ab, "failed to start monitor vdev: %d\n", ret);
+ 		ath11k_mac_monitor_vdev_delete(ar);
+ 		return ret;
+@@ -1215,8 +1231,17 @@
+ 	if (ret) {
+ 		ath11k_warn(ar->ab, "failed to configure htt monitor mode ring during start: %d",
+ 			    ret);
++		WRITE_ONCE(ar->monitor_last_errno, ret);
++		/* Keep STARTED truthful if firmware stop itself fails. */
++		ath11k_dp_tx_htt_monitor_mode_ring_config(ar, true);
++		if (!ath11k_mac_monitor_vdev_stop(ar)) {
++			clear_bit(ATH11K_FLAG_MONITOR_STARTED, &ar->monitor_flags);
++			ar->num_started_vdevs--;
++		}
+ 		return ret;
+ 	}
++	WRITE_ONCE(ar->monitor_last_errno, 0);
++	atomic64_inc(&ar->monitor_observation[ATH11K_MON_STARTS]);
+ 
+ 	ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "monitor started\n");
+ 
+@@ -7360,19 +7385,19 @@
+ 	return 0;
+ }
+ 
+-static void ath11k_mac_op_update_vif_offload(struct ieee80211_hw *hw,
+-					     struct ieee80211_vif *vif)
+-{
+-	struct ath11k *ar = hw->priv;
++static int ath11k_mac_update_vif_offload(struct ath11k *ar,
++				       struct ieee80211_vif *vif)
++{
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
+-	u32 param_id, param_value;
++	bool nss = ab->nss.enabled && arvif->vdev_type != WMI_VDEV_TYPE_MONITOR;
++	u32 tx_mode, rx_mode;
+ 	int ret;
+ 
++	lockdep_assert_held(&ar->conf_mutex);
+ 	if (ab->nss.enabled && vif->type == NL80211_IFTYPE_AP_VLAN)
+-		return;
+-
+-	param_id = WMI_VDEV_PARAM_TX_ENCAP_TYPE;
++		return 0;
++
+ 	if (ath11k_frame_mode != ATH11K_HW_TXRX_ETHERNET ||
+ 	    (vif->type != NL80211_IFTYPE_STATION &&
+ 	     vif->type != NL80211_IFTYPE_AP))
+@@ -7380,35 +7405,99 @@
+ 					IEEE80211_OFFLOAD_DECAP_ENABLED);
+ 
+ 	if (vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED)
+-		param_value = ATH11K_HW_TXRX_ETHERNET;
++		tx_mode = ATH11K_HW_TXRX_ETHERNET;
+ 	else if (test_bit(ATH11K_FLAG_RAW_MODE, &ab->dev_flags))
+-		param_value = ATH11K_HW_TXRX_RAW;
++		tx_mode = ATH11K_HW_TXRX_RAW;
+ 	else
+-		param_value = ATH11K_HW_TXRX_NATIVE_WIFI;
++		tx_mode = ATH11K_HW_TXRX_NATIVE_WIFI;
++	if (vif->offload_flags & IEEE80211_OFFLOAD_DECAP_ENABLED)
++		rx_mode = ATH11K_HW_TXRX_ETHERNET;
++	else if (test_bit(ATH11K_FLAG_RAW_MODE, &ab->dev_flags) ||
++		 arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)
++		rx_mode = ATH11K_HW_TXRX_RAW;
++	else
++		rx_mode = ATH11K_HW_TXRX_NATIVE_WIFI;
++
++	if (nss && READ_ONCE(arvif->nss.format_ready)) {
++		/* No NSS RX format fence is established for a live VDEV. Keep
++		 * both producers and host parsing in the committed cold format.
++		 */
++		vif->offload_flags &= ~(IEEE80211_OFFLOAD_ENCAP_ENABLED |
++					IEEE80211_OFFLOAD_DECAP_ENABLED);
++		if (arvif->nss.encap == ATH11K_HW_TXRX_ETHERNET)
++			vif->offload_flags |= IEEE80211_OFFLOAD_ENCAP_ENABLED;
++		if (arvif->nss.decap == ATH11K_HW_TXRX_ETHERNET)
++			vif->offload_flags |= IEEE80211_OFFLOAD_DECAP_ENABLED;
++		if (READ_ONCE(arvif->nss.format_failed))
++			return -ESHUTDOWN;
++		return tx_mode == arvif->nss.encap && rx_mode == arvif->nss.decap ?
++			0 : -EOPNOTSUPP;
++	}
++	if (nss && (arvif->is_started || arvif->is_up))
++		return -EOPNOTSUPP;
+ 
+ 	ret = ath11k_wmi_vdev_set_param_cmd(ar, arvif->vdev_id,
+-					    param_id, param_value);
++					    WMI_VDEV_PARAM_TX_ENCAP_TYPE, tx_mode);
+ 	if (ret) {
+ 		ath11k_warn(ab, "failed to set vdev %d tx encap mode: %d\n",
+ 			    arvif->vdev_id, ret);
+ 		vif->offload_flags &= ~IEEE80211_OFFLOAD_ENCAP_ENABLED;
+-	}
+-
+-	param_id = WMI_VDEV_PARAM_RX_DECAP_TYPE;
+-	if (vif->offload_flags & IEEE80211_OFFLOAD_DECAP_ENABLED)
+-		param_value = ATH11K_HW_TXRX_ETHERNET;
+-	else if (test_bit(ATH11K_FLAG_RAW_MODE, &ab->dev_flags))
+-		param_value = ATH11K_HW_TXRX_RAW;
+-	else
+-		param_value = ATH11K_HW_TXRX_NATIVE_WIFI;
++		if (nss)
++			goto failed;
++	}
++	if (nss) {
++		ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_ENCAP_TYPE_CMD,
++					    tx_mode);
++		if (ret)
++			goto failed;
++	}
+ 
+ 	ret = ath11k_wmi_vdev_set_param_cmd(ar, arvif->vdev_id,
+-					    param_id, param_value);
++					    WMI_VDEV_PARAM_RX_DECAP_TYPE, rx_mode);
+ 	if (ret) {
+ 		ath11k_warn(ab, "failed to set vdev %d rx decap mode: %d\n",
+ 			    arvif->vdev_id, ret);
+ 		vif->offload_flags &= ~IEEE80211_OFFLOAD_DECAP_ENABLED;
+-	}
++		if (nss || arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)
++			goto failed;
++	}
++	if (nss) {
++		ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_DECAP_TYPE_CMD,
++					    rx_mode);
++		if (ret)
++			goto failed;
++		spin_lock_bh(&ab->base_lock);
++		if (!ab->nss.registered || ab->nss.quiescing ||
++		    ab->nss.ownership_uncertain || !arvif->nss.created ||
++		    arvif->nss.format_failed ||
++		    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags)) {
++			ret = -ESHUTDOWN;
++		} else {
++			smp_store_release(&arvif->nss.format_ready, true);
++		}
++		spin_unlock_bh(&ab->base_lock);
++		if (ret)
++			goto failed;
++	}
++	return 0;
++
++failed:
++	if (nss)
++		WRITE_ONCE(arvif->nss.format_failed, true);
++	return ret;
++}
++
++static void ath11k_mac_op_update_vif_offload(struct ieee80211_hw *hw,
++					     struct ieee80211_vif *vif)
++{
++	struct ath11k *ar = hw->priv;
++	int ret;
++
++	mutex_lock(&ar->conf_mutex);
++	ret = ath11k_mac_update_vif_offload(ar, vif);
++	mutex_unlock(&ar->conf_mutex);
++	if (ret)
++		ath11k_warn(ar->ab, "vdev offload update rejected: %d\n", ret);
+ }
+ 
+ static bool ath11k_mac_vif_ap_active_any(struct ath11k_base *ab)
+@@ -7739,25 +7828,9 @@
+ 		goto err_vdev_del;
+ 	}
+ 
+-	ath11k_mac_op_update_vif_offload(hw, vif);
+-
+-	if (vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED)
+-		param_value = ATH11K_HW_TXRX_ETHERNET;
+-	else if (test_bit(ATH11K_FLAG_RAW_MODE, &ab->dev_flags))
+-		param_value = ATH11K_HW_TXRX_RAW;
+-	else
+-		param_value = ATH11K_HW_TXRX_NATIVE_WIFI;
+-
+-	ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_ENCAP_TYPE_CMD, param_value);
+-
+-	if(ret) {
+-		ath11k_warn(ab, "failed to set encap type in nss %d\n", ret);
+-		goto err_vdev_del;
+-	}
+-
+-	ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_DECAP_TYPE_CMD, param_value);
+-	if(ret) {
+-		ath11k_warn(ab, "failed to set decap type in nss %d\n", ret);
++	ret = ath11k_mac_update_vif_offload(ar, vif);
++	if (ret) {
++		ath11k_warn(ab, "failed to configure vdev offload formats: %d\n", ret);
+ 		goto err_vdev_del;
+ 	}
+ 
+@@ -11386,6 +11459,10 @@
+ 	if (ath11k_frame_mode == ATH11K_HW_TXRX_ETHERNET) {
+ 		ieee80211_hw_set(ar->hw, SUPPORTS_TX_ENCAP_OFFLOAD);
+ 		ieee80211_hw_set(ar->hw, SUPPORTS_RX_DECAP_OFFLOAD);
++		if (nss_monitor_test && ab->nss.enabled &&
++		    ab->hw_rev == ATH11K_HW_QCN6122_HW10 &&
++		    ab->hw_params.rxdma1_enable && ab->hw_params.supports_monitor)
++			ieee80211_hw_set(ar->hw, SUPPORTS_CONC_MON_RX_DECAP);
+ 	}
+ 
+ 	if (cap->nss_ratio_enabled)
+@@ -11644,7 +11721,7 @@
+ 	struct ath11k *ar;
+ 	struct ath11k_pdev *pdev;
+ 	int ret;
+-	int i;
++	int i, j;
+ 
+ 	if (test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))
+ 		return 0;
+@@ -11663,6 +11740,8 @@
+ 		ar->ab = ab;
+ 		ar->pdev = pdev;
+ 		ar->pdev_idx = i;
++		for (j = 0; j < ATH11K_MON_OBSERVATION_MAX; j++)
++			atomic64_set(&ar->monitor_observation[j], 0);
+ 		ar->lmac_id = ath11k_hw_get_mac_from_pdev_id(&ab->hw_params, i);
+ 
+ 		ar->wmi = &ab->wmi_ab.wmi[i];
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -316,8 +316,15 @@
+ 
+ bool ath11k_nss_vdev_key_failed(struct ath11k_vif *arvif)
+ {
++	struct ath11k_vif *parent = arvif->nss.ap_vif;
++
+ 	return READ_ONCE(arvif->nss.key_failed) ||
+-		(arvif->nss.ap_vif && READ_ONCE(arvif->nss.ap_vif->nss.key_failed));
++		READ_ONCE(arvif->nss.format_failed) ||
++		(READ_ONCE(arvif->nss.created) && !smp_load_acquire(&arvif->nss.format_ready)) ||
++		(parent && (READ_ONCE(parent->nss.key_failed) ||
++			    READ_ONCE(parent->nss.format_failed) ||
++			    (READ_ONCE(parent->nss.created) &&
++			     !smp_load_acquire(&parent->nss.format_ready))));
+ }
+ 
+ int ath11k_nss_key_check(struct ath11k *ar, struct ath11k_peer *peer,
+@@ -1148,6 +1155,42 @@
+ 	complete(&request->complete);
+ }
+ 
++struct ath11k_nss_vdev_format_request {
++	struct ath11k_nss_vdev_request request;
++	u32 command;
++	u32 value;
++};
++
++static void ath11k_nss_vdev_format_cb(void *app_data, struct nss_cmn_msg *cm)
++{
++	struct ath11k_nss_vdev_format_request *format = app_data;
++	struct ath11k_nss_vdev_request *request;
++	struct nss_wifi_vdev_msg *msg;
++
++	if (!format)
++		return;
++	request = &format->request;
++	if (cm->type != request->type || cm->interface != request->if_num ||
++	    cm->response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++
++	request->result = -EIO;
++	if (cm->response == NSS_CMN_RESPONSE_ACK && !cm->error) {
++		/* cm.len is payload-only; nss_cmn_get_msg_len() adds the header. */
++		if (cm->len != sizeof(msg->msg.vdev_cmd)) {
++			request->result = -EMSGSIZE;
++		} else {
++			msg = container_of(cm, struct nss_wifi_vdev_msg, cm);
++			request->result = msg->msg.vdev_cmd.cmd == format->command &&
++				msg->msg.vdev_cmd.value == format->value ? 0 : -EPROTO;
++		}
++	}
++	request->response = cm->response;
++	request->error = cm->error;
++	request->len = cm->len;
++	complete(&request->complete);
++}
++
+ static void ath11k_nss_vdev_event_receive(void *dev, struct nss_cmn_msg *vdev_msg)
+ {
+ 	/*TODO*/
+@@ -1255,6 +1298,23 @@
+ 	return 0;
+ }
+ 
++static int ath11k_nss_80211_header_len(struct sk_buff *skb)
++{
++	struct ieee80211_hdr *hdr;
++	int len;
++
++	if (!pskb_may_pull(skb, sizeof(hdr->frame_control)))
++		return -EMSGSIZE;
++	hdr = (struct ieee80211_hdr *)skb->data;
++	if ((hdr->frame_control & cpu_to_le16(IEEE80211_FCTL_VERS)) ||
++	    !ieee80211_is_data(hdr->frame_control))
++		return -EINVAL;
++	len = ieee80211_hdrlen(hdr->frame_control);
++	if (!pskb_may_pull(skb, len))
++		return -EMSGSIZE;
++	return len;
++}
++
+ static int ath11k_nss_undecap_raw(struct ath11k_vif *arvif, struct sk_buff *skb,
+ 				  int *data_offset)
+ {
+@@ -1263,17 +1323,12 @@
+ 	enum hal_encrypt_type enctype;
+ 	struct ath11k_peer *peer = NULL;
+ 	struct ieee80211_hdr *hdr;
+-	int hdr_len;
+-
++	int hdr_len, crypto_len, trailer_len;
++
++	hdr_len = ath11k_nss_80211_header_len(skb);
++	if (hdr_len < 0)
++		return hdr_len;
+ 	hdr = (struct ieee80211_hdr *)skb->data;
+-	hdr_len = ieee80211_hdrlen(hdr->frame_control);
+-
+-	*data_offset = hdr_len;
+-
+-	/* FCS is included in the raw mode skb, we can trim it, fcs error
+-	 * packets are not expected to be received in this path
+-	 */
+-	skb_trim(skb, skb->len - FCS_LEN);
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 
+@@ -1287,29 +1342,25 @@
+ 
+ 	spin_unlock_bh(&ab->base_lock);
+ 
+-	*data_offset += ath11k_dp_rx_crypto_param_len(ar, enctype);
+-
+-	/* Strip ICV, MIC, MMIC */
+-	skb_trim(skb, skb->len -
+-		 ath11k_dp_rx_crypto_mic_len(ar, enctype));
+-
+-	skb_trim(skb, skb->len -
+-		 ath11k_dp_rx_crypto_icv_len(ar, enctype));
+-
++	crypto_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
++	trailer_len = FCS_LEN + ath11k_dp_rx_crypto_mic_len(ar, enctype) +
++		ath11k_dp_rx_crypto_icv_len(ar, enctype);
+ 	if (enctype == HAL_ENCRYPT_TYPE_TKIP_MIC)
+-		skb_trim(skb, skb->len - IEEE80211_CCMP_MIC_LEN);
+-
+-	return 0;
++		trailer_len += IEEE80211_CCMP_MIC_LEN;
++	if (skb->len < hdr_len + crypto_len + trailer_len)
++		return -EMSGSIZE;
++	*data_offset = hdr_len + crypto_len;
++	return pskb_trim(skb, skb->len - trailer_len);
+ }
+ 
+ static int ath11k_nss_undecap_nwifi(struct ath11k_vif *arvif, struct sk_buff *skb,
+ 				    int *data_offset)
+ {
+-	struct ieee80211_hdr *hdr;
+ 	int hdr_len;
+ 
+-	hdr = (struct ieee80211_hdr *)skb->data;
+-	hdr_len = ieee80211_hdrlen(hdr->frame_control);
++	hdr_len = ath11k_nss_80211_header_len(skb);
++	if (hdr_len < 0)
++		return hdr_len;
+ 
+ 	*data_offset = hdr_len;
+ 
+@@ -1493,13 +1544,16 @@
+ }
+ 
+ static bool ath11k_nss_vdev_data_receive_mec_check(struct ath11k *ar,
+-						   struct sk_buff *skb)
++						   struct sk_buff *skb, bool eth)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_ast_entry *ast_entry = NULL;
+ 	u8 src_mac[ETH_ALEN];
+ 
+-	memcpy(src_mac, ((struct ethhdr *)skb->data)->h_source, ETH_ALEN);
++	if (eth)
++		ether_addr_copy(src_mac, ((struct ethhdr *)skb->data)->h_source);
++	else
++		ether_addr_copy(src_mac, ieee80211_get_SA((struct ieee80211_hdr *)skb->data));
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS_WDS,
+ 		   "ath11k_nss_vdev_data_receive_mec_check src mac %pM\n",
+ 		   src_mac);
+@@ -1510,7 +1564,7 @@
+ 	if (ast_entry && ast_entry->type == ATH11K_AST_TYPE_MEC) {
+ 		spin_unlock_bh(&ab->base_lock);
+ 		ath11k_dbg(ab, ATH11K_DBG_NSS_WDS,
+-			   "dropping mec traffic from %pM\n", ast_entry->addr);
++			   "dropping mec traffic from %pM\n", src_mac);
+ 		return true;
+ 	}
+ 
+@@ -1523,7 +1577,9 @@
+ {
+ 	enum ath11k_hw_txrx_mode decap_type;
+ 
+-	decap_type = arvif->nss.decap;
++	if (ath11k_nss_vdev_key_failed(arvif))
++		return -ESHUTDOWN;
++	decap_type = READ_ONCE(arvif->nss.decap);
+ 
+ 	switch (decap_type) {
+ 	case ATH11K_HW_TXRX_RAW:
+@@ -1531,6 +1587,8 @@
+ 	case ATH11K_HW_TXRX_NATIVE_WIFI:
+ 		return ath11k_nss_undecap_nwifi(arvif, skb, data_offs);
+ 	case ATH11K_HW_TXRX_ETHERNET:
++		if (!pskb_may_pull(skb, ETH_HLEN))
++			return -EMSGSIZE;
+ 		*eth_decap = true;
+ 		return 0;
+ 	default:
+@@ -1669,12 +1727,6 @@
+ 	ath11k_dbg_dump(ab, ATH11K_DBG_DP_RX, "", "dp rx msdu from nss: ",
+ 			skb->data, skb->len);
+ 
+-	if ((arvif->vif->type == NL80211_IFTYPE_STATION && wdev->use_4addr) &&
+-	     ath11k_nss_vdev_data_receive_mec_check(arvif->ar, skb)) {
+-		dev_kfree_skb_any(skb);
+-		return;
+-	}
+-
+ 	ret = ath11k_nss_undecap(arvif, skb, &data_offs, &eth_decap);
+ 	if (ret) {
+ 		ath11k_warn(ab, "error in nss rx undecap, type %d err %d\n",
+@@ -1683,6 +1735,11 @@
+ 		return;
+ 	}
+ 
++	if ((arvif->vif->type == NL80211_IFTYPE_STATION && wdev->use_4addr) &&
++	    ath11k_nss_vdev_data_receive_mec_check(arvif->ar, skb, eth_decap)) {
++		dev_kfree_skb_any(skb);
++		return;
++	}
+ 	ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap, data_offs, napi);
+ }
+ 
+@@ -2908,6 +2965,103 @@
+ 	return -EINVAL;
+ }
+ 
++static int ath11k_nss_vdev_set_format(struct ath11k_vif *arvif, u32 cmd, u32 value)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_nss_vdev_format_request *format;
++	struct ath11k_nss_vdev_request *request;
++	struct nss_wifi_vdev_msg *msg;
++	nss_tx_status_t status = NSS_TX_FAILURE;
++	unsigned long waited = 0;
++	u32 cookie = 0;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if ((cmd != NSS_WIFI_VDEV_ENCAP_TYPE_CMD && cmd != NSS_WIFI_VDEV_DECAP_TYPE_CMD) ||
++	    value > ATH11K_HW_TXRX_ETHERNET)
++		return -EINVAL;
++	if (READ_ONCE(arvif->nss.format_failed))
++		return -ESHUTDOWN;
++	if (READ_ONCE(arvif->nss.format_ready)) {
++		/* The N2H ABI has no per-packet format/epoch. An ACK does not
++		 * establish that old RX buffers have drained, so never switch a
++		 * live VDEV. A same-value update needs no firmware submission.
++		 */
++		ret = cmd == NSS_WIFI_VDEV_ENCAP_TYPE_CMD ?
++			READ_ONCE(arvif->nss.encap) : READ_ONCE(arvif->nss.decap);
++		return ret == value ? 0 : -EOPNOTSUPP;
++	}
++	format = kzalloc(sizeof(*format), GFP_KERNEL);
++	if (!format)
++		return -ENOMEM;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg) {
++		kfree(format);
++		return -ENOMEM;
++	}
++	request = &format->request;
++	init_completion(&request->complete);
++	request->type = NSS_WIFI_VDEV_INTERFACE_CMD_MSG;
++	request->if_num = arvif->nss.if_num;
++	request->result = -ETIMEDOUT;
++	format->command = cmd;
++	format->value = value;
++	msg->msg.vdev_cmd.cmd = cmd;
++	msg->msg.vdev_cmd.value = value;
++	nss_wifi_vdev_msg_init(msg, request->if_num, request->type,
++			       sizeof(msg->msg.vdev_cmd),
++			       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_format_cb,
++			       format);
++	spin_lock_bh(&ab->base_lock);
++	ret = !ab->nss.enabled || !ab->nss.registered || ab->nss.quiescing ||
++		ab->nss.ownership_uncertain || !arvif->nss.created ||
++		arvif->nss.format_failed ||
++		test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ? -ESHUTDOWN : 0;
++	if (!ret)
++		status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, msg, &cookie);
++	spin_unlock_bh(&ab->base_lock);
++	if (!ret && status != NSS_TX_SUCCESS)
++		ret = -EIO;
++	if (!ret)
++		waited = wait_for_completion_timeout(&request->complete,
++					 msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	/* Cancellation also waits for a callback that already claimed this
++	 * private request. A late ACK must not touch freed waiter memory.
++	 */
++	nss_wifi_vdev_cancel_msg(cookie);
++	if (!ret)
++		ret = waited || completion_done(&request->complete) ?
++			READ_ONCE(request->result) : -ETIMEDOUT;
++	spin_lock_bh(&ab->base_lock);
++	if (!ret && (!ab->nss.enabled || !ab->nss.registered || ab->nss.quiescing ||
++		     ab->nss.ownership_uncertain || !arvif->nss.created ||
++		     arvif->nss.if_num != request->if_num || arvif->nss.format_failed ||
++		     test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags)))
++		ret = -ESHUTDOWN;
++	if (!ret) {
++		if (cmd == NSS_WIFI_VDEV_ENCAP_TYPE_CMD)
++			WRITE_ONCE(arvif->nss.encap, value);
++		else
++			WRITE_ONCE(arvif->nss.decap, value);
++	} else {
++		WRITE_ONCE(arvif->nss.format_failed, true);
++	}
++	spin_unlock_bh(&ab->base_lock);
++	if (ret)
++		ath11k_warn(ab,
++			    "NSS VDEV format failed if=%u cmd=%u value=%u result=%d response=%u error=%u payload_len=%u\n",
++			    request->if_num, cmd, value, ret, request->response,
++			    request->error, request->len);
++	ath11k_dbg(ab, ATH11K_DBG_NSS,
++		   "NSS VDEV format if=%u cmd=%u value=%u result=%d response=%u error=%u len=%u\n",
++		   request->if_num, cmd, value, ret, request->response,
++		   request->error, request->len);
++	kfree(msg);
++	kfree(format);
++	return ret;
++}
++
+ int ath11k_nss_vdev_set_cmd(struct ath11k_vif *arvif, enum ath11k_nss_vdev_cmd nss_cmd,
+ 			    int val)
+ {
+@@ -2924,42 +3078,34 @@
+ 	if (arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)
+ 		return 0;
+ 
++	switch(nss_cmd) {
++	case ATH11K_NSS_WIFI_VDEV_CFG_AP_BRIDGE_CMD:
++		cmd = NSS_WIFI_VDEV_CFG_AP_BRIDGE_CMD;
++		break;
++	case ATH11K_NSS_WIFI_VDEV_SECURITY_TYPE_CMD:
++		cmd = NSS_WIFI_VDEV_SECURITY_TYPE_CMD;
++		break;
++	case ATH11K_NSS_WIFI_VDEV_ENCAP_TYPE_CMD:
++		return ath11k_nss_vdev_set_format(arvif, NSS_WIFI_VDEV_ENCAP_TYPE_CMD, val);
++	case ATH11K_NSS_WIFI_VDEV_DECAP_TYPE_CMD:
++		return ath11k_nss_vdev_set_format(arvif, NSS_WIFI_VDEV_DECAP_TYPE_CMD, val);
++	case ATH11K_NSS_WIFI_VDEV_CFG_WDS_BACKHAUL_CMD:
++		cmd = NSS_WIFI_VDEV_CFG_WDS_BACKHAUL_CMD;
++		break;
++	case ATH11K_NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD:
++		cmd = NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD;
++		break;
++	default:
++		return -EINVAL;
++	}
+ 	vdev_msg = kzalloc(sizeof(*vdev_msg), GFP_ATOMIC);
+ 	if (!vdev_msg)
+ 		return -ENOMEM;
+-
+-	switch(nss_cmd) {
+-	case ATH11K_NSS_WIFI_VDEV_CFG_AP_BRIDGE_CMD:
+-		cmd = NSS_WIFI_VDEV_CFG_AP_BRIDGE_CMD;
+-		break;
+-	case ATH11K_NSS_WIFI_VDEV_SECURITY_TYPE_CMD:
+-		cmd = NSS_WIFI_VDEV_SECURITY_TYPE_CMD;
+-		break;
+-	case ATH11K_NSS_WIFI_VDEV_ENCAP_TYPE_CMD:
+-		cmd = NSS_WIFI_VDEV_ENCAP_TYPE_CMD;
+-		break;
+-	case ATH11K_NSS_WIFI_VDEV_DECAP_TYPE_CMD:
+-		cmd = NSS_WIFI_VDEV_DECAP_TYPE_CMD;
+-		break;
+-	case ATH11K_NSS_WIFI_VDEV_CFG_WDS_BACKHAUL_CMD:
+-		cmd = NSS_WIFI_VDEV_CFG_WDS_BACKHAUL_CMD;
+-		break;
+-	case ATH11K_NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD:
+-		cmd = NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD;
+-		break;
+-	default:
+-		return -EINVAL;
+-	}
+ 	/* TODO: Convert to function for conversion in case of many
+ 	 * such commands
+ 	 */
+ 	if (cmd == NSS_WIFI_VDEV_SECURITY_TYPE_CMD)
+ 		val = ath11k_nss_cipher_type(ar->ab, val);
+-
+-	if (cmd == NSS_WIFI_VDEV_ENCAP_TYPE_CMD)
+-		arvif->nss.encap = val;
+-	else if (cmd == NSS_WIFI_VDEV_DECAP_TYPE_CMD)
+-		arvif->nss.decap = val;
+ 
+ 	vdev_cmd = &vdev_msg->msg.vdev_cmd;
+ 	vdev_cmd->cmd = cmd;
+@@ -3556,6 +3702,8 @@
+ 	}
+ 
+ 	arvif->nss.created = true;
++	WRITE_ONCE(arvif->nss.format_ready, false);
++	WRITE_ONCE(arvif->nss.format_failed, false);
+ 	/* Only a newly allocated and configured VDEV clears a partial install.
+ 	 * The already-created early return above must preserve this gate.
+ 	 */
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -212,6 +212,9 @@
+ 	int encap;
+ 	/* Keep the copy of decap type for nss */
+ 	int decap;
++	/* Only cold VDEV configuration may change packet formats. */
++	bool format_ready;
++	bool format_failed;
+ 	/* AP_VLAN vif context obtained on ext vdev register */
+ 	void* ctx;
+ 	/* Parent AP vif stored in case of AP_VLAN vif */

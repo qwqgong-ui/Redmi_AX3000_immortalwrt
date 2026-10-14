@@ -1,0 +1,657 @@
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -345,6 +345,8 @@
+ 	bool header_valid;
+ 	bool payload_valid;
+ 	bool current_instance;
++	bool aging_valid_at_submit;
++	u32 aging_threshold_raw_at_submit[4];
+ 	struct hal_reo_status status;
+ };
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.h
+@@ -130,6 +130,9 @@
+ void ath11k_dp_reo_query_quarantine(struct ath11k_base *ab);
+ int ath11k_dp_reo_queue_query(struct ath11k_base *ab, u32 vdev_id,
+ 			    const u8 *mac, u8 tid, struct ath11k_reo_query_result *result);
++int ath11k_dp_reo_queue_rebind(struct ath11k *ar, struct ath11k_peer *expected_peer,
++			     struct ath11k_reo_queue *expected_queue, u8 tid,
++			     u64 expected_epoch);
+ void ath11k_dp_process_reo_status(struct ath11k_base *ab);
+ int ath11k_dp_process_rxdma_err(struct ath11k_base *ab, int mac_id, int budget);
+ int ath11k_dp_rx_process_wbm_err(struct ath11k_base *ab,
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -1342,6 +1342,62 @@
+ 			WRITE_ONCE(queue->phase, ATH11K_REO_QUEUE_SUBMITTING);
+ 	}
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
++	return ret;
++}
++
++int ath11k_dp_reo_queue_rebind(struct ath11k *ar, struct ath11k_peer *expected_peer,
++			     struct ath11k_reo_queue *queue, u8 tid, u64 expected_epoch)
++{
++	struct ath11k_base *ab = ar->ab;
++	struct dp_rx_tid *rx_tid;
++	u64 epoch;
++	u16 window;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (ar->state != ATH11K_STATE_ON && ar->state != ATH11K_STATE_RESTARTED)
++		return -ESHUTDOWN;
++	if (tid > IEEE80211_NUM_TIDS)
++		return -EINVAL;
++	spin_lock_bh(&ab->base_lock);
++	if (!ab->nss.reoq_admitting || ab->nss.quiescing) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	if (ath11k_peer_find(ar, expected_peer->vdev_id, expected_peer->addr) != expected_peer ||
++	    !expected_peer->dp_setup_done) {
++		ret = -ESTALE;
++		goto unlock;
++	}
++	rx_tid = &expected_peer->rx_tid[tid];
++	if (!rx_tid->active || rx_tid->reo_queue != queue ||
++	    READ_ONCE(queue->retiring) ||
++	    READ_ONCE(queue->phase) != ATH11K_REO_QUEUE_PUBLISHED) {
++		ret = -ESTALE;
++		goto unlock;
++	}
++	spin_lock_bh(&ab->dp.reo_cmd_lock);
++	ret = ab->dp.reo_cmd_epoch == expected_epoch ? 0 : -ESHUTDOWN;
++	spin_unlock_bh(&ab->dp.reo_cmd_lock);
++	if (ret)
++		goto unlock;
++	ret = ath11k_dp_reo_wmi_begin(ab, queue, false, &epoch);
++	if (ret)
++		goto unlock;
++	ath11k_peer_get(expected_peer);
++	ath11k_dp_reo_queue_get(queue);
++	window = rx_tid->ba_win_sz;
++	spin_unlock_bh(&ab->base_lock);
++
++	/* The notification carries no negotiated window or SSN. Republish the
++	 * existing immutable address only; do not issue HAL UPDATE or allocate DMA.
++	 */
++	ret = ath11k_wmi_peer_rx_reorder_queue_setup(ar, expected_peer->vdev_id,
++						  expected_peer->addr, queue->paddr,
++						  tid, 1, window);
++	return ath11k_dp_reo_wmi_finish(ar, expected_peer, queue, tid, false, epoch, ret);
++unlock:
++	spin_unlock_bh(&ab->base_lock);
+ 	return ret;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "core.h"
++#include "hif.h"
+ #include "dp_tx.h"
+ #include "dp_rx.h"
+ #include "debug.h"
+@@ -1062,6 +1063,20 @@
+ 	spin_lock_bh(&dp->reo_cmd_lock);
+ 	ret = ath11k_dp_tx_reo_submit_locked(ab, HAL_REO_CMD_GET_QUEUE_STATS,
+ 					    &cmd, entry, query->result.submit_epoch);
++	if (ret > 0) {
++		/* Same admission/epoch critical section as the successful REO MMIO
++		 * publication. The status consumer cannot claim this entry until unlock.
++		 */
++		query->result.aging_threshold_raw_at_submit[0] = ath11k_hif_read32(ab,
++			HAL_SEQ_WCSS_UMAC_REO_REG + ab->hw_params.regs->hal_reo1_aging_thresh_ix_0);
++		query->result.aging_threshold_raw_at_submit[1] = ath11k_hif_read32(ab,
++			HAL_SEQ_WCSS_UMAC_REO_REG + ab->hw_params.regs->hal_reo1_aging_thresh_ix_1);
++		query->result.aging_threshold_raw_at_submit[2] = ath11k_hif_read32(ab,
++			HAL_SEQ_WCSS_UMAC_REO_REG + ab->hw_params.regs->hal_reo1_aging_thresh_ix_2);
++		query->result.aging_threshold_raw_at_submit[3] = ath11k_hif_read32(ab,
++			HAL_SEQ_WCSS_UMAC_REO_REG + ab->hw_params.regs->hal_reo1_aging_thresh_ix_3);
++		query->result.aging_valid_at_submit = true;
++	}
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
+ 	if (ret < 0)
+ 		kfree(entry);
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -7,6 +7,7 @@
+ #define ATH11K_NSS_H
+ 
+ #include "net/cfg80211.h"
++#include <linux/workqueue.h>
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ #include <nss_api_if.h>
+ #include <nss_cmn.h>
+@@ -23,6 +24,7 @@
+ struct ath11k_ast_entry;
+ struct ath11k_sta;
+ struct ath11k_nss_peer_state;
++struct ath11k_reo_queue;
+ enum ath11k_ast_entry_type;
+ struct hal_rx_mon_ppdu_info;
+ struct hal_rx_user_status;
+@@ -256,6 +258,31 @@
+ 	void* ctx;
+ 	/* protects stats from nss */
+ 	spinlock_t dump_lock;
++};
++
++#define ATH11K_NSS_REOQ_JOBS 32
++
++struct ath11k_nss_reoq_job {
++	struct ath11k *ar;
++	struct ath11k_peer *peer;
++	struct ath11k_reo_queue *queue;
++	u64 epoch;
++	u16 peer_id;
++	u8 tid;
++	bool injected;
++	bool pending;
++	bool running;
++};
++
++/* Numeric host observations, protected by base_lock; no firmware ABI fields. */
++struct ath11k_nss_reoq_stats {
++	u64 received, notify, injected, queued, duplicate, full;
++	u64 invalid, closed, not_ready, stale, busy, sent, failed, cancelled;
++	u64 last_generation, last_epoch;
++	u32 pending, running, last_peer_id, last_tid, last_interface;
++	u32 last_response, last_error, last_len, last_source;
++	u32 last_job_peer_id, last_job_tid, last_job_source;
++	int last_result;
+ };
+ 
+ /* Structure to hold the soc related info for nss offload support */
+@@ -287,6 +314,11 @@
+ 	bool quiescing;
+ 	bool registered;
+ 	bool init_submitted;
++	bool reoq_initialized;
++	bool reoq_admitting;
++	struct work_struct reoq_work;
++	struct ath11k_nss_reoq_job reoq_jobs[ATH11K_NSS_REOQ_JOBS];
++	struct ath11k_nss_reoq_stats reoq_stats;
+ 	/* Below is used for identifying allocated tx descriptors */
+ 	dma_addr_t tx_desc_paddr[ATH11K_NSS_MAX_NUMBER_OF_PAGE];
+ 	uint32_t * tx_desc_vaddr[ATH11K_NSS_MAX_NUMBER_OF_PAGE];
+@@ -294,6 +326,10 @@
+ };
+ 
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
++void ath11k_nss_reoq_init(struct ath11k_base *ab);
++void ath11k_nss_reoq_start(struct ath11k_base *ab);
++void ath11k_nss_reoq_stop(struct ath11k_base *ab);
++void ath11k_nss_reoq_debugfs_register(struct ath11k_base *ab);
+ bool ath11k_nss_hw_quarantined(u32 hw_rev);
+ bool ath11k_nss_vdev_key_failed(struct ath11k_vif *arvif);
+ int ath11k_nss_tx(struct ath11k_vif *arvif, struct sk_buff *skb);
+@@ -373,6 +409,10 @@
+ 					struct nss_wifi_mesh_rate_limit_config *nss_exc_cfg);
+ #endif
+ #else
++static inline void ath11k_nss_reoq_init(struct ath11k_base *ab) {}
++static inline void ath11k_nss_reoq_start(struct ath11k_base *ab) {}
++static inline void ath11k_nss_reoq_stop(struct ath11k_base *ab) {}
++static inline void ath11k_nss_reoq_debugfs_register(struct ath11k_base *ab) {}
+ static inline int ath11k_nss_tx(struct ath11k_vif *arvif, struct sk_buff *skb)
+ {
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -4,6 +4,8 @@
+  */
+ #include <linux/of.h>
+ #include <linux/refcount.h>
++#include <linux/debugfs.h>
++#include <linux/uaccess.h>
+ 
+ #include "debug.h"
+ #include "mac.h"
+@@ -604,6 +606,318 @@
+ 
+ /*-----------------------------Events/Callbacks------------------------------*/
+ 
++static void ath11k_nss_reoq_job_put(struct ath11k_nss_reoq_job *job)
++{
++	ath11k_dp_reo_queue_put(job->queue);
++	ath11k_peer_put(job->ar, job->peer);
++}
++
++static void ath11k_nss_reoq_work(struct work_struct *work)
++{
++	struct ath11k_soc_nss *nss = container_of(work, struct ath11k_soc_nss, reoq_work);
++	struct ath11k_base *ab = container_of(nss, struct ath11k_base, nss);
++	struct ath11k_nss_reoq_job job;
++	unsigned int i, batch;
++	int ret;
++
++	for (batch = 0; batch < ATH11K_NSS_REOQ_JOBS; batch++) {
++		spin_lock_bh(&ab->base_lock);
++		for (i = 0; i < ATH11K_NSS_REOQ_JOBS; i++)
++			if (nss->reoq_jobs[i].pending)
++				break;
++		if (i == ATH11K_NSS_REOQ_JOBS) {
++			spin_unlock_bh(&ab->base_lock);
++			return;
++		}
++		nss->reoq_jobs[i].pending = false;
++		nss->reoq_jobs[i].running = true;
++		nss->reoq_stats.pending--;
++		nss->reoq_stats.running++;
++		job = nss->reoq_jobs[i];
++		spin_unlock_bh(&ab->base_lock);
++
++		/* Serialize with BA negotiation and ordinary peer cleanup. Closing
++		 * drains this worker outside conf_mutex, before ar or WMI can be freed.
++		 */
++		mutex_lock(&job.ar->conf_mutex);
++		ret = ath11k_dp_reo_queue_rebind(job.ar, job.peer, job.queue,
++					       job.tid, job.epoch);
++		mutex_unlock(&job.ar->conf_mutex);
++
++		spin_lock_bh(&ab->base_lock);
++		if (!ret)
++			nss->reoq_stats.sent++;
++		else if (ret == -ESTALE)
++			nss->reoq_stats.stale++;
++		else if (ret == -ESHUTDOWN)
++			nss->reoq_stats.closed++;
++		else if (ret == -EBUSY)
++			nss->reoq_stats.busy++;
++		else
++			nss->reoq_stats.failed++;
++		nss->reoq_stats.last_result = ret;
++		nss->reoq_stats.last_job_peer_id = job.peer_id;
++		nss->reoq_stats.last_job_tid = job.tid;
++		nss->reoq_stats.last_job_source = job.injected;
++		nss->reoq_stats.last_generation = job.queue->generation;
++		nss->reoq_stats.last_epoch = job.epoch;
++		memset(&nss->reoq_jobs[i], 0, sizeof(nss->reoq_jobs[i]));
++		nss->reoq_stats.running--;
++		spin_unlock_bh(&ab->base_lock);
++		ath11k_nss_reoq_job_put(&job);
++	}
++	/* Bound each invocation so continuous notifications cannot monopolize aux. */
++	spin_lock_bh(&ab->base_lock);
++	if (nss->reoq_admitting && nss->reoq_stats.pending)
++		queue_work(ab->workqueue_aux, &nss->reoq_work);
++	spin_unlock_bh(&ab->base_lock);
++}
++
++void ath11k_nss_reoq_init(struct ath11k_base *ab)
++{
++	INIT_WORK(&ab->nss.reoq_work, ath11k_nss_reoq_work);
++	ab->nss.reoq_initialized = true;
++}
++
++void ath11k_nss_reoq_start(struct ath11k_base *ab)
++{
++	/* Only core_pdev_create success may call this, after every radio hash and
++	 * registration is stable. NSS START alone does not establish that lifetime.
++	 */
++	spin_lock_bh(&ab->base_lock);
++	ab->nss.reoq_admitting = ab->nss.reoq_initialized && ab->nss.enabled &&
++		ab->nss.registered && !ab->nss.quiescing &&
++		!READ_ONCE(ab->nss.ownership_uncertain);
++	spin_unlock_bh(&ab->base_lock);
++}
++
++void ath11k_nss_reoq_stop(struct ath11k_base *ab)
++{
++	struct ath11k_nss_reoq_job job;
++	unsigned int i;
++
++	if (!ab->nss.reoq_initialized)
++		return;
++	spin_lock_bh(&ab->base_lock);
++	ab->nss.reoq_admitting = false;
++	spin_unlock_bh(&ab->base_lock);
++	/* Caller must not hold base_lock/conf_mutex or be the notification worker. */
++	cancel_work_sync(&ab->nss.reoq_work);
++	for (i = 0; i < ATH11K_NSS_REOQ_JOBS; i++) {
++		spin_lock_bh(&ab->base_lock);
++		if (!ab->nss.reoq_jobs[i].pending) {
++			spin_unlock_bh(&ab->base_lock);
++			continue;
++		}
++		job = ab->nss.reoq_jobs[i];
++		memset(&ab->nss.reoq_jobs[i], 0, sizeof(ab->nss.reoq_jobs[i]));
++		ab->nss.reoq_stats.pending--;
++		ab->nss.reoq_stats.cancelled++;
++		spin_unlock_bh(&ab->base_lock);
++		ath11k_nss_reoq_job_put(&job);
++	}
++}
++
++static int ath11k_nss_reoq_enqueue(struct ath11k_base *ab, u32 peer_id,
++				 u32 tid, bool injected)
++{
++	struct ath11k_nss_reoq_job *job;
++	struct ath11k_peer *peer = NULL;
++	struct ath11k_reo_queue *queue;
++	struct ath11k *ar = NULL;
++	struct dp_rx_tid *rx_tid;
++	u64 epoch;
++	unsigned int i, free_slot = ATH11K_NSS_REOQ_JOBS;
++	int ret;
++
++	spin_lock_bh(&ab->base_lock);
++	if (injected)
++		ab->nss.reoq_stats.injected++;
++	if (tid > IEEE80211_NUM_TIDS || peer_id > U16_MAX) {
++		ab->nss.reoq_stats.invalid++;
++		ret = -EINVAL;
++		goto unlock;
++	}
++	if (!ab->nss.reoq_admitting || ab->nss.quiescing ||
++	    !ab->nss.enabled || READ_ONCE(ab->nss.ownership_uncertain) ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags)) {
++		ab->nss.reoq_stats.closed++;
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	for (i = 0; i < ab->num_radios; i++) {
++		ar = ab->pdevs[i].ar;
++		if (!ar)
++			continue;
++		peer = ath11k_peer_find_by_id(ar, peer_id);
++		if (peer)
++			break;
++	}
++	if (!peer || !peer->dp_setup_done) {
++		ab->nss.reoq_stats.not_ready++;
++		ret = -ENOENT;
++		goto unlock;
++	}
++	rx_tid = &peer->rx_tid[tid];
++	queue = rx_tid->reo_queue;
++	if (!rx_tid->active || !queue || READ_ONCE(queue->retiring) ||
++	    READ_ONCE(queue->phase) != ATH11K_REO_QUEUE_PUBLISHED) {
++		ab->nss.reoq_stats.not_ready++;
++		ret = -EAGAIN;
++		goto unlock;
++	}
++	spin_lock_bh(&ab->dp.reo_cmd_lock);
++	epoch = ab->dp.reo_cmd_epoch;
++	ret = ab->dp.reo_cmd_accepting ? 0 : -ESHUTDOWN;
++	spin_unlock_bh(&ab->dp.reo_cmd_lock);
++	if (ret) {
++		ab->nss.reoq_stats.closed++;
++		goto unlock;
++	}
++	for (i = 0; i < ATH11K_NSS_REOQ_JOBS; i++) {
++		job = &ab->nss.reoq_jobs[i];
++		if (!job->pending && !job->running) {
++			free_slot = i;
++			continue;
++		}
++		if (job->peer == peer && job->queue == queue && job->tid == tid) {
++			ab->nss.reoq_stats.duplicate++;
++			ret = 0;
++			goto unlock;
++		}
++	}
++	if (free_slot == ATH11K_NSS_REOQ_JOBS) {
++		ab->nss.reoq_stats.full++;
++		ret = -ENOSPC;
++		goto unlock;
++	}
++	ath11k_peer_get(peer);
++	ath11k_dp_reo_queue_get(queue);
++	job = &ab->nss.reoq_jobs[free_slot];
++	*job = (struct ath11k_nss_reoq_job) {
++		.ar = ar, .peer = peer, .queue = queue, .epoch = epoch,
++		.peer_id = peer_id, .tid = tid, .injected = injected, .pending = true,
++	};
++	ab->nss.reoq_stats.queued++;
++	ab->nss.reoq_stats.pending++;
++	queue_work(ab->workqueue_aux, &ab->nss.reoq_work);
++	ret = 0;
++unlock:
++	spin_unlock_bh(&ab->base_lock);
++	return ret;
++}
++
++static void ath11k_nss_reoq_receive(struct ath11k_base *ab, struct nss_wifili_msg *msg)
++{
++	struct ath11k_nss_reoq_stats *s = &ab->nss.reoq_stats;
++	u32 peer_id, tid;
++	bool valid;
++
++	/* The driver verifies actual receive-buffer bounds before dispatch/logging. */
++	spin_lock_bh(&ab->base_lock);
++	s->received++;
++	s->last_interface = msg->cm.interface;
++	s->last_response = msg->cm.response;
++	s->last_error = msg->cm.error;
++	s->last_len = msg->cm.len;
++	s->last_source = 0;
++	valid = msg->cm.len >= sizeof(msg->msg.reotidqmsg) &&
++		msg->cm.response == NSS_CMN_RESPONSE_NOTIFY && !msg->cm.error &&
++		msg->cm.interface == ab->nss.if_num;
++	if (msg->cm.response == NSS_CMN_RESPONSE_NOTIFY)
++		s->notify++;
++	if (!valid) {
++		s->invalid++;
++		spin_unlock_bh(&ab->base_lock);
++		return;
++	}
++	s->last_peer_id = msg->msg.reotidqmsg.peer_id;
++	s->last_tid = msg->msg.reotidqmsg.tid;
++	peer_id = s->last_peer_id;
++	tid = s->last_tid;
++	spin_unlock_bh(&ab->base_lock);
++	ath11k_nss_reoq_enqueue(ab, peer_id, tid, false);
++}
++
++#ifdef CPTCFG_ATH11K_DEBUGFS
++static ssize_t ath11k_nss_reoq_stats_read(struct file *file, char __user *user_buf,
++					 size_t count, loff_t *ppos)
++{
++	struct ath11k_base *ab = file->private_data;
++	struct ath11k_nss_reoq_stats s;
++	bool admitting;
++	char *buf;
++	int len;
++	ssize_t ret;
++
++	buf = kzalloc(4096, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	spin_lock_bh(&ab->base_lock);
++	s = ab->nss.reoq_stats;
++	admitting = ab->nss.reoq_admitting;
++	spin_unlock_bh(&ab->base_lock);
++	len = scnprintf(buf, 4096,
++		"admitting: %u\nreceived: %llu\nnotify: %llu\ninjected: %llu\n"
++		"queued: %llu\nduplicate: %llu\nfull: %llu\ninvalid: %llu\n"
++		"closed: %llu\nnot_ready: %llu\nstale: %llu\nbusy: %llu\n"
++		"wmi_queued: %llu\nfailed: %llu\ncancelled: %llu\npending: %u\nrunning: %u\n"
++		"last_received_peer_id: %u\nlast_received_tid: %u\nlast_received_interface: %u\n"
++		"last_received_response: %u\nlast_received_error: %u\nlast_received_len: %u\n"
++		"last_job_peer_id: %u\nlast_job_tid: %u\nlast_job_source: %u\n"
++		"last_job_generation: %llu\nlast_job_epoch: %llu\nlast_job_result: %d\n",
++		admitting, s.received, s.notify, s.injected, s.queued, s.duplicate,
++		s.full, s.invalid, s.closed, s.not_ready, s.stale, s.busy, s.sent,
++		s.failed, s.cancelled, s.pending, s.running, s.last_peer_id, s.last_tid,
++		s.last_interface, s.last_response, s.last_error, s.last_len,
++		s.last_job_peer_id, s.last_job_tid, s.last_job_source,
++		s.last_generation, s.last_epoch, s.last_result);
++	ret = simple_read_from_buffer(user_buf, count, ppos, buf, len);
++	kfree(buf);
++	return ret;
++}
++
++static ssize_t ath11k_nss_reoq_rebind_write(struct file *file, const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	struct ath11k_base *ab = file->private_data;
++	char buf[64], peer_text[12], tid_text[12], trailing;
++	u32 peer_id, tid;
++	int ret;
++
++	if (!count || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = 0;
++	if (sscanf(buf, "%11s %11s %c", peer_text, tid_text, &trailing) != 2 ||
++	    kstrtou32(peer_text, 10, &peer_id) || kstrtou32(tid_text, 10, &tid))
++		return -EINVAL;
++	/* Explicit diagnostic source: never count this as a firmware notification. */
++	ret = ath11k_nss_reoq_enqueue(ab, peer_id, tid, true);
++	return ret ? ret : count;
++}
++
++static const struct file_operations ath11k_nss_reoq_stats_fops = {
++	.open = simple_open, .read = ath11k_nss_reoq_stats_read,
++	.owner = THIS_MODULE, .llseek = default_llseek,
++};
++static const struct file_operations ath11k_nss_reoq_rebind_fops = {
++	.open = simple_open, .write = ath11k_nss_reoq_rebind_write,
++	.owner = THIS_MODULE, .llseek = default_llseek,
++};
++#endif
++
++void ath11k_nss_reoq_debugfs_register(struct ath11k_base *ab)
++{
++#ifdef CPTCFG_ATH11K_DEBUGFS
++	debugfs_create_file("nss_reoq_stats", 0400, ab->debugfs_soc, ab,
++			    &ath11k_nss_reoq_stats_fops);
++	debugfs_create_file("nss_reoq_rebind", 0600, ab->debugfs_soc, ab,
++			    &ath11k_nss_reoq_rebind_fops);
++#endif
++}
++
+ static void ath11k_nss_wifili_event_receive(void *context, struct nss_wifili_msg *msg)
+ {
+ 	u32 msg_type = msg->cm.type;
+@@ -658,7 +972,7 @@
+ 		ath11k_nss_get_peer_stats(ab, peer_stats);
+ 		break;
+ 	case NSS_WIFILI_TID_REOQ_SETUP_MSG:
+-		/* TODO setup tidq */
++		ath11k_nss_reoq_receive(ab, msg);
+ 		break;
+ 	case NSS_WIFILI_WDS_PEER_ADD_MSG:
+ 		ath11k_dbg(ab, ATH11K_DBG_NSS_WDS, "nss wifili wds peer add event received %d response %d error %d\n",
+@@ -5323,6 +5637,7 @@
+ 	struct nss_wifili_msg *wlmsg = NULL;
+ 	int ret;
+ 
++	ath11k_nss_reoq_stop(ab);
+ 	if (READ_ONCE(ab->dp.reo_ownership_uncertain))
+ 		return -EIO;
+ 	if (!ab->nss.registered)
+@@ -5452,6 +5767,7 @@
+ {
+ 	int i, ret;
+ 
++	ath11k_nss_reoq_stop(ab);
+ 	if (READ_ONCE(ab->dp.reo_ownership_uncertain))
+ 		return -EIO;
+ 	if (!ab->nss.enabled)
+@@ -5490,6 +5806,7 @@
+ 	int ret = 0;
+ 	u32 target_type;
+ 
++	ath11k_nss_reoq_stop(ab);
+ 	if (ab->nss.ownership_uncertain)
+ 		return -EBUSY;
+ 	if (!ab->nss.enabled)
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2052,6 +2052,7 @@
+ 
+ static void ath11k_core_stop(struct ath11k_base *ab)
+ {
++	ath11k_nss_reoq_stop(ab);
+ 	ath11k_dp_reo_cmd_close(&ab->dp);
+ 	ath11k_dp_reo_query_quarantine(ab);
+ 	/* hif_stop drains CE; REO status callbacks run in DP NAPI. */
+@@ -2151,6 +2152,7 @@
+ 		goto err_thermal_unregister;
+ 	}
+ 
++	ath11k_nss_reoq_start(ab);
+ 	return 0;
+ 
+ err_thermal_unregister:
+@@ -2204,6 +2206,7 @@
+ 
+ static void ath11k_core_pdev_destroy(struct ath11k_base *ab)
+ {
++	ath11k_nss_reoq_stop(ab);
+ 	ath11k_spectral_deinit(ab);
+ 	ath11k_thermal_unregister(ab);
+ 	ath11k_mac_unregister(ab);
+@@ -2429,6 +2432,8 @@
+ 
+ 	mutex_lock(&ab->core_lock);
+ 
++	/* Notification workers take conf_mutex, never core_lock. */
++	ath11k_nss_reoq_stop(ab);
+ 	ath11k_dp_reo_cmd_close(&ab->dp);
+ 	ath11k_dp_reo_query_quarantine(ab);
+ 	ath11k_hif_irq_disable(ab);
+@@ -2938,6 +2943,7 @@
+ 	mutex_init(&ab->qmi.mem_lock);
+ 	mutex_init(&ab->base_ast_lock);
+ 	spin_lock_init(&ab->base_lock);
++	ath11k_nss_reoq_init(ab);
+ 	/* SOC debugfs precedes dp_alloc; reads must have an initialized lock. */
+ 	spin_lock_init(&ab->dp.reo_stats_lock);
+ 	spin_lock_init(&ab->dp.reo_cmd_lock);
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -11013,6 +11013,7 @@
+ 	struct ath11k_pdev *pdev;
+ 	int i;
+ 
++	ath11k_nss_reoq_stop(ab);
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		pdev = &ab->pdevs[i];
+ 		ar = pdev->ar;
+@@ -11338,6 +11339,7 @@
+ 	return 0;
+ 
+ err_cleanup:
++	ath11k_nss_reoq_stop(ab);
+ 	for (i = i - 1; i >= 0; i--) {
+ 		pdev = &ab->pdevs[i];
+ 		ar = pdev->ar;
+@@ -11438,6 +11440,7 @@
+ 	struct ath11k_pdev *pdev;
+ 	int i;
+ 
++	ath11k_nss_reoq_stop(ab);
+ 	/* ar owns PDEV ring metadata still referenced by firmware. */
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+ 		return;
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -961,6 +961,11 @@
+ 		result.requested_window, result.status.uniform_hdr.cmd_num,
+ 		result.status.uniform_hdr.cmd_status, result.status.uniform_hdr.cmd_exe_time,
+ 		result.status.uniform_hdr.timestamp, result.status.tlv_payload_len);
++	len += scnprintf(buf + len, size - len,
++		"aging_valid_at_submit: %u\naging_threshold_raw_at_submit: %u %u %u %u\n",
++		result.aging_valid_at_submit,
++		result.aging_threshold_raw_at_submit[0], result.aging_threshold_raw_at_submit[1],
++		result.aging_threshold_raw_at_submit[2], result.aging_threshold_raw_at_submit[3]);
+ 	if (result.payload_valid) {
+ 		len += scnprintf(buf + len, size - len,
+ 			"ssn_12bit: %u\ncurrent_index_8bit: %u\n"
+@@ -1210,6 +1215,7 @@
+ 			    &fops_reo_queue_targets);
+ 	debugfs_create_file("reo_queue_query", 0600, ab->debugfs_soc, ab,
+ 			    &fops_reo_queue_query);
++	ath11k_nss_reoq_debugfs_register(ab);
+ 
+ 	if (ab->hw_params.sram_dump.start != 0)
+ 		debugfs_create_file("sram", 0400, ab->debugfs_soc, ab,

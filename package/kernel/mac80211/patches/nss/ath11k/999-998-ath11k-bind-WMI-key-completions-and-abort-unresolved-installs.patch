@@ -1,0 +1,620 @@
+Subject: [PATCH] ath11k: bind WMI key completions and abort unresolved installs
+
+Match pending wire identities, arbitrate replies and faults under base_lock,
+and fail recovery wakes explicitly. Keep unresolved channels poisoned for
+the base lifetime because completions carry no cookie. Drain callers and
+RCU callbacks before ar free. Detach host key ownership when deletion fails,
+including pinned retired peers, and expose numeric state without key bytes.
+Same-tuple duplicates after success remain a firmware protocol ambiguity.
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2052,6 +2052,14 @@
+ 
+ static void ath11k_core_stop(struct ath11k_base *ab)
+ {
++	int i;
++
++	spin_lock_bh(&ab->base_lock);
++	ab->wmi_key_admitting = false;
++	spin_unlock_bh(&ab->base_lock);
++	for (i = 0; i < ab->num_radios; i++)
++		if (ab->pdevs[i].ar)
++			ath11k_mac_key_install_close(ab->pdevs[i].ar);
+ 	ath11k_nss_reoq_stop(ab);
+ 	ath11k_dp_reo_cmd_close(&ab->dp);
+ 	ath11k_dp_reo_query_quarantine(ab);
+@@ -2319,6 +2327,12 @@
+ 		goto err_reo_cleanup;
+ 	}
+ 
++	/* Unified WMI ready and the new transport are established. Poison from
++	 * an earlier unresolved key command still remains in this base instance.
++	 */
++	spin_lock_bh(&ab->base_lock);
++	ab->wmi_key_admitting = true;
++	spin_unlock_bh(&ab->base_lock);
+ 	return 0;
+ 
+ err_reo_cleanup:
+@@ -2540,6 +2554,7 @@
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 	ab->stats.fw_crash_counter++;
++	ab->wmi_key_admitting = false;
+ 	spin_unlock_bh(&ab->base_lock);
+ 
+ 	for (i = 0; i < ab->num_radios; i++) {
+@@ -2558,7 +2573,7 @@
+ 		complete(&ar->scan.on_channel);
+ 		complete(&ar->peer_assoc_done);
+ 		complete(&ar->peer_delete_done);
+-		complete(&ar->install_key_done);
++		ath11k_mac_key_install_close(ar);
+ 		complete(&ar->vdev_setup_done);
+ 		complete(&ar->vdev_delete_done);
+ 		complete(&ar->bss_survey_done);
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -725,6 +725,27 @@
+ struct ath11k_rx_buf_id {
+ 	struct list_head list;
+ 	int used_buf_id;
++};
++
++struct ath11k_key_install_tuple {
++	u32 vdev_id;
++	u32 key_idx;
++	u32 key_flags;
++	u8 addr[ETH_ALEN];
++};
++
++/* Host state only: the WMI completion carries no request cookie or cipher. */
++struct ath11k_key_install_state {
++	struct ath11k_key_install_tuple expected;
++	struct ath11k_key_install_tuple last_rx;
++	u64 started, sent, completed, mismatched, unexpected;
++	u64 timeouts, aborted, send_failed, poisoned;
++	u32 last_fw_status;
++	int result;
++	bool active;
++	bool terminal;
++	bool closed;
++	bool reply_seen;
+ };
+ 
+ struct ath11k {
+@@ -812,8 +833,9 @@
+ 	struct completion peer_assoc_done;
+ 	struct completion peer_delete_done;
+ 
+-	int install_key_status;
+ 	struct completion install_key_done;
++	/* Protected by ab->base_lock; conf_mutex serializes callers. */
++	struct ath11k_key_install_state install_key;
+ 
+ 	int last_wmi_vdev_start_status;
+ 	struct completion vdev_setup_done;
+@@ -1060,6 +1082,11 @@
+ 	struct mutex core_lock;
+ 	/* Protects data like peers */
+ 	spinlock_t base_lock;
++	/* An unresolved key reply cannot be distinguished from same-tuple reuse.
++	 * Keep this mask for the entire base lifetime, including ar recreation.
++	 */
++	unsigned long wmi_key_poisoned;
++	bool wmi_key_admitting;
+ 	struct ath11k_pdev pdevs[MAX_RADIOS];
+ 	struct {
+ 		enum WMI_HOST_WLAN_BAND supported_bands;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4303,6 +4303,174 @@
+ 	cancel_delayed_work_sync(&ar->scan.timeout);
+ }
+ 
++static void ath11k_mac_key_install_poison_locked(struct ath11k *ar)
++{
++	lockdep_assert_held(&ar->ab->base_lock);
++	if (!(ar->ab->wmi_key_poisoned & BIT(ar->pdev_idx))) {
++		ar->ab->wmi_key_poisoned |= BIT(ar->pdev_idx);
++		ar->install_key.poisoned++;
++	}
++}
++
++int ath11k_mac_key_install_open(struct ath11k *ar)
++{
++	int ret = 0;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	spin_lock_bh(&ar->ab->base_lock);
++	if (!ar->ab->wmi_key_admitting ||
++	    (ar->ab->wmi_key_poisoned & BIT(ar->pdev_idx)) ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ar->ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_UNREGISTERING, &ar->ab->dev_flags))
++		ret = -ESHUTDOWN;
++	else if (ar->install_key.active)
++		ret = -EBUSY;
++	else
++		ar->install_key.closed = false;
++	spin_unlock_bh(&ar->ab->base_lock);
++	return ret;
++}
++
++void ath11k_mac_key_install_close(struct ath11k *ar)
++{
++	struct ath11k_key_install_state *key = &ar->install_key;
++
++	/* Recovery must wake a caller holding conf_mutex, so never acquire it. */
++	spin_lock_bh(&ar->ab->base_lock);
++	key->closed = true;
++	if (key->active && key->result != -ESHUTDOWN) {
++		if (!key->terminal)
++			ath11k_mac_key_install_poison_locked(ar);
++		key->result = -ESHUTDOWN;
++		key->terminal = true;
++		key->aborted++;
++		complete(&ar->install_key_done);
++	}
++	spin_unlock_bh(&ar->ab->base_lock);
++}
++
++static int ath11k_mac_key_install_begin(struct ath11k *ar,
++				      const struct wmi_vdev_install_key_arg *arg)
++{
++	struct ath11k_key_install_state *key = &ar->install_key;
++	int ret = 0;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	spin_lock_bh(&ar->ab->base_lock);
++	if (!ar->ab->wmi_key_admitting || key->closed ||
++	    (ar->ab->wmi_key_poisoned & BIT(ar->pdev_idx)) ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ar->ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_UNREGISTERING, &ar->ab->dev_flags) ||
++	    (ar->state != ATH11K_STATE_ON && ar->state != ATH11K_STATE_RESTARTED)) {
++		ret = -ESHUTDOWN;
++		goto out;
++	}
++	if (key->active) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	reinit_completion(&ar->install_key_done);
++	key->expected.vdev_id = arg->vdev_id;
++	key->expected.key_idx = arg->key_idx;
++	key->expected.key_flags = arg->key_flags;
++	ether_addr_copy(key->expected.addr, arg->macaddr);
++	key->result = -EINPROGRESS;
++	key->active = true;
++	key->terminal = false;
++	key->reply_seen = false;
++	key->started++;
++out:
++	spin_unlock_bh(&ar->ab->base_lock);
++	return ret;
++}
++
++bool ath11k_mac_key_install_event(struct ath11k *ar,
++		const struct wmi_vdev_install_key_complete_arg *event)
++{
++	struct ath11k_key_install_state *key = &ar->install_key;
++	bool accepted = false;
++
++	spin_lock_bh(&ar->ab->base_lock);
++	key->last_rx.vdev_id = event->vdev_id;
++	key->last_rx.key_idx = event->key_idx;
++	key->last_rx.key_flags = event->key_flags;
++	ether_addr_copy(key->last_rx.addr, event->macaddr);
++	key->last_fw_status = event->status;
++	if (!key->active || key->terminal) {
++		key->unexpected++;
++		goto out;
++	}
++	if (key->expected.vdev_id != event->vdev_id ||
++	    key->expected.key_idx != event->key_idx ||
++	    key->expected.key_flags != event->key_flags ||
++	    !ether_addr_equal(key->expected.addr, event->macaddr)) {
++		key->mismatched++;
++		goto out;
++	}
++
++	key->result = event->status == WMI_VDEV_INSTALL_KEY_COMPL_STATUS_SUCCESS ?
++		0 : -EINVAL;
++	key->terminal = true;
++	key->reply_seen = true;
++	key->completed++;
++	/* Completion and terminal publication stay under the same lock as begin.
++	 * An event must not drop the lock then wake a later reinitialized waiter.
++	 */
++	complete(&ar->install_key_done);
++	accepted = true;
++out:
++	spin_unlock_bh(&ar->ab->base_lock);
++	return accepted;
++}
++
++static int ath11k_mac_key_install_finish(struct ath11k *ar, int send_error,
++				       bool waited)
++{
++	struct ath11k_key_install_state *key = &ar->install_key;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	spin_lock_bh(&ar->ab->base_lock);
++	if (WARN_ON(!key->active)) {
++		ret = -ESHUTDOWN;
++		goto out;
++	}
++	if (send_error) {
++		key->send_failed++;
++		if (key->reply_seen) {
++			/* A completion for a command reported unpublished is ambiguous. */
++			ath11k_mac_key_install_poison_locked(ar);
++			ret = -EIO;
++		} else {
++			ret = key->terminal ? key->result : send_error;
++		}
++	} else {
++		key->sent++;
++		if (!ar->ab->wmi_key_admitting || key->closed ||
++		    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags) ||
++		    test_bit(ATH11K_FLAG_QMI_FAIL, &ar->ab->dev_flags) ||
++		    test_bit(ATH11K_FLAG_UNREGISTERING, &ar->ab->dev_flags)) {
++			key->result = -ESHUTDOWN;
++			if (!key->reply_seen)
++				ath11k_mac_key_install_poison_locked(ar);
++		} else if (!key->terminal) {
++			key->result = waited ? -EIO : -ETIMEDOUT;
++			key->timeouts++;
++			ath11k_mac_key_install_poison_locked(ar);
++		}
++		ret = key->result;
++	}
++	key->result = ret;
++	key->terminal = true;
++	key->active = false;
++out:
++	spin_unlock_bh(&ar->ab->base_lock);
++	return ret;
++}
++
+ static int ath11k_install_key(struct ath11k_vif *arvif,
+ 			      struct ieee80211_key_conf *key,
+ 			      enum set_key_cmd cmd,
+@@ -4320,8 +4488,6 @@
+ 	};
+ 
+ 	lockdep_assert_held(&arvif->ar->conf_mutex);
+-
+-	reinit_completion(&ar->install_key_done);
+ 
+ 	if (test_bit(ATH11K_FLAG_HW_CRYPTO_DISABLED, &ar->ab->dev_flags))
+ 		return 0;
+@@ -4362,15 +4528,27 @@
+ 			      IEEE80211_KEY_FLAG_RESERVE_TAILROOM;
+ 
+ install:
+-	ret = ath11k_wmi_vdev_install_key(arvif->ar, &arg);
+-
++	ret = ath11k_mac_key_install_begin(ar, &arg);
+ 	if (ret)
+ 		return ret;
+-
+-	if (!wait_for_completion_timeout(&ar->install_key_done, 1 * HZ))
+-		return -ETIMEDOUT;
+-
+-	return ar->install_key_status ? -EINVAL : 0;
++	ret = ath11k_wmi_vdev_install_key(arvif->ar, &arg);
++
++	if (ret)
++		return ath11k_mac_key_install_finish(ar, ret, false);
++
++	return ath11k_mac_key_install_finish(ar, 0,
++		wait_for_completion_timeout(&ar->install_key_done, HZ));
++}
++
++static bool ath11k_mac_key_install_available_locked(struct ath11k *ar)
++{
++	lockdep_assert_held(&ar->ab->base_lock);
++	return ar->ab->wmi_key_admitting && !ar->install_key.closed &&
++		!(ar->ab->wmi_key_poisoned & BIT(ar->pdev_idx)) &&
++		!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags) &&
++		!test_bit(ATH11K_FLAG_QMI_FAIL, &ar->ab->dev_flags) &&
++		!test_bit(ATH11K_FLAG_UNREGISTERING, &ar->ab->dev_flags) &&
++		(ar->state == ATH11K_STATE_ON || ar->state == ATH11K_STATE_RESTARTED);
+ }
+ 
+ static int ath11k_clear_peer_keys(struct ath11k_vif *arvif,
+@@ -4383,6 +4561,7 @@
+ 	int ret;
+ 	int i;
+ 	u32 flags = 0;
++	bool can_submit;
+ 	struct ieee80211_key_conf *keys[WMI_MAX_KEY_INDEX + 1];
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+@@ -4397,11 +4576,19 @@
+ 		keys[i]= peer->keys[i];
+ 		peer->keys[i]= NULL;
+ 	}
++	can_submit = ath11k_mac_key_install_available_locked(ar);
+ 	spin_unlock_bh(&ab->base_lock);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(keys); i++) {
+ 		if (!keys[i])
+ 			continue;
++		/* The caller lost host ownership above. Do not dereference the key
++		 * merely to construct a command that the closed channel rejects.
++		 */
++		if (!can_submit) {
++			first_errno = -ESHUTDOWN;
++			continue;
++		}
+ 
+ 		/* key flags are not required to delete the key */
+ 		ret = ath11k_install_key(arvif, keys[i],
+@@ -4500,6 +4687,66 @@
+ 		peer->mcast_keyidx = i;
+ 		peer->sec_type_grp = ath11k_dp_tx_get_encrypt_type(remaining->cipher);
+ 		break;
++	}
++}
++
++static void ath11k_mac_key_detach_failed_delete(struct ath11k_vif *arvif,
++		struct ath11k_peer *expected_peer, const u8 *addr,
++		struct ieee80211_key_conf *key, struct ath11k_sta *arsta)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_peer *peer;
++	struct ieee80211_key_conf *remaining;
++	u16 free_idx = 0;
++	bool keep_group = false;
++	bool clear_pn;
++	int i;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	spin_lock_bh(&ar->ab->base_lock);
++	peer = ath11k_peer_find(ar, arvif->vdev_id, addr);
++	if (peer != expected_peer) {
++		/* Unmap may retire this pinned peer into the DMA quarantine. Drop
++		 * only its exact borrowed key, without examining other old keys or
++		 * changing replacement/STA/VLAN state.
++		 */
++		if (expected_peer && expected_peer->keys[key->keyidx] == key)
++			expected_peer->keys[key->keyidx] = NULL;
++		goto unlock;
++	}
++	if (!peer || peer->keys[key->keyidx] != key)
++		goto unlock;
++
++	clear_pn = (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
++		peer->ucast_keyidx == key->keyidx;
++	if (key->vlan_id && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
++	    arvif->vlan_keyid_map &&
++	    arvif->vlan_keyid_map[key->vlan_id] == key->hw_key_idx) {
++		for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++			remaining = peer->keys[i];
++			if (remaining && remaining != key &&
++			    !(remaining->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
++			    remaining->vlan_id == key->vlan_id &&
++			    remaining->hw_key_idx == key->hw_key_idx)
++				keep_group = true;
++		}
++		if (!keep_group) {
++			free_idx = key->hw_key_idx;
++			arvif->vlan_keyid_map[key->vlan_id] = 0;
++		}
++	}
++	ath11k_mac_peer_key_remove(peer, key);
++	if (arsta && clear_pn)
++		arsta->pn_type = HAL_PN_TYPE_NONE;
++unlock:
++	spin_unlock_bh(&ar->ab->base_lock);
++	if (free_idx && free_idx < ARRAY_SIZE(arvif->free_groupidx_map) * BITS_PER_LONG) {
++		/* All key/map writers are serialized by conf_mutex. Do not nest
++		 * data_lock under base_lock merely to return the bitmap slot.
++		 */
++		spin_lock_bh(&ar->data_lock);
++		set_bit(free_idx, arvif->free_groupidx_map);
++		spin_unlock_bh(&ar->data_lock);
+ 	}
+ }
+ 
+@@ -4548,7 +4795,8 @@
+ 		peer_addr = vif->addr;
+ 	}
+ 
+-	key->hw_key_idx = key->keyidx;
++	if (cmd == SET_KEY)
++		key->hw_key_idx = key->keyidx;
+ 
+ 	if (ab->nss.enabled && vif->type == NL80211_IFTYPE_AP_VLAN) {
+ 		ap_vlan_arvif = arvif;
+@@ -4842,6 +5090,12 @@
+ unlock:
+ 	spin_unlock_bh(&ab->base_lock);
+ exit:
++	/* mac80211 frees a disabled key even when firmware removal fails.
++	 * Detach only this peer/key instance before returning the error.
++	 */
++	if (ret && cmd == DISABLE_KEY && key_peer)
++		ath11k_mac_key_detach_failed_delete(arvif, key_peer, peer_addr,
++						    key, arsta);
+ 	if (ret && wmi_key_attempted)
+ 		ath11k_nss_key_recover(arvif, key_peer, key_state);
+ 	ath11k_nss_key_put(key_state);
+@@ -6935,6 +7189,11 @@
+ 
+ 	/* set default thermal throttling */
+ 	ath11k_thermal_set_throttling(ar, 1);
++	ret = ath11k_mac_key_install_open(ar);
++	if (ret) {
++		ath11k_warn(ab, "WMI key channel unavailable: %d\n", ret);
++		goto err;
++	}
+ 
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+@@ -6956,6 +7215,7 @@
+ 			ath11k_warn(ab, "failed to unwind EAP pkt route: %d\n",
+ 				    route_ret);
+ 	}
++	ath11k_mac_key_install_close(ar);
+ 	ar->state = ATH11K_STATE_OFF;
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+@@ -6969,6 +7229,7 @@
+ 	struct scan_chan_list_params *params;
+ 	int ret;
+ 
++	ath11k_mac_key_install_close(ar);
+ 	ath11k_mac_drain_tx(ar);
+ 
+ 	mutex_lock(&ar->conf_mutex);
+@@ -11028,6 +11289,9 @@
+ 	struct ath11k_pdev *pdev;
+ 	int i;
+ 
++	spin_lock_bh(&ab->base_lock);
++	ab->wmi_key_admitting = false;
++	spin_unlock_bh(&ab->base_lock);
+ 	ath11k_nss_reoq_stop(ab);
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		pdev = &ab->pdevs[i];
+@@ -11035,6 +11299,7 @@
+ 		if (!ar)
+ 			continue;
+ 
++		ath11k_mac_key_install_close(ar);
+ 		__ath11k_mac_unregister(ar);
+ 		ath11k_peer_rhash_tbl_destroy(ar);
+ 	}
+@@ -11417,6 +11682,7 @@
+ 		init_completion(&ar->peer_assoc_done);
+ 		init_completion(&ar->peer_delete_done);
+ 		init_completion(&ar->install_key_done);
++		ar->install_key.closed = true;
+ 		init_completion(&ar->bss_survey_done);
+ 		init_completion(&ar->scan.started);
+ 		init_completion(&ar->scan.completed);
+@@ -11455,6 +11721,9 @@
+ 	struct ath11k_pdev *pdev;
+ 	int i;
+ 
++	spin_lock_bh(&ab->base_lock);
++	ab->wmi_key_admitting = false;
++	spin_unlock_bh(&ab->base_lock);
+ 	ath11k_nss_reoq_stop(ab);
+ 	/* ar owns PDEV ring metadata still referenced by firmware. */
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+@@ -11466,6 +11735,14 @@
+ 		if (!ar)
+ 			continue;
+ 
++		ath11k_mac_key_install_close(ar);
++		/* close wakes the installer; conf_mutex drains the caller before free.
++		 * The stopped/unregistered radio cannot reopen its admission gate.
++		 */
++		mutex_lock(&ar->conf_mutex);
++		RCU_INIT_POINTER(ab->pdevs_active[i], NULL);
++		mutex_unlock(&ar->conf_mutex);
++		synchronize_rcu();
+ 		ath11k_fw_stats_free(&ar->fw_stats);
+ 		ieee80211_free_hw(ar->hw);
+ 		pdev->ar = NULL;
+--- a/drivers/net/wireless/ath/ath11k/mac.h
++++ b/drivers/net/wireless/ath/ath11k/mac.h
+@@ -173,6 +173,10 @@
+ void ath11k_mac_handle_beacon_miss(struct ath11k *ar, u32 vdev_id);
+ void ath11k_mac_bcn_tx_event(struct ath11k_vif *arvif);
+ int ath11k_mac_wait_tx_complete(struct ath11k *ar);
++int ath11k_mac_key_install_open(struct ath11k *ar);
++void ath11k_mac_key_install_close(struct ath11k *ar);
++bool ath11k_mac_key_install_event(struct ath11k *ar,
++		const struct wmi_vdev_install_key_complete_arg *event);
+ int ath11k_mac_vif_set_keepalive(struct ath11k_vif *arvif,
+ 				 enum wmi_sta_keepalive_method method,
+ 				 u32 interval);
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -8326,15 +8326,11 @@
+ 		return;
+ 	}
+ 
+-	ar->install_key_status = 0;
+-
+-	if (install_key_compl.status != WMI_VDEV_INSTALL_KEY_COMPL_STATUS_SUCCESS) {
++	if (ath11k_mac_key_install_event(ar, &install_key_compl) &&
++	    install_key_compl.status != WMI_VDEV_INSTALL_KEY_COMPL_STATUS_SUCCESS) {
+ 		ath11k_warn(ab, "install key failed for %pM status %d\n",
+ 			    install_key_compl.macaddr, install_key_compl.status);
+-		ar->install_key_status = install_key_compl.status;
+-	}
+-
+-	complete(&ar->install_key_done);
++	}
+ 	rcu_read_unlock();
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2069,6 +2069,47 @@
+ 	.llseek = default_llseek,
+ };
+ 
++static int ath11k_wmi_key_stats_show(struct seq_file *s, void *unused)
++{
++	struct ath11k *ar = s->private;
++	struct ath11k_key_install_state key;
++	bool poisoned;
++	bool admitting;
++
++	spin_lock_bh(&ar->ab->base_lock);
++	key = ar->install_key;
++	poisoned = !!(ar->ab->wmi_key_poisoned & BIT(ar->pdev_idx));
++	admitting = ar->ab->wmi_key_admitting;
++	spin_unlock_bh(&ar->ab->base_lock);
++	seq_printf(s, "admitting: %u\n", admitting);
++	seq_printf(s, "active: %u\nterminal: %u\nclosed: %u\npoisoned: %u\nresult: %d\nreply_seen: %u\n",
++		   key.active, key.terminal, key.closed, poisoned, key.result, key.reply_seen);
++	seq_printf(s, "started: %llu\nsent: %llu\ncompleted: %llu\nmismatched: %llu\nunexpected: %llu\n",
++		   key.started, key.sent, key.completed, key.mismatched, key.unexpected);
++	seq_printf(s, "timeouts: %llu\naborted: %llu\nsend_failed: %llu\npoison_events: %llu\n",
++		   key.timeouts, key.aborted, key.send_failed, key.poisoned);
++	seq_printf(s, "expected_vdev: %u\nexpected_idx: %u\nexpected_flags: 0x%x\nexpected_addr: %pM\n",
++		   key.expected.vdev_id, key.expected.key_idx,
++		   key.expected.key_flags, key.expected.addr);
++	seq_printf(s, "received_vdev: %u\nreceived_idx: %u\nreceived_flags: 0x%x\nreceived_addr: %pM\nreceived_status: %u\n",
++		   key.last_rx.vdev_id, key.last_rx.key_idx, key.last_rx.key_flags,
++		   key.last_rx.addr, key.last_fw_status);
++	return 0;
++}
++
++static int ath11k_wmi_key_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ath11k_wmi_key_stats_show, inode->i_private);
++}
++
++static const struct file_operations fops_wmi_key_stats = {
++	.owner = THIS_MODULE,
++	.open = ath11k_wmi_key_stats_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ int ath11k_debugfs_register(struct ath11k *ar)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -2102,6 +2143,8 @@
+ 			    &fops_extd_rx_stats);
+ 	debugfs_create_file("reo_aging_thresholds", 0600,
+ 			    ar->debug.debugfs_pdev, ar, &fops_reo_aging);
++	debugfs_create_file("wmi_key_stats", 0400,
++			    ar->debug.debugfs_pdev, ar, &fops_wmi_key_stats);
+ 	debugfs_create_file("pktlog_filter", 0644,
+ 			    ar->debug.debugfs_pdev, ar,
+ 			    &fops_pktlog_filter);

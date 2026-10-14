@@ -1,0 +1,98 @@
+Subject: [PATCH] ecm: expand only proven MFC output bridges as local-out
+
+Validate the current MFC cookie and output list before relaxing bridge
+host-copy constraints.  Synthetic input-bridge copies keep the L2 getter.
+
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -37,6 +37,8 @@
+ #include <linux/wireless.h>
+ #if defined(ECM_MULTICAST_ENABLE) && defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT)
+ #include <linux/if_bridge.h>
++#include <linux/mroute.h>
++#include <linux/mroute6.h>
+ #endif
+ #ifdef ECM_MULTICAST_ENABLE
+ #include <linux/workqueue.h>
+@@ -5359,6 +5361,57 @@
+ 	}
+ }
+ 
++#ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
++/* A routed hierarchy can contain an added input bridge as well as true MFC
++ * outputs.  Only the latter use bridge local-out (without a host copy).
++ */
++static int ecm_interface_multicast_routed_bridge_get_if(
++		struct ecm_front_end_connection_instance *feci,
++		struct net_device *brdev, bool input_bridge,
++		ip_addr_t origin, ip_addr_t group, uint32_t max_dst,
++		uint32_t *dst_dev, bool is_v4)
++{
++	uint32_t routed_ifindexes[ECM_DB_MULTICAST_IF_MAX];
++	struct br_ip ip = {};
++	u64 cookie = 0, seq;
++	int count, i;
++
++	if (input_bridge)
++		return ecm_interface_linux_mcs_bridge_get_if(brdev, origin,
++				group, max_dst, dst_dev, is_v4);
++	if (is_v4) {
++		ip.proto = htons(ETH_P_IP);
++		ip.src.ip4 = htonl(origin[0]);
++		ip.dst.ip4 = htonl(group[0]);
++		count = ipmr_find_mfc_entry(&init_net, ip.src.ip4, ip.dst.ip4,
++				ECM_DB_MULTICAST_IF_MAX, routed_ifindexes, &cookie);
++	} else {
++#ifdef ECM_IPV6_ENABLE
++		ip.proto = htons(ETH_P_IPV6);
++		ECM_IP_ADDR_TO_NIN6_ADDR(ip.src.ip6, origin);
++		ECM_IP_ADDR_TO_NIN6_ADDR(ip.dst.ip6, group);
++		count = ip6mr_find_mfc_entry(&init_net, &ip.src.ip6, &ip.dst.ip6,
++				ECM_DB_MULTICAST_IF_MAX, routed_ifindexes, &cookie);
++#else
++		return -EOPNOTSUPP;
++#endif
++	}
++	if (count > ECM_DB_MULTICAST_IF_MAX)
++		return -E2BIG;
++	if (count <= 0)
++		return count < 0 ? count : -ENOENT;
++	if (!cookie || cookie != feci->multicast_route_cookie)
++		return -ESTALE;
++	for (i = 0; i < count; i++) {
++		if (routed_ifindexes[i] == (uint32_t)brdev->ifindex)
++			return br_mcast_offload_get_routed_egress_ifindexes(brdev,
++					&ip, dst_dev, max_dst, &seq);
++	}
++	return ecm_interface_linux_mcs_bridge_get_if(brdev, origin, group,
++			max_dst, dst_dev, is_v4);
++}
++#endif
++
+ /*
+  * ecm_interface_multicast_heirarchy_construct_routed()
+  *	Create destination interface heirarchy for a routed multicast connectiona
+@@ -5491,7 +5544,10 @@
+ 			if (ECM_IP_ADDR_IS_V4(packet_src_addr)) {
+ #ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 				rcu_read_lock();
+-				if_num = ecm_interface_linux_mcs_bridge_get_if(dest_dev, packet_src_addr, packet_dest_addr, mc_max_dst, mc_dst_if_index, true);
++				if_num = ecm_interface_multicast_routed_bridge_get_if(feci,
++						dest_dev, dest_dev == in_dev || dest_dev == br_dev_src,
++						packet_src_addr, packet_dest_addr,
++						mc_max_dst, mc_dst_if_index, true);
+ 				rcu_read_unlock();
+ #else
+ 				if_num = mc_bridge_ipv4_get_if(dest_dev, htonl((packet_src_addr[0])),
+@@ -5505,7 +5561,10 @@
+ 				ECM_IP_ADDR_TO_NIN6_ADDR(group6, packet_dest_addr);
+ #ifdef ECM_MCAST_LINUX_SNOOPER_SUPPORT
+ 				rcu_read_lock();
+-				if_num = ecm_interface_linux_mcs_bridge_get_if(dest_dev, packet_src_addr, packet_dest_addr, mc_max_dst, mc_dst_if_index, false);
++				if_num = ecm_interface_multicast_routed_bridge_get_if(feci,
++						dest_dev, dest_dev == in_dev || dest_dev == br_dev_src,
++						packet_src_addr, packet_dest_addr,
++						mc_max_dst, mc_dst_if_index, false);
+ 				rcu_read_unlock();
+ #else
+ 				if_num = mc_bridge_ipv6_get_if(dest_dev, &origin6, &group6, mc_max_dst,

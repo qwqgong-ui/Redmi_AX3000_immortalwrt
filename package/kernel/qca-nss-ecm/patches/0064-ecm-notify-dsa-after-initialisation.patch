@@ -1,0 +1,23 @@
+Subject: [PATCH] ecm: announce successful init to the DSA ownership gate
+
+DSA refuses wired rule creation until its worker holds the live ECM provider.
+This prevents direct module removal from discarding unresolved rule ownership.
+
+--- a/ecm_init.c
++++ b/ecm_init.c
+@@ -148,6 +148,7 @@
+  * ecm_init()
+  */
+ static bool ecm_bridge_conntrack_acquired;
++extern void qca_dsa_nss_ecm_notify(void);
+ 
+ static int __init ecm_init(void)
+ {
+@@ -309,6 +310,7 @@
+ 	ecm_front_end_common_sysctl_register();
+ 	ecm_tracker_udp_sysctl_register();
+ 	printk(KERN_INFO "ECM init complete\n");
++	qca_dsa_nss_ecm_notify();
+ 	return 0;
+ 
+ err_bridge_conntrack:

@@ -1,0 +1,96 @@
+NSS qdisc compatibility hunks from nss-packages 94f44cc3bd4259b9b49f186f157e90e06b5ab003.
+
+--- a/nss_qdisc/nss_bf.c
++++ b/nss_qdisc/nss_bf.c
+@@ -381,7 +381,11 @@ static int nss_bf_graft_class(struct Qdi
+ 	 */
+ 	nss_qdisc_info("Grafting old: %px with new: %px\n", *old, new);
+ 	if (*old != &noop_qdisc) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+ 		struct nss_qdisc *nq_old = (struct nss_qdisc *)qdisc_priv(*old);
++#else
++		struct nss_qdisc *nq_old = (struct nss_qdisc *)qdisc_priv(((struct Qdisc *)(*old)));
++#endif
+ 		nss_qdisc_info("Detaching old: %px\n", *old);
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.qos_tag = cl->nq.qos_tag;
+ 		if (nss_qdisc_node_detach(&cl->nq, nq_old, &nim_detach,
+--- a/nss_qdisc/nss_qdisc.c
++++ b/nss_qdisc/nss_qdisc.c
+@@ -374,7 +374,9 @@ static int nss_qdisc_refresh_bshaper_ass
+ 	br_update.port_list_count = 0;
+ 	br_update.unassign_count = 0;
+ 
+-	read_lock(&dev_base_lock);
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0))
++ 	read_lock(&dev_base_lock);
++#endif
+ 	dev = first_net_device(&init_net);
+ 
+ 	while(dev) {
+@@ -421,7 +423,10 @@ static int nss_qdisc_refresh_bshaper_ass
+ nextdev:
+ 		dev = next_net_device(dev);
+ 	}
+-	read_unlock(&dev_base_lock);
++
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0))
++ 	read_unlock(&dev_base_lock);
++#endif
+ 
+ 	nss_qdisc_info("List count %d\n", br_update.port_list_count);
+ 
+--- a/nss_qdisc/nss_tbl.c
++++ b/nss_qdisc/nss_tbl.c
+@@ -350,7 +350,11 @@ static int nss_tbl_graft(struct Qdisc *s
+ 
+ 	nss_qdisc_info("Grafting old: %px with new: %px\n", *old, new);
+ 	if (*old != &noop_qdisc) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+ 		struct nss_qdisc *nq_old = (struct nss_qdisc *)qdisc_priv(*old);
++#else
++		struct nss_qdisc *nq_old = (struct nss_qdisc *)qdisc_priv(((struct Qdisc *)(*old)));
++#endif
+ 		nss_qdisc_info("Detaching old: %px\n", *old);
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.qos_tag = q->nq.qos_tag;
+ 		if (nss_qdisc_node_detach(&q->nq, nq_old, &nim_detach,
+--- a/nss_qdisc/nss_htb.c
++++ b/nss_qdisc/nss_htb.c
+@@ -642,7 +642,11 @@ static int nss_htb_graft_class(struct Qd
+ 	nss_qdisc_info("grafting old: %x with new: %x\n", (*old)->handle, new->handle);
+ 	if (*old != &noop_qdisc) {
+ 		nss_qdisc_trace("detaching old: %x\n", (*old)->handle);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+ 		nq_old = qdisc_priv(*old);
++#else
++		nq_old = qdisc_priv(((struct Qdisc *)(*old)));
++#endif
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.qos_tag = cl->nq.qos_tag;
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.snc.htb_group_detach.child_qos_tag = nq_old->qos_tag;
+ 		if (nss_qdisc_node_detach(&cl->nq, nq_old, &nim_detach,
+--- a/nss_qdisc/nss_wrr.c
++++ b/nss_qdisc/nss_wrr.c
+@@ -488,7 +488,11 @@ static int nss_wrr_graft_class(struct Qd
+ 	 */
+ 	nss_qdisc_info("Grafting old: %px with new: %px\n", *old, new);
+ 	if (*old != &noop_qdisc) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+ 		struct nss_qdisc *nq_child = qdisc_priv(*old);
++#else
++		struct nss_qdisc *nq_child = qdisc_priv(((struct Qdisc *)(*old)));
++#endif
+ 		nss_qdisc_info("Detaching old: %px\n", *old);
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.qos_tag = cl->nq.qos_tag;
+ 		if (nss_qdisc_node_detach(&cl->nq, nq_child, &nim_detach,
+--- a/nss_qdisc/nss_prio.c
++++ b/nss_qdisc/nss_prio.c
+@@ -341,7 +341,11 @@ static int nss_prio_graft(struct Qdisc *
+ 
+ 	nss_qdisc_info("Grafting old: %px with new: %px\n", *old, new);
+ 	if (*old != &noop_qdisc) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+ 		struct nss_qdisc *nq_old = qdisc_priv(*old);
++#else
++		struct nss_qdisc *nq_old = qdisc_priv(((struct Qdisc *)(*old)));
++#endif
+ 		nss_qdisc_info("Detaching old: %px\n", *old);
+ 		nim_detach.msg.shaper_configure.config.msg.shaper_node_config.qos_tag = q->nq.qos_tag;

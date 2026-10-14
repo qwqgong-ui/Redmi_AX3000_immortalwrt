@@ -53,6 +53,14 @@
 		// ath11k sends Wi-Fi frames to NSS_ETH_RX_INTERFACE. Its handler
 		// and the generic redirect interface types are registered by IPv4.
 		qcom,ipv4-enabled;
+		qcom,ipv6-enabled;
+		qcom,ipv4-reasm-enabled;
+		qcom,ipv6-reasm-enabled;
+		qcom,pppoe-enabled;
+		qcom,shaping-enabled;
+		qcom,igs-enabled;
+		qcom,bridge-enabled;
+		qcom,vlan-enabled;
 		qcom,wlanredirect-enabled;
 		qcom,wlan-dataplane-offload-enabled;
 	};

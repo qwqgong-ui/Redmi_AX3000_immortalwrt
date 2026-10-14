@@ -1,0 +1,631 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ECM: safely exclude QoS-managed wireless interfaces
+
+Bound and serialize the denied-interface sysctl, protect packet lookups,
+publish policy before retiring only affected flows, and clean up on unload.
+This keeps LAN acceleration while wireless WAN ingress traverses NSS SQM.
+
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -48,6 +48,7 @@
+ #include <net/gre.h>
+ #ifdef ECM_INTERFACE_SKIP_ACCEL_ENABLE
+ #include <linux/jhash.h>
++#include <linux/mutex.h>
+ #endif
+ #ifdef ECM_INTERFACE_BOND_ENABLE
+ #include <net/bonding.h>
+@@ -158,6 +159,8 @@
+  */
+ static DEFINE_HASHTABLE(ecm_interface_accel_denied_list, ECM_INTERFACE_ACCEL_DENIED_HASH_BITS);
+ static atomic_t ecm_interface_accel_denied_list_count;
++static DEFINE_SPINLOCK(ecm_interface_accel_denied_lock);
++static DEFINE_MUTEX(ecm_interface_accel_denied_writer);
+ 
+ /*
+  * Hash node in the denied interface hash list
+@@ -897,7 +900,7 @@
+  * 	Checks if the device name is in the accel_denied_list
+  * 	Return true if interface is in the list.
+  */
+-static inline bool ecm_interface_lookup_in_denied_list(char *dev_name)
++static bool ecm_interface_lookup_in_denied_list_locked(const char *dev_name)
+ {
+ 	struct hlist_node *pnode, *temp;
+ 	uint32_t hash;
+@@ -918,6 +921,16 @@
+ 	}
+ 
+ 	return false;
++}
++
++static inline bool ecm_interface_lookup_in_denied_list(const char *dev_name)
++{
++	bool denied;
++
++	spin_lock_bh(&ecm_interface_accel_denied_lock);
++	denied = ecm_interface_lookup_in_denied_list_locked(dev_name);
++	spin_unlock_bh(&ecm_interface_accel_denied_lock);
++	return denied;
+ }
+ #endif
+ 
+@@ -9764,195 +9777,276 @@
+  * ecm_interface_accel_denied_read()
+  * 	Reads the denied interface name from the denied hash list and prints
+  */
+-static int ecm_interface_accel_denied_read(void *buffer, size_t *lenp, loff_t *ppos)
+-{
+-	struct hlist_node *pnode;
+-	size_t bytes = 0;
+-	char *read_buf;
+-	int i, len;
+-
+-	if (!atomic_read(&ecm_interface_accel_denied_list_count)) {
+-		DEBUG_ERROR("no interface present in denied list\n");
+-		return -EINVAL;
+-	}
+-
+-	read_buf = kzalloc(ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE * 16 *sizeof(char), GFP_KERNEL);
+-	if (!read_buf) {
+-		DEBUG_ERROR("Failed to allocate buffer for interface array \n");
+-		return -ENOMEM;
+-	}
+-
+-	for (i = 0; i < ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE; i++) {
+-		hlist_for_each(pnode, &ecm_interface_accel_denied_list[i]) {
+-			struct ecm_interface_denied_node *p = hlist_entry(pnode, struct ecm_interface_denied_node, hnode);
+-
+-			if (!p) {
+-				DEBUG_ERROR("No entry on the given hash\n");
+-				continue;
+-			}
+-
+-			len = scnprintf(read_buf + bytes, 16, "%s ", p->name);
+-			if (!len) {
+-				DEBUG_ERROR("Failed to format device name = %s\n", p->name);
+-				kfree(read_buf);
+-				return -EINVAL;
+-			}
+-			bytes += len;
+-		}
+-	}
+-
+-	len = scnprintf(read_buf + bytes, 4, "\n");
+-	bytes += len;
+-	bytes = memory_read_from_buffer(buffer, *lenp, ppos, read_buf, bytes);
+-	*lenp = bytes;
+-
+-	kfree(read_buf);
+-	return 0;
+-}
+-
+-/*
+- * ecm_interface_accel_denied_handler()
+- * 	Proc handler function for denied devices read/write operation.
+- */
+-static int ecm_interface_accel_denied_handler(int write, void *buffer, size_t *lenp, loff_t *ppos)
+-{
+-	char *buf, *pfree, *token;
+-	int count;
+-
+-	if (!write) {
+-		return ecm_interface_accel_denied_read(buffer, lenp, ppos);
+-	}
+-
+-	/*
+-	 * Allocate buffer to hold up to 16 interfaces
+-	 * Assuming each interfaces have 16 bytes each
+-	 */
+-	buf = kzalloc((ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE * 8) * sizeof(char), GFP_KERNEL);
+-	if (!buf) {
+-		DEBUG_ERROR("Failed to allocate buffer for write operation\n");
+-		return -ENOMEM;
+-	}
+-
+-	pfree = buf;
+-	count = *lenp;
+-
+-	if (count > (ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE * 8 * sizeof(char))) {
+-		DEBUG_ERROR("maximum length supported is 256\n");
+-		kfree(pfree);
+-		return -EINVAL;
+-	}
+-
+-	memcpy(buf, buffer, count);
+-	*lenp = count;
+-	*ppos += count;
+-
+-	token = strsep(&buf, " ");
+-	if (strlen(token) != 3) {
+-		DEBUG_ERROR("cmd: echo \"add/del eth1 eth2\" > /proc/sys/net/ecm/interface_denied_list\n");
+-		kfree(pfree);
+-		return -EINVAL;
+-	}
+-
+-	if (!strncmp(token, "add", 3)) {
+-		while ((token = strsep(&buf, " ")) != NULL) {
+-			struct ecm_interface_denied_node *p;
+-			struct net_device *dev_to_defunct;
+-			char *newline;
+-			uint32_t hash;
+-			int token_len;
+-
+-			p = kzalloc(sizeof(struct ecm_interface_denied_node), GFP_KERNEL);
+-			if (!p) {
+-				DEBUG_ERROR("unable to allocate the memory for interface %s\n", token);
+-				kfree(pfree);
+-				return -ENOMEM;
+-			}
+-
+-			/*
+-			 * Strip newline characters from the token
+-			 * Required for last string in the list.
+-			 */
+-			newline = strchr(token, '\n');
+-			if (newline) {
+-				*newline = '\0';
+-			}
+-
+-			/*
+-			 * Copy only the size of parse string and make it null terminate
+-			 */
+-			token_len = strlen(token);
+-			memcpy(p->name, token, token_len);
+-			p->name[token_len] = '\0';
+-
+-			/*
+-			 * Check if the interface name already present.
+-			 */
+-			if (ecm_interface_lookup_in_denied_list(p->name)) {
+-				DEBUG_ERROR("interface already been added\n");
+-				kfree(p);
+-				continue;
+-			}
+-
+-			dev_to_defunct = dev_get_by_name(&init_net, p->name);
+-			if (!dev_to_defunct) {
+-				DEBUG_ERROR("interface %s couldn't be found\n", p->name);
+-				kfree(p);
++/* Only retire flows whose interface hierarchy actually uses the named device.
++ * The generic device-defunct helper falls back to defunct_all without XREFs.
++ */
++static bool ecm_interface_denied_iface(struct ecm_db_iface_instance *ii, int target)
++{
++	struct net_device *dev;
++	int ifindex;
++	bool denied;
++
++	if (!ii)
++		return true;
++	ifindex = ecm_db_iface_interface_identifier_get(ii);
++	if (target)
++		return ifindex == target;
++	dev = dev_get_by_index(&init_net, ifindex);
++	if (!dev)
++		return true;
++	denied = ecm_interface_lookup_in_denied_list(dev->name);
++	dev_put(dev);
++	return denied;
++}
++
++static bool ecm_interface_denied_connection(struct ecm_db_connection_instance *ci, int target)
++{
++	bool denied = false;
++	int dir;
++
++	for (dir = 0; dir < ECM_DB_OBJ_DIR_MAX && !denied; dir++) {
++		struct ecm_db_iface_instance *ifaces[ECM_DB_IFACE_HEIRARCHY_MAX];
++		int first, index;
++
++		first = ecm_db_connection_interfaces_get_and_ref(ci, ifaces, dir);
++		if (first < 0 || first > ECM_DB_IFACE_HEIRARCHY_MAX)
++			return true;
++		for (index = first; index < ECM_DB_IFACE_HEIRARCHY_MAX; index++) {
++			if (ecm_interface_denied_iface(ifaces[index], target)) {
++				denied = true;
+ 				break;
+ 			}
+-
+-			hash = (uint32_t)jhash(p->name, token_len, ecm_db_jhash_rnd) % ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE;
+-			INIT_HLIST_NODE(&p->hnode);
+-			hlist_add_head(&p->hnode, &ecm_interface_accel_denied_list[hash]);
+-
+-			/*
+-			 * Defunct the rules if ci is created before echo
+-			 */
+-			ecm_interface_dev_defunct_connections(dev_to_defunct);
+-			atomic_inc(&ecm_interface_accel_denied_list_count);
+-			dev_put(dev_to_defunct);
+-		}
+-	} else if (!strncmp(token, "del", 3)) {
+-		while ((token = strsep(&buf, " ")) != NULL) {
+-			struct hlist_node *pnode, *temp;
+-			struct net_device *dev_to_defunct;
+-			char *newline;
+-			uint32_t hash;
+-
+-			newline = strchr(token, '\n');
+-			if (newline) {
+-				*newline = '\0';
+-			}
+-
+-			hash = (uint32_t)jhash(token, strlen(token), ecm_db_jhash_rnd) % ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE;
+-
+-			hlist_for_each_safe(pnode, temp, &ecm_interface_accel_denied_list[hash]) {
+-				struct ecm_interface_denied_node *p = hlist_entry(pnode, struct ecm_interface_denied_node, hnode);
+-				if (!strcmp(p->name, token)) {
+-					dev_to_defunct = dev_get_by_name(&init_net, token);
+-					if (!dev_to_defunct) {
+-						DEBUG_ERROR("interface %s couldn't be found\n", token);
++		}
++		ecm_db_connection_interfaces_deref(ifaces, first);
++	}
++#ifdef ECM_MULTICAST_ENABLE
++	if (!denied) {
++		ip_addr_t destination;
++
++		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, destination);
++		if (ecm_ip_addr_is_multicast(destination)) {
++			struct ecm_db_iface_instance *outputs = NULL;
++			int32_t *first = NULL;
++			int row;
++
++			if (!ecm_db_multicast_connection_to_interfaces_get_and_ref_all(ci, &outputs, &first))
++				denied = true;
++			else {
++				for (row = 0; row < ECM_DB_MULTICAST_IF_MAX && !denied; row++) {
++					struct ecm_db_iface_instance **ifaces;
++					int start = *ecm_db_multicast_if_first_get_at_index(first, row);
++					int index;
++
++					if (start == ECM_DB_IFACE_HEIRARCHY_MAX)
++						continue;
++					if (start < 0 || start >= ECM_DB_IFACE_HEIRARCHY_MAX) {
++						denied = true;
+ 						break;
+ 					}
+-
+-					hlist_del(&p->hnode);
+-					kfree(p);
+-
+-					/*
+-					 * Defunct the rule to create new ci
+-					 */
+-					ecm_interface_dev_defunct_connections(dev_to_defunct);
+-					atomic_dec(&ecm_interface_accel_denied_list_count);
+-					dev_put(dev_to_defunct);
+-					break;
++					ifaces = (struct ecm_db_iface_instance **)ecm_db_multicast_if_heirarchy_get(outputs, row);
++					if (!ifaces) {
++						denied = true;
++						break;
++					}
++					for (index = start; index < ECM_DB_IFACE_HEIRARCHY_MAX; index++)
++						if (ecm_interface_denied_iface(ifaces[index], target)) {
++							denied = true;
++							break;
++						}
+ 				}
+ 			}
+-		}
+-	} else {
+-		DEBUG_ERROR("Use command: echo \"add/del eth1 eth2 eth3\" > /proc/sys/net/ecm/interface_denied_list\n");
+-	}
+-
+-	kfree(pfree);
+-	return count;
++			if (outputs && first)
++				ecm_db_multicast_connection_to_interfaces_deref_all(outputs, first);
++		}
++	}
++#endif
++	return denied;
++}
++
++/* At pending-set time the connection is already in the DB. A concurrent
++ * policy writer either blocks it here or finds it during targeted retirement;
++ * ECM's existing deferred deceleration covers a CREATE still awaiting ACK.
++ */
++bool ecm_interface_connection_accel_allowed(struct ecm_db_connection_instance *ci)
++{
++	if (!atomic_read(&ecm_interface_accel_denied_list_count))
++		return true;
++	return !ecm_interface_denied_connection(ci, 0);
++}
++
++static void ecm_interface_denied_defunct(struct net_device *dev)
++{
++	struct ecm_db_connection_instance *ci, *next;
++
++	ci = ecm_db_connections_get_and_ref_first();
++	while (ci) {
++		next = ecm_db_connection_get_and_ref_next(ci);
++		if (ecm_interface_denied_connection(ci, dev->ifindex))
++			ecm_db_connection_make_defunct(ci);
++		ecm_db_connection_deref(ci);
++		ci = next;
++	}
++}
++
++static int ecm_interface_accel_denied_read(void *buffer, size_t *lenp, loff_t *ppos)
++{
++	const size_t capacity = ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE * IFNAMSIZ + 2;
++	struct ecm_interface_denied_node *node;
++	char *snapshot;
++	size_t bytes = 0;
++	ssize_t copied;
++	int bucket;
++
++	snapshot = kzalloc(capacity, GFP_KERNEL);
++	if (!snapshot)
++		return -ENOMEM;
++	spin_lock_bh(&ecm_interface_accel_denied_lock);
++	hash_for_each(ecm_interface_accel_denied_list, bucket, node, hnode)
++		bytes += scnprintf(snapshot + bytes, capacity - bytes, "%s ", node->name);
++	spin_unlock_bh(&ecm_interface_accel_denied_lock);
++	bytes += scnprintf(snapshot + bytes, capacity - bytes, "\n");
++	copied = memory_read_from_buffer(buffer, *lenp, ppos, snapshot, bytes);
++	kfree(snapshot);
++	if (copied < 0)
++		return copied;
++	*lenp = copied;
++	return 0;
++}
++
++/* Validate the entire request before touching the list. Names may precede
++ * netdev creation, and deletion must work after a wireless VIF disappears.
++ * The writer mutex serializes updates and rule retirement; packet lookups
++ * and snapshots share a short BH-safe lock with publication and removal.
++ */
++static int ecm_interface_accel_denied_handler(int write, void *buffer, size_t *lenp, loff_t *ppos)
++{
++	struct ecm_interface_denied_node *nodes[ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE] = {};
++	char *names[ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE];
++	char *request, *cursor, *command, *token;
++	size_t length = *lenp;
++	int count = 0, needed = 0, i, j, ret = 0;
++	bool add;
++
++	if (!write)
++		return ecm_interface_accel_denied_read(buffer, lenp, ppos);
++	if (!length || length > 256 || memchr(buffer, '\0', length))
++		return -EINVAL;
++	request = kzalloc(length + 1, GFP_KERNEL);
++	if (!request)
++		return -ENOMEM;
++	memcpy(request, buffer, length);
++	cursor = strim(request);
++	command = strsep(&cursor, " \t\n");
++	if (!strcmp(command, "add"))
++		add = true;
++	else if (!strcmp(command, "del"))
++		add = false;
++	else {
++		ret = -EINVAL;
++		goto free_request;
++	}
++	while ((token = strsep(&cursor, " \t\n"))) {
++		if (!*token)
++			continue;
++		if (strlen(token) >= IFNAMSIZ || !dev_valid_name(token)) {
++			ret = -EINVAL;
++			goto free_request;
++		}
++		for (j = 0; j < count; j++)
++			if (!strcmp(names[j], token))
++				break;
++		if (j < count)
++			continue;
++		if (count == ARRAY_SIZE(names)) {
++			ret = -E2BIG;
++			goto free_request;
++		}
++		names[count++] = token;
++	}
++	if (!count) {
++		ret = -EINVAL;
++		goto free_request;
++	}
++	if (add) {
++		for (i = 0; i < count; i++) {
++			nodes[i] = kzalloc(sizeof(*nodes[i]), GFP_KERNEL);
++			if (!nodes[i]) {
++				ret = -ENOMEM;
++				goto free_nodes;
++			}
++			strscpy(nodes[i]->name, names[i], IFNAMSIZ);
++		}
++	}
++	mutex_lock(&ecm_interface_accel_denied_writer);
++	spin_lock_bh(&ecm_interface_accel_denied_lock);
++	if (add) {
++		for (i = 0; i < count; i++)
++			if (!ecm_interface_lookup_in_denied_list_locked(names[i]))
++				needed++;
++		if (atomic_read(&ecm_interface_accel_denied_list_count) + needed >
++				ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE) {
++			ret = -ENOSPC;
++			goto unlock;
++		}
++	}
++	for (i = 0; i < count; i++) {
++		uint32_t hash = jhash(names[i], strlen(names[i]), ecm_db_jhash_rnd) %
++			ECM_INTERFACE_ACCEL_DENIED_DEVICE_HTABLE_SIZE;
++		struct ecm_interface_denied_node *node;
++		struct hlist_node *next;
++
++		if (add) {
++			if (ecm_interface_lookup_in_denied_list_locked(names[i]))
++				continue;
++			hlist_add_head(&nodes[i]->hnode, &ecm_interface_accel_denied_list[hash]);
++			nodes[i] = NULL;
++			atomic_inc(&ecm_interface_accel_denied_list_count);
++		} else {
++			hlist_for_each_entry_safe(node, next, &ecm_interface_accel_denied_list[hash], hnode) {
++				if (strcmp(node->name, names[i]))
++					continue;
++				hlist_del(&node->hnode);
++				atomic_dec(&ecm_interface_accel_denied_list_count);
++				kfree(node);
++				break;
++			}
++		}
++	}
++unlock:
++	spin_unlock_bh(&ecm_interface_accel_denied_lock);
++	if (!ret) {
++		/* Publication precedes retirement so replacement flows see the policy. */
++		for (i = 0; i < count; i++) {
++			struct net_device *dev = dev_get_by_name(&init_net, names[i]);
++			if (!dev)
++				continue;
++			ecm_interface_denied_defunct(dev);
++			dev_put(dev);
++		}
++		*ppos += length;
++	}
++	mutex_unlock(&ecm_interface_accel_denied_writer);
++free_nodes:
++	for (i = 0; i < count; i++)
++		kfree(nodes[i]);
++free_request:
++	kfree(request);
++	return ret;
++}
++
++static void ecm_interface_accel_denied_clear(void)
++{
++	struct ecm_interface_denied_node *node;
++	struct hlist_node *next;
++	int bucket;
++
++	spin_lock_bh(&ecm_interface_accel_denied_lock);
++	hash_for_each_safe(ecm_interface_accel_denied_list, bucket, next, node, hnode) {
++		hlist_del(&node->hnode);
++		kfree(node);
++	}
++	atomic_set(&ecm_interface_accel_denied_list_count, 0);
++	spin_unlock_bh(&ecm_interface_accel_denied_lock);
+ }
+ 
+ /*
+@@ -11103,5 +11197,8 @@
+ 	if (ecm_interface_ctl_table_header) {
+ 		unregister_sysctl_table(ecm_interface_ctl_table_header);
+ 	}
++#ifdef ECM_INTERFACE_SKIP_ACCEL_ENABLE
++	ecm_interface_accel_denied_clear();
++#endif
+ }
+ EXPORT_SYMBOL(ecm_interface_exit);
+--- a/ecm_interface.h
++++ b/ecm_interface.h
+@@ -156,6 +156,7 @@
+ struct net_device *ecm_interface_dev_find_by_local_addr(ip_addr_t addr);
+ bool ecm_interface_find_gateway(ip_addr_t daddr, ip_addr_t saddr, ip_addr_t gw_addr, uint32_t skb_mark);
+ void ecm_interface_dev_defunct_connections(struct net_device *dev);
++#include "ecm_interface_policy.h"
+ void ecm_interface_defunct_connections_by_bridge_port(struct net_device *dev);
+ void ecm_interface_node_connections_defunct(uint8_t *mac, int ip_version);
+ void ecm_interface_node_connections_defunct_by_type(uint8_t *mac, int ip_version, ecm_db_connection_defunct_type_t type);
+--- /dev/null
++++ b/ecm_interface_policy.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: ISC */
++#ifndef ECM_INTERFACE_POLICY_H
++#define ECM_INTERFACE_POLICY_H
++#include <linux/types.h>
++
++struct ecm_db_connection_instance;
++#ifdef ECM_INTERFACE_SKIP_ACCEL_ENABLE
++bool ecm_interface_connection_accel_allowed(struct ecm_db_connection_instance *ci);
++#else
++static inline bool ecm_interface_connection_accel_allowed(struct ecm_db_connection_instance *ci)
++{
++	return true;
++}
++#endif
++#endif
+--- a/frontends/nss/ecm_nss_ipv4.h
++++ b/frontends/nss/ecm_nss_ipv4.h
+@@ -17,6 +17,7 @@
+ #ifndef __ECM_NSS_IPV4_H
+ #define __ECM_NSS_IPV4_H
+ #include <nss_api_if.h>
++#include "ecm_interface_policy.h"
+ 
+ extern int ecm_nss_ipv4_no_action_limit_default;		/* Default no-action limit. */
+ extern int ecm_nss_ipv4_driver_fail_limit_default;		/* Default driver fail limit. */
+@@ -78,6 +79,9 @@
+ 	/*
+ 	 * Is connection acceleration permanently failed?
+ 	 */
++	if (!ecm_interface_connection_accel_allowed(feci->ci))
++		return false;
++
+ 	spin_lock_bh(&feci->lock);
+ 	if (ECM_FRONT_END_ACCELERATION_FAILED(feci->accel_mode)) {
+ 		spin_unlock_bh(&feci->lock);
+--- a/frontends/nss/ecm_nss_ipv6.h
++++ b/frontends/nss/ecm_nss_ipv6.h
+@@ -17,6 +17,7 @@
+ #ifndef __ECM_NSS_IPV6_H
+ #define __ECM_NSS_IPV6_H
+ #include <nss_api_if.h>
++#include "ecm_interface_policy.h"
+ 
+ extern int ecm_nss_ipv6_no_action_limit_default;		/* Default no-action limit. */
+ extern int ecm_nss_ipv6_driver_fail_limit_default;		/* Default driver fail limit. */
+@@ -78,6 +79,9 @@
+ 	/*
+ 	 * Is connection acceleration permanently failed?
+ 	 */
++	if (!ecm_interface_connection_accel_allowed(feci->ci))
++		return false;
++
+ 	spin_lock_bh(&feci->lock);
+ 	if (ECM_FRONT_END_ACCELERATION_FAILED(feci->accel_mode)) {
+ 		spin_unlock_bh(&feci->lock);
+--- a/frontends/nss/ecm_nss_multicast_ipv4.c
++++ b/frontends/nss/ecm_nss_multicast_ipv4.c
+@@ -840,6 +840,18 @@
+ 	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+ 		kfree(nim);
++		return -1;
++	}
++
++	/*
++	 * Ref the connection before issuing an NSS rule
++	 * This ensures that when the NSS responds to the command - which may even be immediately -
++	 * the callback function can trust the correct ref was taken for its purpose.
++	 * NOTE: remember that this will also implicitly hold the feci.
++	 */
++	if (!ecm_interface_connection_accel_allowed(feci->ci)) {
++		kfree(nim);
++		ecm_db_connection_make_defunct(feci->ci);
+ 		return -1;
+ 	}
+ 
+--- a/frontends/nss/ecm_nss_multicast_ipv6.c
++++ b/frontends/nss/ecm_nss_multicast_ipv6.c
+@@ -847,6 +847,18 @@
+ 	    feci->multicast_generation != ecm_interface_multicast_generation_get()) {
+ 		DEBUG_INFO("%px: connection:%px regen occurred - aborting accel rule.\n", feci, feci->ci);
+ 		kfree(nim);
++		return -1;
++	}
++
++	/*
++	 * Ref the connection before issuing an NSS rule
++	 * This ensures that when the NSS responds to the command - which may even be immediately -
++	 * the callback function can trust the correct ref was taken for its purpose.
++	 * NOTE: remember that this will also implicitly hold the feci.
++	 */
++	if (!ecm_interface_connection_accel_allowed(feci->ci)) {
++		kfree(nim);
++		ecm_db_connection_make_defunct(feci->ci);
+ 		return -1;
+ 	}
+ 

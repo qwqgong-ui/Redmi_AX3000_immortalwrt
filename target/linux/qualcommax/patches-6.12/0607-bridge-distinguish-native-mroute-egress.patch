@@ -1,0 +1,79 @@
+Subject: [PATCH] bridge: distinguish native multicast route egress snapshots
+
+A VIF holds ALLMULTI on its output bridge.  Bridge local-out does not make
+another host copy; keep the host-copy guard for input and L2 offload.
+
+--- a/include/linux/if_bridge.h
++++ b/include/linux/if_bridge.h
+@@ -140,6 +140,9 @@
+ 		struct br_mcast_offload_snapshot *snapshot);
+ int br_mcast_offload_get_ifindexes(struct net_device *dev,
+ 		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq);
++/* Only for expansion of a proven native MFC output, never input/L2 copies. */
++int br_mcast_offload_get_routed_egress_ifindexes(struct net_device *dev,
++		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq);
+ int br_mcast_offload_set_mcu(struct net_device *dev, int bridge_ifindex,
+ 			   u64 seq, bool enabled);
+ #else
+--- a/net/bridge/br_mdb.c
++++ b/net/bridge/br_mdb.c
+@@ -1922,8 +1922,9 @@
+ 	return count;
+ }
+ 
+-int br_mcast_offload_get_ifindexes(struct net_device *dev,
+-		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq)
++static int br_mcast_offload_ifindexes(struct net_device *dev,
++		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq,
++		bool routed_egress)
+ {
+ 	struct net_bridge_mdb_entry *mp;
+ 	struct net_bridge_mcast *brmctx;
+@@ -1977,15 +1978,20 @@
+ 	}
+ 	if (!mp)
+ 		goto out;
+-	/* No NSS host-copy destination is provided by this interface. */
++	/* Input/L2 offload must preserve the bridge's host copy.  A real
++	 * mroute output uses br_dev_xmit(), whose multicast local_rcv is false.
++	 * In particular, adding that output as a VIF sets IFF_ALLMULTI without
++	 * requiring a second local delivery from bridge local-out.
++	 */
+ 	eth.h_proto = addr->proto;
+ 	meta.protocol = addr->proto;
+ 	if (!br_multicast_querier_exists(brmctx, &eth, mp)) {
+ 		count = -EAGAIN;
+ 		goto out;
+ 	}
+-	if (mp->host_joined || (dev->flags & IFF_ALLMULTI) ||
+-	    br_multicast_is_router(brmctx, &meta)) {
++	if (!routed_egress &&
++	    (mp->host_joined || (dev->flags & IFF_ALLMULTI) ||
++	     br_multicast_is_router(brmctx, &meta))) {
+ 		count = -EOPNOTSUPP;
+ 		goto out;
+ 	}
+@@ -2011,8 +2017,23 @@
+ 	kfree(indices);
+ 	return count;
+ }
++
++int br_mcast_offload_get_ifindexes(struct net_device *dev,
++		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq)
++{
++	return br_mcast_offload_ifindexes(dev, addr, ifindexes, capacity, seq,
++					false);
++}
+ EXPORT_SYMBOL_GPL(br_mcast_offload_get_ifindexes);
+ 
++int br_mcast_offload_get_routed_egress_ifindexes(struct net_device *dev,
++		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq)
++{
++	return br_mcast_offload_ifindexes(dev, addr, ifindexes, capacity, seq,
++					true);
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_get_routed_egress_ifindexes);
++
+ int br_mdb_get(struct net_device *dev, struct nlattr *tb[], u32 portid, u32 seq,
+ 	       struct netlink_ext_ack *extack)
+ {

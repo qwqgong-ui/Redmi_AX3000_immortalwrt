@@ -1,0 +1,60 @@
+--- a/Makefile
++++ b/Makefile
+@@ -10,6 +10,9 @@ qca-nss-tun6rd-objs := nss_connmgr_tun6r
+ ccflags-y += -DNSS_TUN6RD_DEBUG_LEVEL=0
+ ccflags-y += -Wall -Werror
+ 
++# Kernel 6.12 compatibility
++ccflags-y += -Wno-missing-prototypes -include $(src)/compat.h
++
+ KERNELVERSION := $(word 1, $(subst ., ,$(KERNELVERSION))).$(word 2, $(subst ., ,$(KERNELVERSION)))
+ 
+ obj-$(bridge-mgr)+= bridge/
+--- a/bridge/nss_bridge_mgr.c
++++ b/bridge/nss_bridge_mgr.c
+@@ -1486,7 +1486,7 @@ static struct notifier_block nss_bridge_
+  * nss_bridge_mgr_wan_inf_add_handler
+  *	Marks an interface as a WAN interface for special handling by bridge.
+  */
+-static int nss_bridge_mgr_wan_intf_add_handler(struct ctl_table *table,
++static int nss_bridge_mgr_wan_intf_add_handler(compat_const struct ctl_table *table,
+ 						int write, void __user *buffer,
+ 						size_t *lenp, loff_t *ppos)
+ {
+@@ -1535,7 +1535,7 @@ static int nss_bridge_mgr_wan_intf_add_h
+  * nss_bridge_mgr_wan_inf_del_handler
+  *	Un-marks an interface as a WAN interface.
+  */
+-static int nss_bridge_mgr_wan_intf_del_handler(struct ctl_table *table,
++static int nss_bridge_mgr_wan_intf_del_handler(compat_const struct ctl_table *table,
+ 						int write, void __user *buffer,
+ 						size_t *lenp, loff_t *ppos)
+ {
+@@ -1593,8 +1593,7 @@ static struct ctl_table nss_bridge_mgr_t
+ 		.maxlen         = sizeof(char) * IFNAMSIZ,
+ 		.mode           = 0644,
+ 		.proc_handler   = &nss_bridge_mgr_wan_intf_del_handler,
+-	},
+-	{ }
++	}
+ };
+ 
+ /*
+--- /dev/null
++++ b/compat.h
+@@ -0,0 +1,15 @@
++// compat.h
++#ifndef _COMPAT_H
++#define _COMPAT_H
++
++#include <linux/version.h>
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
++#include <linux/vmalloc.h>
++#define compat_const const
++#define strlcpy strscpy
++#else
++#define compat_const
++#endif
++
++#endif /* _COMPAT_H */

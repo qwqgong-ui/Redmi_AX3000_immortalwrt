@@ -1,0 +1,80 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] driver: bound wireless qdisc teardown lifetimes
+
+Track base-interface callback requests with revocable driver-owned tokens.
+
+--- a/nss_if.c
++++ b/nss_if.c
+@@ -21,6 +21,7 @@
+ 
+ #include "nss_tx_rx_common.h"
+ #include "nss_if_log.h"
++#include "nss_control.h"
+ 
+ /*
+  * nss_if_pvt
+@@ -141,6 +142,8 @@
+ 	 * Trace messages.
+ 	 */
+ 	nss_if_log_rx_msg(nim);
++	if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_BASE_IF, NULL))
++		return;
+ 
+ 	/*
+ 	 * Do we have a callback?
+@@ -216,6 +219,33 @@
+ }
+ EXPORT_SYMBOL(nss_if_tx_msg_with_size);
+ 
++/* The client owns the returned token, not a pointer echoed by firmware.
++ * Cancel before destroying its callback context, even after a timeout.
++ */
++nss_tx_status_t nss_if_tx_msg_tracked(struct nss_ctx_instance *ctx,
++		struct nss_if_msg *msg, uint32_t *cookie)
++{
++	if (cookie)
++		*cookie = 0;
++	NSS_VERIFY_CTX_MAGIC(ctx);
++	if (msg->cm.type >= NSS_IF_MAX_MSG_TYPES ||
++	    msg->cm.interface < NSS_PHYSICAL_IF_START ||
++	    msg->cm.interface >= NSS_MAX_NET_INTERFACES ||
++	    !ctx->subsys_dp_register[msg->cm.interface].ndev)
++		return NSS_TX_FAILURE_BAD_PARAM;
++	if (!nss_control_open(ctx, NSS_CONTROL_BASE_IF, msg->cm.interface))
++		return NSS_TX_FAILURE_NOT_READY;
++	return nss_control_send(ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++			NSS_CONTROL_BASE_IF, cookie);
++}
++EXPORT_SYMBOL(nss_if_tx_msg_tracked);
++
++void nss_if_cancel_msg(uint32_t cookie)
++{
++	nss_control_cancel(cookie);
++}
++EXPORT_SYMBOL(nss_if_cancel_msg);
++
+ /*
+  * nss_if_tx_msg()
+  *	Transmit a message to the specific interface on this core.
+--- a/nss_control.h
++++ b/nss_control.h
+@@ -6,6 +6,7 @@
+ 	NSS_CONTROL_DYNAMIC,
+ 	NSS_CONTROL_WIFI_VDEV,
+ 	NSS_CONTROL_PROJECT,
++	NSS_CONTROL_BASE_IF,
+ 	NSS_CONTROL_FAMILY_MAX,
+ };
+ 
+--- a/exports/nss_if.h
++++ b/exports/nss_if.h
+@@ -352,6 +352,9 @@
+  * Status of the Tx operation.
+  */
+ nss_tx_status_t nss_if_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_if_msg *nim);
++nss_tx_status_t nss_if_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++		struct nss_if_msg *nim, uint32_t *cookie);
++void nss_if_cancel_msg(uint32_t cookie);
+ 
+ /**
+  * nss_if_msg_sync

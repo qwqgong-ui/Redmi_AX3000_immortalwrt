@@ -1,0 +1,348 @@
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -1313,6 +1313,125 @@
+ 	complete(&request->complete);
+ }
+ 
++struct ath11k_nss_vdev_state_request {
++	struct ath11k_nss_vdev_request request;
++	u8 mac_addr[ETH_ALEN];
++	bool echo_match;
++};
++
++static void ath11k_nss_vdev_state_cb(void *app_data, struct nss_cmn_msg *cm)
++{
++	struct ath11k_nss_vdev_state_request *state = app_data;
++	struct ath11k_nss_vdev_request *request;
++	struct nss_wifi_vdev_msg *msg;
++
++	if (!state)
++		return;
++	request = &state->request;
++	if (cm->type != request->type || cm->interface != request->if_num ||
++	    cm->response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++
++	/* An ACK confirms acceptance, not a state readback. The ABI does not
++	 * require an echoed MAC or a response payload; inspect only a complete
++	 * UP payload and record its echo without rejecting a valid ACK.
++	 */
++	request->result = cm->response == NSS_CMN_RESPONSE_ACK && !cm->error ?
++		0 : -EREMOTEIO;
++	if (request->type == NSS_WIFI_VDEV_INTERFACE_UP_MSG &&
++	    cm->len == sizeof(msg->msg.vdev_enable)) {
++		msg = container_of(cm, struct nss_wifi_vdev_msg, cm);
++		state->echo_match = ether_addr_equal(msg->msg.vdev_enable.mac_addr,
++						    state->mac_addr);
++	}
++	request->response = cm->response;
++	request->error = cm->error;
++	request->len = cm->len;
++	complete(&request->complete);
++}
++
++static int ath11k_nss_vdev_set_state(struct ath11k_vif *arvif, bool up)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_nss_vdev_state_request *state;
++	struct ath11k_nss_vdev_request *request;
++	struct nss_wifi_vdev_msg *msg;
++	nss_tx_status_t status = NSS_TX_FAILURE;
++	unsigned long waited = 0, started = jiffies;
++	u32 cookie = 0, payload_len;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	state = kzalloc(sizeof(*state), GFP_KERNEL);
++	if (!state)
++		return -ENOMEM;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg) {
++		kfree(state);
++		return -ENOMEM;
++	}
++	request = &state->request;
++	init_completion(&request->complete);
++	request->type = up ? NSS_WIFI_VDEV_INTERFACE_UP_MSG :
++		NSS_WIFI_VDEV_INTERFACE_DOWN_MSG;
++	request->if_num = arvif->nss.if_num;
++	request->result = -ETIMEDOUT;
++	payload_len = up ? sizeof(struct nss_wifi_vdev_enable_msg) :
++		sizeof(struct nss_wifi_vdev_disable_msg);
++	if (up) {
++		ether_addr_copy(state->mac_addr, arvif->vif->addr);
++		ether_addr_copy(msg->msg.vdev_enable.mac_addr, state->mac_addr);
++	}
++	nss_wifi_vdev_msg_init(msg, request->if_num, request->type, payload_len,
++		(nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_state_cb, state);
++	spin_lock_bh(&ab->base_lock);
++	ret = !ab->nss.enabled || !ab->nss.registered || ab->nss.quiescing ||
++		ab->nss.ownership_uncertain || !arvif->nss.created ||
++		test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++		(up && (!arvif->nss.format_ready || arvif->nss.format_failed ||
++			arvif->nss.key_failed)) ? -ESHUTDOWN : 0;
++	if (!ret)
++		status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, msg, &cookie);
++	spin_unlock_bh(&ab->base_lock);
++	if (!ret && status != NSS_TX_SUCCESS)
++		ret = -EIO;
++	if (!ret)
++		waited = wait_for_completion_timeout(&request->complete,
++				msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	/* Drains an already-dispatched callback before freeing its private
++	 * waiter. It cannot undo a command that firmware already accepted.
++	 */
++	nss_wifi_vdev_cancel_msg(cookie);
++	if (!ret)
++		ret = waited || completion_done(&request->complete) ?
++			READ_ONCE(request->result) : -ETIMEDOUT;
++	spin_lock_bh(&ab->base_lock);
++	if (!ret && (!ab->nss.enabled || !ab->nss.registered || ab->nss.quiescing ||
++		     ab->nss.ownership_uncertain || !arvif->nss.created ||
++		     arvif->nss.if_num != request->if_num ||
++		     test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++		     (up && (!arvif->nss.format_ready || arvif->nss.format_failed ||
++			     arvif->nss.key_failed))))
++		ret = -ESHUTDOWN;
++	spin_unlock_bh(&ab->base_lock);
++	if (ret)
++		ath11k_warn(ab,
++			"NSS VDEV state %s if=%u result=%d response=%u error=%u rxlen=%u echo=%u wait_ms=%u\n",
++			up ? "up" : "down", request->if_num, ret, request->response,
++			request->error, request->len, state->echo_match,
++			jiffies_to_msecs(jiffies - started));
++	else
++		ath11k_info(ab,
++			"NSS VDEV state %s if=%u result=0 response=%u error=%u rxlen=%u echo=%u wait_ms=%u\n",
++			up ? "up" : "down", request->if_num, request->response,
++			request->error, request->len, state->echo_match,
++			jiffies_to_msecs(jiffies - started));
++	kfree(msg);
++	kfree(state);
++	return ret;
++}
++
+ static void ath11k_nss_vdev_event_receive(void *dev, struct nss_cmn_msg *vdev_msg)
+ {
+ 	/*TODO*/
+@@ -1855,6 +1974,17 @@
+ 
+ 	skb->dev = dev;
+ 
++	if (READ_ONCE(nss_relay_trace)) {
++		u8 header[31];
++
++		atomic64_inc(&arvif->nss.normal_rx);
++		if (skb->len < ETH_HLEN)
++			atomic64_inc(&arvif->nss.normal_rx_short);
++		if (READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET &&
++		    ath11k_nss_eapol_header(skb, header))
++			atomic64_inc(&arvif->nss.normal_rx_eapol);
++	}
++
+ 	/* log the original skb received from nss */
+ 	ath11k_nss_trace_eapol_rx(arvif, skb,
+ 				READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET,
+@@ -1864,6 +1994,8 @@
+ 
+ 	ret = ath11k_nss_undecap(arvif, skb, &data_offs, &eth_decap);
+ 	if (ret) {
++		if (READ_ONCE(nss_relay_trace))
++			atomic64_inc(&arvif->nss.normal_rx_undecap_drop);
+ 		ath11k_nss_trace_eapol_rx(arvif, skb,
+ 			READ_ONCE(arvif->nss.decap) == ATH11K_HW_TXRX_ETHERNET,
+ 			"normal_undecap_drop", ret);
+@@ -1879,7 +2011,9 @@
+ 		dev_kfree_skb_any(skb);
+ 		return;
+ 	}
+-	ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap, data_offs, napi);
++	ret = ath11k_nss_deliver_rx(arvif->vif, skb, eth_decap, data_offs, napi);
++	if (ret && READ_ONCE(nss_relay_trace))
++		atomic64_inc(&arvif->nss.normal_rx_deliver_drop);
+ }
+ 
+ static void
+@@ -3785,6 +3919,12 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/* Initialize before publishing the RX callback, never on a live VDEV. */
++	atomic64_set(&arvif->nss.normal_rx, 0);
++	atomic64_set(&arvif->nss.normal_rx_short, 0);
++	atomic64_set(&arvif->nss.normal_rx_eapol, 0);
++	atomic64_set(&arvif->nss.normal_rx_undecap_drop, 0);
++	atomic64_set(&arvif->nss.normal_rx_deliver_drop, 0);
+ 	ret = ath11k_nss_vdev_register(arvif, wdev->netdev);
+ 	if (ret)
+ 		goto free_vdev;
+@@ -3908,11 +4048,11 @@
+ 
+ int ath11k_nss_vdev_up(struct ath11k_vif *arvif)
+ {
+-	struct nss_wifi_vdev_msg *vdev_msg = NULL;
+-	struct nss_wifi_vdev_enable_msg *vdev_en;
+ 	struct ath11k *ar = arvif->ar;
+ 	struct ath11k_vif *ap_vlan_arvif, *tmp;
++#ifdef CPTCFG_ATH11K_NSS_MESH_SUPPORT
+ 	nss_tx_status_t status;
++#endif
+ 	int ret = 0;
+ 
+ 	if (ath11k_nss_vdev_key_failed(arvif))
+@@ -3939,27 +4079,16 @@
+ 		}
+ 	}
+ #endif
+-	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_ATOMIC);
+-	if (!vdev_msg)
+-		return -ENOMEM;
+-
+-	vdev_en = &vdev_msg->msg.vdev_enable;
+-
+-	ether_addr_copy(vdev_en->mac_addr, arvif->vif->addr);
+-
+-	nss_wifi_vdev_msg_init(vdev_msg, arvif->nss.if_num,
+-			       NSS_WIFI_VDEV_INTERFACE_UP_MSG,
+-			       sizeof(struct nss_wifi_vdev_enable_msg),
+-			       NULL, NULL);
+-
+-	status = nss_wifi_vdev_tx_msg(ar->nss.ctx, vdev_msg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss vdev up tx msg error %d\n", status);
+-		ret = -EINVAL;
+-		goto free;
+-	}
+-
+-	ath11k_dbg(ar->ab, ATH11K_DBG_NSS, "nss vdev up tx msg success\n");
++	ret = ath11k_nss_vdev_set_state(arvif, true);
++	if (ret) {
++#ifdef CPTCFG_ATH11K_NSS_MESH_SUPPORT
++		if (arvif->vif->type == NL80211_IFTYPE_MESH_POINT &&
++		    nss_wifi_meshmgr_if_down(arvif->nss.mesh_handle) != NSS_TX_SUCCESS)
++			ath11k_warn(ar->ab, "NSS mesh UP rollback not confirmed\n");
++#endif
++		return ret;
++	}
++
+ 	ath11k_nss_me_start(arvif);
+ 
+ 	if (arvif->vif->type == NL80211_IFTYPE_AP)
+@@ -3967,17 +4096,16 @@
+ 					 &arvif->ap_vlan_arvifs, list)
+ 			if (ap_vlan_arvif->nss.added)
+ 				ath11k_nss_ext_vdev_up(ap_vlan_arvif);
+-free:
+-	kfree(vdev_msg);
+ 	return ret;
+ }
+ 
+ int ath11k_nss_vdev_down(struct ath11k_vif *arvif)
+ {
+-	struct nss_wifi_vdev_msg *vdev_msg = NULL;
+ 	struct ath11k *ar = arvif->ar;
+ 	struct ath11k_vif *ap_vlan_arvif, *tmp;
++#ifdef CPTCFG_ATH11K_NSS_MESH_SUPPORT
+ 	nss_tx_status_t status;
++#endif
+ 	int ret = 0;
+ 
+ 	if (!ar->ab->nss.enabled)
+@@ -3997,30 +4125,14 @@
+ 		}
+ 	}
+ #endif
+-	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_ATOMIC);
+-	if (!vdev_msg)
+-		return -ENOMEM;
+-
+-	nss_wifi_vdev_msg_init(vdev_msg, arvif->nss.if_num,
+-			       NSS_WIFI_VDEV_INTERFACE_DOWN_MSG,
+-			       sizeof(struct nss_wifi_vdev_disable_msg),
+-			       NULL, NULL);
+-
+-	status = nss_wifi_vdev_tx_msg(ar->nss.ctx, vdev_msg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss vdev down tx msg error %d\n", status);
+-		ret = -EINVAL;
+-		goto free;
+-	}
+-
+-	ath11k_dbg(ar->ab, ATH11K_DBG_NSS, "nss vdev down tx msg success\n");
++	ret = ath11k_nss_vdev_set_state(arvif, false);
++	if (ret)
++		return ret;
+ 
+ 	if (arvif->vif->type == NL80211_IFTYPE_AP)
+ 		list_for_each_entry_safe(ap_vlan_arvif, tmp,
+ 					 &arvif->ap_vlan_arvifs, list)
+-			ath11k_nss_ext_vdev_down(ap_vlan_arvif);
+-free:
+-	kfree(vdev_msg);
++				ath11k_nss_ext_vdev_down(ap_vlan_arvif);
+ 	return ret;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -292,6 +292,12 @@
+ 	bool created;
+ 	/* A partial key install requires a new VDEV/security session. */
+ 	bool key_failed;
++	/* Sampled only with nss_relay_trace; new VDEV resets the counters. */
++	atomic64_t normal_rx;
++	atomic64_t normal_rx_short;
++	atomic64_t normal_rx_eapol;
++	atomic64_t normal_rx_undecap_drop;
++	atomic64_t normal_rx_deliver_drop;
+ 
+ 	bool mpp_aging;
+ 	bool mpp_dump_req;
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2249,6 +2249,12 @@
+ 			   READ_ONCE(arvif->nss.encap), READ_ONCE(arvif->nss.decap),
+ 			   READ_ONCE(arvif->nss.format_ready), READ_ONCE(arvif->nss.format_failed),
+ 			   arvif->vif->offload_flags);
++		seq_printf(s, "nss_rx_trace_sample: %u normal=%lld short=%lld eapol=%lld undecap_drop=%lld deliver_drop=%lld\n",
++			   arvif->vdev_id, atomic64_read(&arvif->nss.normal_rx),
++			   atomic64_read(&arvif->nss.normal_rx_short),
++			   atomic64_read(&arvif->nss.normal_rx_eapol),
++			   atomic64_read(&arvif->nss.normal_rx_undecap_drop),
++			   atomic64_read(&arvif->nss.normal_rx_deliver_drop));
+ 	}
+ 	mutex_unlock(&ar->conf_mutex);
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -1806,7 +1806,8 @@
+ 		if (ret)
+ 			ath11k_warn(ar->ab, "failed to unwind AP vdev %d: %d\n",
+ 				    arvif->vdev_id, ret);
+-		arvif->is_up = false;
++		else
++			arvif->is_up = false;
+ 		return;
+ 	}
+ 
+@@ -3249,8 +3250,17 @@
+ 		   arvif->vdev_id, bss_conf->bssid, vif->cfg.aid);
+ 
+ 	ret = ath11k_nss_vdev_up(arvif);
+-	if(ret) {
+-		ath11k_warn(ar->ab, "failure in nss vdev up %d\r\n",ret);
++	if (ret) {
++		int down_ret;
++
++		ath11k_warn(ar->ab, "NSS STA vdev %d UP not confirmed: %d\n",
++			    arvif->vdev_id, ret);
++		down_ret = ath11k_wmi_vdev_down(ar, arvif->vdev_id);
++		if (down_ret)
++			ath11k_warn(ar->ab, "WMI STA UP rollback submission failed: %d\n",
++				    down_ret);
++		else
++			arvif->is_up = false;
+ 		return;
+ 	}
+ 

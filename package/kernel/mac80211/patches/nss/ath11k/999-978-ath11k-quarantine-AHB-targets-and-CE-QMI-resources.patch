@@ -1,0 +1,453 @@
+Subject: [PATCH] ath11k: exclude quarantined AHB targets and close CE/QMI cleanup
+
+Reject reprobe before hardware operations, keep CE and QMI DMA,
+and revoke only initialized QMI CPU resources. Gate new events
+before queue destruction and preserve the startup error result.
+
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -1211,6 +1211,11 @@
+ 
+ 	hw_rev = (uintptr_t)device_get_match_data(&pdev->dev);
+ 
++	if (ath11k_nss_hw_quarantined(hw_rev)) {
++		dev_err(&pdev->dev, "NSS shared DMA ownership unresolved; reboot required before reprobe\n");
++		return -EBUSY;
++	}
++
+ 	switch (hw_rev) {
+ 	case ATH11K_HW_IPQ8074:
+ 	case ATH11K_HW_IPQ6018_HW10:
+@@ -1347,13 +1352,19 @@
+ 
+ 	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
+ 	cancel_work_sync(&ab->restart_work);
+-	cancel_work_sync(&ab->qmi.event_work);
++	if (ab->qmi.event_work_initialized)
++		cancel_work_sync(&ab->qmi.event_work);
+ 	cancel_work_sync(&ab->wmi_ast_work);
+ }
+ 
+ static void ath11k_ahb_free_resources(struct ath11k_base *ab)
+ {
+ 	struct platform_device *pdev = ab->pdev;
++
++	/* Also closes the unregistered/shutdown path; stage flags make repeated
++	 * service cleanup safe after core_deinit() or the QMI-fail branch.
++	 */
++	ath11k_qmi_deinit_service(ab);
+ 
+ 	ath11k_ahb_free_irq(ab);
+ 	ath11k_hal_srng_deinit(ab);
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2923,6 +2923,7 @@
+ 		goto err_free_wq;
+ 
+ 	mutex_init(&ab->core_lock);
++	mutex_init(&ab->qmi.mem_lock);
+ 	mutex_init(&ab->base_ast_lock);
+ 	spin_lock_init(&ab->base_lock);
+ 	mutex_init(&ab->vdev_id_11d_lock);
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -4610,9 +4610,9 @@
+ 	return 0;
+ }
+ 
+-static int ath11k_nss_get_target_type(struct ath11k_base *ab)
+-{
+-	switch (ab->hw_rev) {
++static int ath11k_nss_target_type_by_hw(u32 hw_rev)
++{
++	switch (hw_rev) {
+ 	case ATH11K_HW_IPQ8074:
+ 		return ATH11K_WIFILI_TARGET_TYPE_QCA8074V2;
+ 	case ATH11K_HW_IPQ6018_HW10:
+@@ -4624,10 +4624,24 @@
+ 	case ATH11K_HW_QCN6122_HW10:
+ 		return ATH11K_WIFILI_TARGET_TYPE_QCN6122;
+ 	default:
++		return ATH11K_WIFILI_TARGET_TYPE_UNKNOWN;
++	}
++}
++
++static int ath11k_nss_get_target_type(struct ath11k_base *ab)
++{
++	int type = ath11k_nss_target_type_by_hw(ab->hw_rev);
++
++	if (type == ATH11K_WIFILI_TARGET_TYPE_UNKNOWN)
+ 		ath11k_warn(ab, "NSS Offload not supported for this HW\n");
+-		return ATH11K_WIFILI_TARGET_TYPE_UNKNOWN;
+-	}
+-}
++	return type;
++}
++
++bool ath11k_nss_hw_quarantined(u32 hw_rev)
++{
++	return nss_wifili_target_quarantined(ath11k_nss_target_type_by_hw(hw_rev));
++}
++EXPORT_SYMBOL(ath11k_nss_hw_quarantined);
+ 
+ static int ath11k_nss_get_interface_type(struct ath11k_base *ab)
+ {
+@@ -4807,7 +4821,9 @@
+ 			 sizeof(struct nss_wifili_init_msg),
+ 			 msg_cb, NULL);
+ 
++	mutex_lock(&ab->qmi.mem_lock);
+ 	ret = ath11k_nss_command_send(nss_contex, wlmsg, &ab->nss.init_submitted);
++	mutex_unlock(&ab->qmi.mem_lock);
+ 	if (ret) {
+ 		ath11k_warn(ab, "NSS init command failed: %d\n", ret);
+ 		goto unregister;
+@@ -5050,6 +5066,7 @@
+ 
+ 	if (!ab->nss.registered)
+ 		return ab->nss.ownership_uncertain ? -EIO : 0;
++	mutex_lock(&ab->qmi.mem_lock);
+ 	spin_lock_bh(&ab->base_lock);
+ 	ab->nss.quiescing = true;
+ 	spin_unlock_bh(&ab->base_lock);
+@@ -5070,6 +5087,8 @@
+ 	if (ret) {
+ 		ab->nss.ownership_uncertain = true;
+ 		nss_wifili_interface_quarantine(ab->nss.ctx, ab->nss.if_num);
++		nss_wifili_soc_quarantine(ab->nss.ctx, ab->nss.if_num,
++					ath11k_nss_get_target_type(ab), ab);
+ 		ath11k_warn(ab, "NSS reset ownership remains unresolved: %d\n", ret);
+ 	}
+ 	/* Even a failed reset must revoke callback context before ab is freed.
+@@ -5079,6 +5098,7 @@
+ 	ab->nss.registered = false;
+ 	ath11k_nss_peer_states_purge(ab, !!ret);
+ 	kfree(wlmsg);
++	mutex_unlock(&ab->qmi.mem_lock);
+ 	return ret;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -291,6 +291,7 @@
+ };
+ 
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
++bool ath11k_nss_hw_quarantined(u32 hw_rev);
+ int ath11k_nss_tx(struct ath11k_vif *arvif, struct sk_buff *skb);
+ int ath11k_nss_vdev_set_cmd(struct ath11k_vif *arvif, enum ath11k_nss_vdev_cmd cmd,
+ 			    int val);
+@@ -366,6 +367,11 @@
+ 	return 0;
+ }
+ 
++static inline bool ath11k_nss_hw_quarantined(u32 hw_rev)
++{
++	return false;
++}
++
+ static inline int ath11k_nss_vdev_set_cmd(struct ath11k_vif *arvif, enum ath11k_nss_vdev_cmd cmd,
+ 					  int val)
+ {
+--- a/drivers/net/wireless/ath/ath11k/ce.c
++++ b/drivers/net/wireless/ath/ath11k/ce.c
+@@ -690,6 +690,9 @@
+ 	struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[ce_id];
+ 	const struct ce_attr *attr = &ab->hw_params.host_ce_config[ce_id];
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	if (attr->src_nentries)
+ 		ath11k_ce_tx_process_cb(pipe);
+ 
+@@ -701,6 +704,9 @@
+ {
+ 	struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[pipe_id];
+ 	const struct ce_attr *attr =  &ab->hw_params.host_ce_config[pipe_id];
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 
+ 	if ((pipe->attr_flags & CE_ATTR_DIS_INTR) && attr->src_nentries)
+ 		ath11k_ce_tx_process_cb(pipe);
+@@ -719,6 +725,9 @@
+ 	u8 byte_swap_data = 0;
+ 	int num_used;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return -ESHUTDOWN;
++
+ 	/* Check if some entries could be regained by handling tx completion if
+ 	 * the CE has interrupts disabled and the used entries is more than the
+ 	 * defined usage threshold.
+@@ -869,6 +878,9 @@
+ 
+ 	ath11k_ce_stop_shadow_timers(ab);
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	for (pipe_num = 0; pipe_num < ab->hw_params.ce_count; pipe_num++) {
+ 		pipe = &ab->ce.ce_pipe[pipe_num];
+ 		ath11k_ce_rx_pipe_cleanup(pipe);
+@@ -886,6 +898,9 @@
+ 	struct ath11k_ce_pipe *pipe;
+ 	int i;
+ 	int ret;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		pipe = &ab->ce.ce_pipe[i];
+@@ -976,6 +991,11 @@
+ 	struct ath11k_ce_ring *ce_ring;
+ 	int desc_sz;
+ 	int i;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain)) {
++		ath11k_ce_stop_shadow_timers(ab);
++		return;
++	}
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		pipe = &ab->ce.ce_pipe[i];
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -1958,6 +1958,9 @@
+ {
+ 	int i;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	for (i = 0; i < ab->qmi.mem_seg_count; i++) {
+ 		if (!ab->qmi.target_mem[i].anyaddr)
+ 			continue;
+@@ -1981,6 +1984,9 @@
+ {
+ 	int i;
+ 	struct target_mem_chunk *chunk;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return -ESHUTDOWN;
+ 
+ 	ab->qmi.target_mem_delayed = false;
+ 
+@@ -2634,6 +2640,9 @@
+ {
+ 	struct m3_mem_region *m3_mem = &ab->qmi.m3_mem;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	if (!ab->hw_params.m3_fw_support || !m3_mem->vaddr)
+ 		return;
+ 
+@@ -2995,6 +3004,9 @@
+ {
+ 	struct ath11k_qmi_driver_event *event;
+ 
++	if (!READ_ONCE(qmi->event_live) || READ_ONCE(qmi->ab->nss.ownership_uncertain))
++		return -ESHUTDOWN;
++
+ 	event = kzalloc(sizeof(*event), GFP_ATOMIC);
+ 	if (!event)
+ 		return -ENOMEM;
+@@ -3003,10 +3015,15 @@
+ 	event->data = data;
+ 
+ 	spin_lock(&qmi->event_lock);
++	if (!qmi->event_live || READ_ONCE(qmi->ab->nss.ownership_uncertain)) {
++		spin_unlock(&qmi->event_lock);
++		kfree(event);
++		return -ESHUTDOWN;
++	}
+ 	list_add_tail(&event->list, &qmi->event_list);
++	/* Publication is indivisible with closing the event workqueue gate. */
++	queue_work(qmi->event_wq, &qmi->event_work);
+ 	spin_unlock(&qmi->event_lock);
+-
+-	queue_work(qmi->event_wq, &qmi->event_work);
+ 
+ 	return 0;
+ }
+@@ -3095,12 +3112,22 @@
+ 	const struct qmi_wlanfw_request_mem_ind_msg_v01 *msg = data;
+ 	int i, ret;
+ 
++	/* INIT submission and RESET outcome use the same mutex. Do not replace
++	 * firmware memory while NSS can still own DMA for this SOC.
++	 */
++	mutex_lock(&qmi->mem_lock);
++	if (!READ_ONCE(qmi->event_live) || READ_ONCE(ab->nss.ownership_uncertain) ||
++	    (ab->nss.init_submitted && ab->nss.registered))
++		goto unlock;
++
+ 	ath11k_dbg(ab, ATH11K_DBG_QMI, "firmware request memory request\n");
+ 
+ 	if (msg->mem_seg_len == 0 ||
+-	    msg->mem_seg_len > ATH11K_QMI_WLANFW_MAX_NUM_MEM_SEG_V01)
++	    msg->mem_seg_len > ATH11K_QMI_WLANFW_MAX_NUM_MEM_SEG_V01) {
+ 		ath11k_warn(ab, "invalid memory segment length: %u\n",
+ 			    msg->mem_seg_len);
++		goto unlock;
++	}
+ 
+ 	ab->qmi.mem_seg_count = msg->mem_seg_len;
+ 
+@@ -3117,18 +3144,20 @@
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to assign qmi target memory: %d\n",
+ 				    ret);
+-			return;
++			goto unlock;
+ 		}
+ 	} else {
+ 		ret = ath11k_qmi_alloc_target_mem_chunk(ab);
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to allocate qmi target memory: %d\n",
+ 				    ret);
+-			return;
++			goto unlock;
+ 		}
+ 	}
+ 
+ 	ath11k_qmi_driver_event_post(qmi, ATH11K_QMI_EVENT_REQUEST_MEM, NULL);
++unlock:
++	mutex_unlock(&qmi->mem_lock);
+ }
+ 
+ static void ath11k_qmi_msg_mem_ready_cb(struct qmi_handle *qmi_hdl,
+@@ -3286,9 +3315,11 @@
+ 		list_del(&event->list);
+ 		spin_unlock(&qmi->event_lock);
+ 
+-		if (test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags)) {
++		if (test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags) ||
++		    READ_ONCE(ab->nss.ownership_uncertain) || !READ_ONCE(qmi->event_live)) {
+ 			kfree(event);
+-			return;
++			spin_lock(&qmi->event_lock);
++			continue;
+ 		}
+ 
+ 		switch (event->type) {
+@@ -3361,7 +3392,11 @@
+ 			clear_bit(ATH11K_FLAG_CRASH_FLUSH,
+ 				  &ab->dev_flags);
+ 			clear_bit(ATH11K_FLAG_RECOVERY, &ab->dev_flags);
+-			ath11k_core_qmi_firmware_ready(ab);
++			ret = ath11k_core_qmi_firmware_ready(ab);
++			if (ret) {
++				set_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags);
++				break;
++			}
+ 			set_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags);
+ 
+ 			break;
+@@ -3377,9 +3412,48 @@
+ 	spin_unlock(&qmi->event_lock);
+ }
+ 
++/* Only external teardown calls this: the QMI event worker may mark ownership
++ * unresolved, but must never cancel itself or destroy its own workqueue.
++ */
++static void ath11k_qmi_stop_service(struct ath11k_base *ab)
++{
++	struct ath11k_qmi *qmi = &ab->qmi;
++	struct ath11k_qmi_driver_event *event, *next;
++
++	if (qmi->event_work_initialized) {
++		spin_lock(&qmi->event_lock);
++		qmi->event_live = false;
++		spin_unlock(&qmi->event_lock);
++	}
++	if (qmi->handle_live) {
++		qmi->handle_live = false;
++		qmi_handle_release(&qmi->handle);
++	}
++	if (qmi->event_work_initialized)
++		cancel_work_sync(&qmi->event_work);
++	if (qmi->event_wq) {
++		destroy_workqueue(qmi->event_wq);
++		qmi->event_wq = NULL;
++	}
++	if (qmi->event_work_initialized) {
++		spin_lock(&qmi->event_lock);
++		list_for_each_entry_safe(event, next, &qmi->event_list, list) {
++			list_del(&event->list);
++			kfree(event);
++		}
++		spin_unlock(&qmi->event_lock);
++		qmi->event_work_initialized = false;
++	}
++}
++
+ int ath11k_qmi_init_service(struct ath11k_base *ab)
+ {
+ 	int ret;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return -ESHUTDOWN;
++	if (ab->qmi.handle_live || ab->qmi.event_wq)
++		return -EALREADY;
+ 
+ 	memset(&ab->qmi.target, 0, sizeof(struct target_info));
+ 	memset(&ab->qmi.target_mem, 0, sizeof(struct target_mem_chunk));
+@@ -3392,23 +3466,27 @@
+ 		ath11k_warn(ab, "failed to initialize qmi handle: %d\n", ret);
+ 		return ret;
+ 	}
++	ab->qmi.handle_live = true;
+ 
+ 	ab->qmi.event_wq = alloc_ordered_workqueue("ath11k_qmi_driver_event", 0);
+ 	if (!ab->qmi.event_wq) {
+ 		ath11k_err(ab, "failed to allocate workqueue\n");
++		ath11k_qmi_stop_service(ab);
+ 		return -EFAULT;
+ 	}
+ 
+ 	INIT_LIST_HEAD(&ab->qmi.event_list);
+ 	spin_lock_init(&ab->qmi.event_lock);
+ 	INIT_WORK(&ab->qmi.event_work, ath11k_qmi_driver_event_work);
++	ab->qmi.event_work_initialized = true;
++	ab->qmi.event_live = true;
+ 
+ 	ret = qmi_add_lookup(&ab->qmi.handle, ATH11K_QMI_WLFW_SERVICE_ID_V01,
+ 			     ATH11K_QMI_WLFW_SERVICE_VERS_V01,
+ 			     ab->qmi.service_ins_id);
+ 	if (ret < 0) {
+ 		ath11k_warn(ab, "failed to add qmi lookup: %d\n", ret);
+-		destroy_workqueue(ab->qmi.event_wq);
++		ath11k_qmi_stop_service(ab);
+ 		return ret;
+ 	}
+ 
+@@ -3417,9 +3495,7 @@
+ 
+ void ath11k_qmi_deinit_service(struct ath11k_base *ab)
+ {
+-	qmi_handle_release(&ab->qmi.handle);
+-	cancel_work_sync(&ab->qmi.event_work);
+-	destroy_workqueue(ab->qmi.event_wq);
++	ath11k_qmi_stop_service(ab);
+ 	ath11k_qmi_m3_free(ab);
+ 	ath11k_qmi_free_target_mem_chunk(ab);
+ }
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -145,8 +145,12 @@
+ 	struct sockaddr_qrtr sq;
+ 	struct work_struct event_work;
+ 	struct workqueue_struct *event_wq;
++	bool handle_live;
++	bool event_work_initialized;
++	bool event_live;
+ 	struct list_head event_list;
+ 	spinlock_t event_lock; /* spinlock for qmi event list */
++	struct mutex mem_lock; /* firmware memory and NSS DMA ownership transitions */
+ 	struct ath11k_qmi_ce_cfg ce_cfg;
+ 	struct target_mem_chunk target_mem[ATH11K_QMI_WLANFW_MAX_NUM_MEM_SEG_V01];
+ 	u32 mem_seg_count;

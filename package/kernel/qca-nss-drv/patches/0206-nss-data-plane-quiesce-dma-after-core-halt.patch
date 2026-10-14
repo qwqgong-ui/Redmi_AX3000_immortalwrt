@@ -1,0 +1,34 @@
+Subject: [PATCH] nss-drv: quiesce physical DMA during halted-core removal
+
+HAL removal has already stopped firmware and drained its IRQ/NAPI. A
+close command cannot complete then. Confirm GMAC DMA STOPPED locally
+before declaring ownership released and rebuilding the host rings.
+
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -428,8 +428,24 @@ static void __nss_data_plane_unregister(void)
+     int i;
+ 
+     rtnl_lock();
+-    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++)
++    for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++        struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++        /* Called only by HAL after core halt and IRQ/NAPI cleanup.
++         * CPU halt alone does not stop autonomous GMAC DMA.
++         */
++        if (p->nss_ctx && p->may_own_dma) {
++            if (nss_dp_quiesce_dma(p->dpc.dev)) {
++                nss_warning("dataplane %d DMA remains active; host reclaim refused\n", i);
++                continue;
++            }
++            p->may_own_dma = false;
++            p->notify_open = 0;
++        }
++#endif
+         if (nss_data_plane_unregister_from_nss_dp(i))
+             nss_warning("dataplane %d did not confirm shutdown\n", i);
++    }
+     rtnl_unlock();
+ }

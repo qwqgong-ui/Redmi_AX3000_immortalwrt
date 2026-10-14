@@ -1,0 +1,322 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -766,6 +766,53 @@
+ 	ATH11K_MON_FCS_BAD,
+ 	ATH11K_MON_STARTS,
+ 	ATH11K_MON_OBSERVATION_MAX,
++};
++
++#define ATH11K_MON_META_CAPACITY 8192
++#define ATH11K_MON_META_MPDU_VALID BIT(0)
++#define ATH11K_MON_META_FC_VALID BIT(1)
++#define ATH11K_MON_META_RA_VALID BIT(2)
++#define ATH11K_MON_META_TA_VALID BIT(3)
++#define ATH11K_MON_META_SEQ_VALID BIT(4)
++#define ATH11K_MON_META_QOS_VALID BIT(5)
++#define ATH11K_MON_META_PPDU_MATCH BIT(6)
++#define ATH11K_MON_META_HDR_VALID BIT(7)
++#define ATH11K_MON_META_HDR_MATCH BIT(8)
++#define ATH11K_MON_META_CONTINUATION BIT(9)
++#define ATH11K_MON_META_FCS_BAD BIT(10)
++#define ATH11K_MON_META_END_VALID BIT(11)
++#define ATH11K_MON_META_FIRST_LAST BIT(12)
++#define ATH11K_MON_META_DONE BIT(13)
++#define ATH11K_MON_META_TRUSTED BIT(14)
++
++struct ath11k_mon_meta_record {
++	u64 ordinal;
++	u64 time_ns;
++	u32 session;
++	u32 flags;
++	u32 mpdu_tag;
++	u32 header_tag;
++	u32 end_tag;
++	u32 attention_tag;
++	u32 header_ppdu;
++	u32 info11;
++	u32 info13;
++	u16 ppdu;
++	u16 expected_ppdu;
++	u16 fc;
++	u16 seq_ctrl;
++	u16 qos;
++	u8 decap;
++	u8 tid;
++	u8 ra[ETH_ALEN];
++	u8 ta[ETH_ALEN];
++};
++
++struct ath11k_mon_metadata {
++	/* Leaf lock: only publish/copy scalar records under this lock. */
++	spinlock_t lock;
++	u64 produced;
++	struct ath11k_mon_meta_record records[ATH11K_MON_META_CAPACITY];
+ };
+ 
+ struct ath11k {
+@@ -818,6 +865,8 @@
+ 	/* Lifetime counters, not a peer or an atomic multi-field snapshot. */
+ 	atomic64_t monitor_observation[ATH11K_MON_OBSERVATION_MAX];
+ 	int monitor_last_errno;
++	/* Allocated only for the explicit QCN6122 monitor experiment. */
++	struct ath11k_mon_metadata *mon_metadata;
+ 	u32 ack_timeout;
+ 	u32 min_tx_power;
+ 	u32 max_tx_power;
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2150,6 +2150,60 @@
+ 	.release = single_release,
+ };
+ 
++static int ath11k_mon_metadata_show(struct seq_file *s, void *unused)
++{
++	struct ath11k *ar = s->private;
++	struct ath11k_mon_metadata *meta = ar->mon_metadata;
++	struct ath11k_mon_meta_record *records, *r;
++	u64 produced, first;
++	u32 count, i, slot;
++
++	seq_puts(s, "scope: radio_lifetime_pop_first_buffer_samples\n");
++	if (!meta) {
++		seq_puts(s, "enabled: 0\n");
++		return 0;
++	}
++	records = kvmalloc_array(ATH11K_MON_META_CAPACITY, sizeof(*records), GFP_KERNEL);
++	if (!records)
++		return -ENOMEM;
++	spin_lock_bh(&meta->lock);
++	produced = meta->produced;
++	count = min_t(u64, produced, ATH11K_MON_META_CAPACITY);
++	first = produced - count + 1;
++	for (i = 0; i < count; i++) {
++		slot = (first + i - 1) % ATH11K_MON_META_CAPACITY;
++		records[i] = meta->records[slot];
++	}
++	spin_unlock_bh(&meta->lock);
++	seq_printf(s, "enabled: 1\nproduced: %llu\nretained: %u\nfirst: %llu\ncapacity: %u\n",
++		   produced, count, first, ATH11K_MON_META_CAPACITY);
++	seq_puts(s, "ordinal time_ns session flags ppdu expected decap tid fc seq qos ra ta mpdu_tag header_tag end_tag attention_tag header_ppdu info11 info13\n");
++	for (i = 0; i < count; i++) {
++		r = &records[i];
++		seq_printf(s, "%llu %llu %u 0x%x %u %u %u %u 0x%x 0x%x 0x%x %pM %pM 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
++			   r->ordinal, r->time_ns, r->session, r->flags,
++			   r->ppdu, r->expected_ppdu, r->decap, r->tid,
++			   r->fc, r->seq_ctrl, r->qos, r->ra, r->ta,
++			   r->mpdu_tag, r->header_tag, r->end_tag, r->attention_tag,
++			   r->header_ppdu, r->info11, r->info13);
++	}
++	kvfree(records);
++	return 0;
++}
++
++static int ath11k_mon_metadata_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ath11k_mon_metadata_show, inode->i_private);
++}
++
++static const struct file_operations fops_mon_metadata = {
++	.owner = THIS_MODULE,
++	.open = ath11k_mon_metadata_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ static int ath11k_monitor_stats_show(struct seq_file *s, void *unused)
+ {
+ 	static const char * const names[ATH11K_MON_OBSERVATION_MAX] = {
+@@ -2247,6 +2301,8 @@
+ 			    ar->debug.debugfs_pdev, ar, &fops_wmi_key_stats);
+ 	debugfs_create_file("monitor_stats", 0400,
+ 			    ar->debug.debugfs_pdev, ar, &fops_monitor_stats);
++	debugfs_create_file("monitor_metadata", 0400,
++			    ar->debug.debugfs_pdev, ar, &fops_mon_metadata);
+ 	debugfs_create_file("pktlog_filter", 0644,
+ 			    ar->debug.debugfs_pdev, ar,
+ 			    &fops_pktlog_filter);
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -6473,6 +6473,139 @@
+ 	}
+ }
+ 
++static bool ath11k_mon_meta_tlv(u32 word, u32 tag, size_t payload)
++{
++	return FIELD_GET(HAL_TLV_HDR_TAG, word) == tag &&
++		FIELD_GET(HAL_TLV_HDR_LEN, word) == payload;
++}
++
++/* Monitor-only compact layout. Never enable the normal low-memory getter. */
++static void ath11k_mon_meta_decode(const void *buffer, size_t bytes, u16 expected,
++				  u32 msdu_flags, struct ath11k_mon_meta_record *r)
++{
++	const struct hal_rx_desc_qcn9074 *d = buffer;
++	const struct rx_mpdu_start_qcn9074 *m;
++	const struct ieee80211_hdr *h;
++	u32 v, header_len;
++	__le16 fc;
++	u16 first_last;
++	int hdrlen;
++
++	memset(r, 0, sizeof(*r));
++	r->expected_ppdu = expected;
++	r->tid = 0xff;
++	if (msdu_flags & RX_MSDU_DESC_INFO0_MSDU_CONTINUATION)
++		r->flags |= ATH11K_MON_META_CONTINUATION;
++	if (bytes < sizeof(*d))
++		return;
++	r->mpdu_tag = le32_to_cpu(d->mpdu_start_tag);
++	r->header_tag = le32_to_cpu(d->hdr_status_tag);
++	r->end_tag = le32_to_cpu(d->msdu_end_tag);
++	r->attention_tag = le32_to_cpu(d->rx_attn_tag);
++	if (!ath11k_mon_meta_tlv(r->mpdu_tag, HAL_RX_MPDU_START, sizeof(d->mpdu_start)))
++		return;
++	r->flags |= ATH11K_MON_META_MPDU_VALID;
++	m = &d->mpdu_start;
++	r->ppdu = le16_to_cpu(m->phy_ppdu_id);
++	if (r->ppdu == expected)
++		r->flags |= ATH11K_MON_META_PPDU_MATCH;
++	r->info11 = v = le32_to_cpu(m->info11);
++	r->info13 = le32_to_cpu(m->info13);
++	r->decap = FIELD_GET(RX_MPDU_START_INFO12_DECAP_TYPE, le32_to_cpu(m->info12));
++	if (v & RX_MPDU_START_INFO11_MPDU_FCTRL_VALID) {
++		r->fc = le16_to_cpu(m->frame_ctrl);
++		if (!(r->fc & IEEE80211_FCTL_VERS))
++			r->flags |= ATH11K_MON_META_FC_VALID;
++	}
++	if (v & RX_MPDU_START_INFO11_MAC_ADDR1_VALID) {
++		ether_addr_copy(r->ra, m->addr1);
++		r->flags |= ATH11K_MON_META_RA_VALID;
++	}
++	if (v & RX_MPDU_START_INFO11_MAC_ADDR2_VALID) {
++		ether_addr_copy(r->ta, m->addr2);
++		r->flags |= ATH11K_MON_META_TA_VALID;
++	}
++	if (v & RX_MPDU_START_INFO11_MPDU_SEQ_CTRL_VALID) {
++		r->seq_ctrl = le16_to_cpu(m->seq_ctrl);
++		if ((r->seq_ctrl >> 4) == FIELD_GET(RX_MPDU_START_INFO11_MPDU_SEQ_NUM, v) &&
++		    (r->seq_ctrl & 15) == FIELD_GET(RX_MPDU_START_INFO11_MPDU_FRAG_NUMBER, v))
++			r->flags |= ATH11K_MON_META_SEQ_VALID;
++	}
++	fc = cpu_to_le16(r->fc);
++	if ((v & RX_MPDU_START_INFO11_MPDU_QOS_CTRL_VALID) &&
++	    (r->flags & ATH11K_MON_META_FC_VALID) && ieee80211_is_data_qos(fc)) {
++		r->qos = le16_to_cpu(m->qos_ctrl);
++		if ((r->qos & 15) == FIELD_GET(RX_MPDU_START_INFO9_TID, le32_to_cpu(m->info9))) {
++			r->tid = r->qos & 15;
++			r->flags |= ATH11K_MON_META_QOS_VALID;
++		}
++	}
++	/* MSDU_END/attention are only valid on the final buffer of an MSDU. */
++	if (!(r->flags & ATH11K_MON_META_CONTINUATION) &&
++	    ath11k_mon_meta_tlv(r->end_tag, HAL_RX_MSDU_END, sizeof(d->msdu_end)) &&
++	    ath11k_mon_meta_tlv(r->attention_tag, HAL_RX_ATTENTION, sizeof(d->attention))) {
++		r->flags |= ATH11K_MON_META_END_VALID;
++		first_last = le16_to_cpu(d->msdu_end.info4);
++		if ((first_last & (RX_MSDU_END_INFO4_FIRST_MSDU | RX_MSDU_END_INFO4_LAST_MSDU)) ==
++		    (RX_MSDU_END_INFO4_FIRST_MSDU | RX_MSDU_END_INFO4_LAST_MSDU))
++			r->flags |= ATH11K_MON_META_FIRST_LAST;
++		if (le32_to_cpu(d->attention.info2) & RX_ATTENTION_INFO2_MSDU_DONE)
++			r->flags |= ATH11K_MON_META_DONE;
++		if (le32_to_cpu(d->attention.info1) & RX_ATTENTION_INFO1_FCS_ERR)
++			r->flags |= ATH11K_MON_META_FCS_BAD;
++	}
++	header_len = FIELD_GET(HAL_TLV_HDR_LEN, r->header_tag);
++	if (FIELD_GET(HAL_TLV_HDR_TAG, r->header_tag) != HAL_RX_HEADER ||
++	    header_len < sizeof(d->phy_ppdu_id) + sizeof(h->frame_control) ||
++	    header_len > sizeof(d->phy_ppdu_id) + sizeof(d->hdr_status))
++		return;
++	r->header_ppdu = le32_to_cpu(d->phy_ppdu_id);
++	h = (const struct ieee80211_hdr *)d->hdr_status;
++	fc = h->frame_control;
++	if ((fc & cpu_to_le16(IEEE80211_FCTL_VERS)) || !ieee80211_is_data(fc))
++		return;
++	hdrlen = ieee80211_hdrlen(fc);
++	if (hdrlen < 24 || hdrlen > header_len - sizeof(d->phy_ppdu_id))
++		return;
++	r->flags |= ATH11K_MON_META_HDR_VALID;
++	if ((r->header_ppdu & 0xffff) != r->ppdu ||
++	    r->fc != le16_to_cpu(fc) || r->seq_ctrl != le16_to_cpu(h->seq_ctrl) ||
++	    !ether_addr_equal(r->ra, h->addr1) || !ether_addr_equal(r->ta, h->addr2))
++		return;
++	if (ieee80211_is_data_qos(fc) &&
++	    (!(r->flags & ATH11K_MON_META_QOS_VALID) ||
++	     r->qos != get_unaligned_le16(ieee80211_get_qos_ctl((struct ieee80211_hdr *)h))))
++		return;
++	if (!!(r->fc & IEEE80211_FCTL_RETRY) != !!(r->info11 & RX_MPDU_START_INFO11_MPDU_RETRY))
++		return;
++	r->flags |= ATH11K_MON_META_HDR_MATCH;
++	v = ATH11K_MON_META_MPDU_VALID | ATH11K_MON_META_FC_VALID |
++		ATH11K_MON_META_RA_VALID | ATH11K_MON_META_TA_VALID | ATH11K_MON_META_SEQ_VALID |
++		ATH11K_MON_META_PPDU_MATCH | ATH11K_MON_META_HDR_VALID | ATH11K_MON_META_HDR_MATCH |
++		ATH11K_MON_META_END_VALID | ATH11K_MON_META_FIRST_LAST | ATH11K_MON_META_DONE;
++	if ((r->flags & v) == v && !(r->flags & (ATH11K_MON_META_FCS_BAD | ATH11K_MON_META_CONTINUATION)))
++		r->flags |= ATH11K_MON_META_TRUSTED;
++}
++
++static void ath11k_mon_meta_observe(struct ath11k *ar, struct sk_buff *skb,
++				   u16 ppdu, u32 msdu_flags)
++{
++	struct ath11k_mon_metadata *meta = ar->mon_metadata;
++	struct ath11k_mon_meta_record r;
++	u32 slot;
++
++	if (!meta || ar->ab->hw_rev != ATH11K_HW_QCN6122_HW10)
++		return;
++	ath11k_mon_meta_decode(skb->data, skb_headlen(skb), ppdu, msdu_flags, &r);
++	r.time_ns = ktime_get_ns();
++	r.session = atomic64_read(&ar->monitor_observation[ATH11K_MON_STARTS]);
++	spin_lock_bh(&meta->lock);
++	r.ordinal = ++meta->produced;
++	slot = (r.ordinal - 1) % ATH11K_MON_META_CAPACITY;
++	meta->records[slot] = r;
++	spin_unlock_bh(&meta->lock);
++}
++
+ /* clang stack usage explodes if this is inlined */
+ static noinline_for_stack
+ u32 ath11k_dp_rx_mon_mpdu_pop(struct ath11k *ar, int mac_id,
+@@ -6547,6 +6680,7 @@
+ 
+ 		for (i = 0; i < num_msdus; i++) {
+ 			u32 l2_hdr_offset;
++			bool observe_first = is_first_msdu && !rx_bufs_used && !*head_msdu;
+ 
+ 			if (pmon->mon_last_buf_cookie == msdu_list.sw_cookie[i]) {
+ 				ath11k_dbg(ar->ab, ATH11K_DBG_DATA,
+@@ -6622,6 +6756,9 @@
+ 			rx_buf_size = rx_pkt_offset + l2_hdr_offset + frag_len;
+ 
+ 			ath11k_dp_pkt_set_pktlen(msdu, rx_buf_size);
++			if (observe_first)
++				ath11k_mon_meta_observe(ar, msdu, *ppdu_id,
++						     msdu_list.msdu_info[i].msdu_flags);
+ 
+ 			if (!(*head_msdu))
+ 				*head_msdu = msdu;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -11791,6 +11791,14 @@
+ 		init_completion(&ar->completed_11d_scan);
+ 
+ 		ath11k_fw_stats_init(ar);
++		if (nss_monitor_test && ab->hw_rev == ATH11K_HW_QCN6122_HW10) {
++			ar->mon_metadata = kvzalloc(sizeof(*ar->mon_metadata), GFP_KERNEL);
++			if (!ar->mon_metadata) {
++				ret = -ENOMEM;
++				goto err_free_mac;
++			}
++			spin_lock_init(&ar->mon_metadata->lock);
++		}
+ 	}
+ 
+ 	return 0;
+@@ -11830,6 +11838,7 @@
+ 		mutex_unlock(&ar->conf_mutex);
+ 		synchronize_rcu();
+ 		ath11k_fw_stats_free(&ar->fw_stats);
++		kvfree(ar->mon_metadata);
+ 		ieee80211_free_hw(ar->hw);
+ 		pdev->ar = NULL;
+ 	}

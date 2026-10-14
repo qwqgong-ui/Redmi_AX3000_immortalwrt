@@ -1,0 +1,518 @@
+Subject: [PATCH] nss-drv: bind WIFILI responses to registered requests
+
+Use driver-owned callback dispatch and non-reused request IDs. Serialize
+registration-to-enqueue with interface shutdown. Revoke pending requests and
+drain callbacks on unregistration; give synchronous waits private state.
+Retain unresolved peer lookup DMA until core halt and IRQ/NAPI cleanup and
+refuse interface reuse while quarantined. Hardware ring DMA is not covered.
+
+--- a/nss_wifili.c
++++ b/nss_wifili.c
+@@ -19,6 +19,227 @@
+ #include "nss_wifili_log.h"
+ #include "nss_wifili_strings.h"
+ 
++#include <linux/dma-mapping.h>
++#include <linux/err.h>
++
++struct nss_wifili_peer_memory {
++	struct list_head list;
++	struct device *dev;
++	void *vaddr;
++	dma_addr_t paddr;
++	uint32_t size;
++	uint32_t core_id;
++	uint32_t if_num;
++	bool quarantined;
++};
++
++static LIST_HEAD(nss_wifili_peer_quarantine);
++static DEFINE_SPINLOCK(nss_wifili_peer_memory_lock);
++static unsigned long nss_wifili_blocked_interfaces[NSS_MAX_NET_INTERFACES];
++static bool nss_wifili_registered_interfaces[NSS_MAX_NET_INTERFACES];
++
++struct nss_wifili_request {
++	struct list_head list;
++	uint32_t cookie;
++	uint32_t if_num;
++	uint32_t type;
++	nss_ptr_t callback;
++	nss_ptr_t app_data;
++};
++static LIST_HEAD(nss_wifili_requests);
++static atomic64_t nss_wifili_request_sequence = ATOMIC64_INIT(0);
++
++static void nss_wifili_request_receive(void *ctx, struct nss_wifili_msg *msg)
++{
++	struct nss_wifili_request *request, *found = NULL;
++	nss_wifili_msg_callback_t callback;
++	uint64_t cookie = msg->cm.app_data;
++
++	if (!cookie || cookie > U32_MAX || msg->cm.response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++	rcu_read_lock_bh();
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	list_for_each_entry(request, &nss_wifili_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		if (request->if_num != msg->cm.interface || request->type != msg->cm.type ||
++		    !nss_wifili_registered_interfaces[request->if_num])
++			break;
++		found = request;
++		list_del(&request->list);
++		break;
++	}
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++	if (found) {
++		callback = (nss_wifili_msg_callback_t)(uintptr_t)found->callback;
++		msg->cm.cb = found->callback;
++		msg->cm.app_data = found->app_data;
++		if (callback)
++			callback(ctx, msg);
++		kfree(found);
++	}
++	rcu_read_unlock_bh();
++}
++
++void nss_wifili_forget_msg(uint32_t cookie)
++{
++	struct nss_wifili_request *request, *next;
++
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	list_for_each_entry_safe(request, next, &nss_wifili_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		list_del(&request->list);
++		kfree(request);
++		break;
++	}
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++}
++EXPORT_SYMBOL(nss_wifili_forget_msg);
++
++void nss_wifili_cancel_msg(uint32_t cookie)
++{
++	nss_wifili_forget_msg(cookie);
++	/* Also wait when the callback has already consumed its registry entry. */
++	synchronize_net();
++}
++EXPORT_SYMBOL(nss_wifili_cancel_msg);
++
++static void nss_wifili_requests_unregister(uint32_t if_num)
++{
++	struct nss_wifili_request *request, *next;
++
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	nss_wifili_registered_interfaces[if_num] = false;
++	list_for_each_entry_safe(request, next, &nss_wifili_requests, list) {
++		if (request->if_num != if_num)
++			continue;
++		list_del(&request->list);
++		kfree(request);
++	}
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++}
++
++void nss_wifili_interface_quarantine(struct nss_ctx_instance *ctx, uint32_t if_num)
++{
++	if (!ctx || if_num >= NSS_MAX_NET_INTERFACES || ctx->id >= BITS_PER_LONG)
++		return;
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	__set_bit(ctx->id, &nss_wifili_blocked_interfaces[if_num]);
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++}
++EXPORT_SYMBOL(nss_wifili_interface_quarantine);
++
++struct nss_wifili_peer_memory *
++nss_wifili_peer_memory_alloc(struct nss_ctx_instance *ctx, uint32_t if_num,
++			    struct device *dev, uint32_t size)
++{
++	struct nss_wifili_peer_memory *memory;
++
++	if (!ctx || !dev || !size || if_num >= NSS_MAX_NET_INTERFACES ||
++	    ctx->id >= BITS_PER_LONG)
++		return ERR_PTR(-EINVAL);
++	if (READ_ONCE(nss_wifili_blocked_interfaces[if_num]) & BIT(ctx->id))
++		return ERR_PTR(-EBUSY);
++
++	memory = kzalloc(sizeof(*memory), GFP_ATOMIC);
++	if (!memory)
++		return ERR_PTR(-ENOMEM);
++	memory->dev = get_device(dev);
++	memory->vaddr = kzalloc(size, GFP_ATOMIC);
++	if (!memory->vaddr)
++		goto free_memory;
++	memory->paddr = dma_map_single(dev, memory->vaddr, size, DMA_TO_DEVICE);
++	if (dma_mapping_error(dev, memory->paddr))
++		goto free_buffer;
++	/* WIFILI PEER_CREATE carries a 32-bit NSS peer-memory address. */
++	if (upper_32_bits(memory->paddr)) {
++		dma_unmap_single(dev, memory->paddr, size, DMA_TO_DEVICE);
++		kfree(memory->vaddr);
++		put_device(memory->dev);
++		kfree(memory);
++		return ERR_PTR(-ERANGE);
++	}
++	memory->size = size;
++	memory->core_id = ctx->id;
++	memory->if_num = if_num;
++	INIT_LIST_HEAD(&memory->list);
++	return memory;
++
++free_buffer:
++	kfree(memory->vaddr);
++free_memory:
++	put_device(memory->dev);
++	kfree(memory);
++	return ERR_PTR(-ENOMEM);
++}
++EXPORT_SYMBOL(nss_wifili_peer_memory_alloc);
++
++void *nss_wifili_peer_memory_address(struct nss_wifili_peer_memory *memory)
++{
++	return memory->vaddr;
++}
++EXPORT_SYMBOL(nss_wifili_peer_memory_address);
++
++uint64_t nss_wifili_peer_memory_dma(struct nss_wifili_peer_memory *memory)
++{
++	return memory->paddr;
++}
++EXPORT_SYMBOL(nss_wifili_peer_memory_dma);
++
++void nss_wifili_peer_memory_free(struct nss_wifili_peer_memory *memory)
++{
++	if (!memory)
++		return;
++	if (WARN_ON_ONCE(memory->quarantined))
++		return;
++	dma_unmap_single(memory->dev, memory->paddr, memory->size, DMA_TO_DEVICE);
++	kfree(memory->vaddr);
++	put_device(memory->dev);
++	kfree(memory);
++}
++EXPORT_SYMBOL(nss_wifili_peer_memory_free);
++
++void nss_wifili_peer_memory_quarantine(struct nss_wifili_peer_memory *memory)
++{
++	if (!memory)
++		return;
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	if (!memory->quarantined) {
++		memory->quarantined = true;
++		__set_bit(memory->core_id,
++			  &nss_wifili_blocked_interfaces[memory->if_num]);
++		list_add_tail(&memory->list, &nss_wifili_peer_quarantine);
++	}
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++}
++EXPORT_SYMBOL(nss_wifili_peer_memory_quarantine);
++
++void nss_wifili_peer_memory_reclaim(struct nss_ctx_instance *ctx)
++{
++	struct nss_wifili_peer_memory *memory, *next;
++	LIST_HEAD(reclaim);
++	unsigned int if_num;
++
++	/* Called by HAL only after this core has halted and its IRQ/NAPI drained.
++	 * Peer lookup memory is consumed by the NSS CPU, not autonomous WLAN DMA.
++	 */
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	list_for_each_entry_safe(memory, next, &nss_wifili_peer_quarantine, list) {
++		if (memory->core_id != ctx->id)
++			continue;
++		memory->quarantined = false;
++		list_move_tail(&memory->list, &reclaim);
++	}
++	for (if_num = 0; if_num < NSS_MAX_NET_INTERFACES; if_num++)
++		__clear_bit(ctx->id, &nss_wifili_blocked_interfaces[if_num]);
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++	list_for_each_entry_safe(memory, next, &reclaim, list) {
++		list_del(&memory->list);
++		nss_wifili_peer_memory_free(memory);
++	}
++}
++
+ #define NSS_WIFILI_TX_TIMEOUT 1000 /* Millisecond to jiffies*/
+ #define NSS_WIFILI_INVALID_SCHEME_ID  -1
+ #define NSS_WIFILI_THREAD_SCHEME_ENTRY_MAX  4 /* Maximum number of thread scheme entries. */
+@@ -77,12 +298,15 @@
+  */
+ static struct nss_wifili_pvt {
+ 	struct semaphore sem;
+-	struct completion complete;
+-	int response;
+-	void *cb;
+-	void *app_data;
+ } wifili_pvt;
+ 
++struct nss_wifili_sync_request {
++	struct completion complete;
++	nss_tx_status_t result;
++	nss_ptr_t callback;
++	nss_ptr_t app_data;
++};
++
+ /*
+  * Scheme to radio mapping database
+  */
+@@ -148,6 +372,9 @@
+ 	 */
+ 	if (ncm->response == NSS_CMN_RESPONSE_NOTIFY) {
+ 		ncm->cb = (nss_ptr_t)nss_ctx->nss_top->wifili_msg_callback;
++	} else if (ncm->cb != (nss_ptr_t)(uintptr_t)nss_wifili_request_receive) {
++		/* Never invoke a client code pointer echoed by an old registration. */
++		return;
+ 	}
+ 
+ 	/*
+@@ -186,22 +413,19 @@
+  */
+ static void nss_wifili_callback(void *app_data, struct nss_wifili_msg *nvm)
+ {
+-	nss_wifili_msg_callback_t callback = (nss_wifili_msg_callback_t)wifili_pvt.cb;
+-	void *data = wifili_pvt.app_data;
+-
+-	wifili_pvt.response = NSS_TX_SUCCESS;
+-	wifili_pvt.cb = NULL;
+-	wifili_pvt.app_data = NULL;
+-
+-	if (nvm->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("wifili error response %d\n", nvm->cm.response);
+-		wifili_pvt.response = nvm->cm.response;
+-	}
+-
+-	if (callback) {
+-		callback(data, nvm);
+-	}
+-	complete(&wifili_pvt.complete);
++	struct nss_wifili_sync_request *request =
++		(void *)(uintptr_t)nvm->cm.app_data;
++	nss_wifili_msg_callback_t callback =
++		(nss_wifili_msg_callback_t)(uintptr_t)request->callback;
++
++	(void)app_data;
++	request->result = nvm->cm.response == NSS_CMN_RESPONSE_ACK ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	nvm->cm.cb = request->callback;
++	nvm->cm.app_data = request->app_data;
++	if (callback)
++		callback((void *)(uintptr_t)request->app_data, nvm);
++	complete(&request->complete);
+ }
+ 
+ /*
+@@ -211,9 +435,19 @@
+  * NOTE: The caller is expected to handle synchronous wait for message
+  * response if needed.
+  */
+-nss_tx_status_t nss_wifili_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_wifili_msg *msg)
++nss_tx_status_t nss_wifili_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++				       struct nss_wifili_msg *msg, uint32_t *cookie)
+ {
+ 	struct nss_cmn_msg *ncm = &msg->cm;
++	struct nss_wifili_request *request;
++	nss_tx_status_t status;
++	uint64_t sequence;
++	nss_ptr_t callback = ncm->cb, app_data = ncm->app_data;
++
++	if (cookie)
++		*cookie = 0;
++	if (!nss_ctx)
++		return NSS_TX_FAILURE;
+ 
+ 	/*
+ 	 * Trace messages.
+@@ -235,7 +469,49 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	return nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	request = kzalloc(sizeof(*request), GFP_ATOMIC);
++	if (!request)
++		return NSS_TX_FAILURE;
++	sequence = atomic64_inc_return(&nss_wifili_request_sequence);
++	if (!sequence || sequence > U32_MAX) {
++		kfree(request);
++		return NSS_TX_FAILURE;
++	}
++	request->cookie = sequence;
++	request->if_num = ncm->interface;
++	request->type = ncm->type;
++	request->callback = callback;
++	request->app_data = app_data;
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	if (!nss_wifili_registered_interfaces[ncm->interface] ||
++	    (nss_wifili_blocked_interfaces[ncm->interface] & BIT(nss_ctx->id))) {
++		spin_unlock_bh(&nss_wifili_peer_memory_lock);
++		kfree(request);
++		return NSS_TX_FAILURE;
++	}
++	list_add_tail(&request->list, &nss_wifili_requests);
++	if (cookie)
++		*cookie = sequence;
++	ncm->cb = (nss_ptr_t)(uintptr_t)nss_wifili_request_receive;
++	ncm->app_data = sequence;
++	status = nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	ncm->cb = callback;
++	ncm->app_data = app_data;
++	if (status != NSS_TX_SUCCESS) {
++		list_del(&request->list);
++		kfree(request);
++		if (cookie)
++			*cookie = 0;
++	}
++	/* Registration-to-enqueue is indivisible with interface shutdown. */
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
++	return status;
++}
++EXPORT_SYMBOL(nss_wifili_tx_msg_tracked);
++
++nss_tx_status_t nss_wifili_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_wifili_msg *msg)
++{
++	return nss_wifili_tx_msg_tracked(nss_ctx, msg, NULL);
+ }
+ EXPORT_SYMBOL(nss_wifili_tx_msg);
+ 
+@@ -245,30 +521,36 @@
+  */
+ nss_tx_status_t nss_wifili_tx_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_wifili_msg *nvm)
+ {
++	struct nss_wifili_sync_request *request;
+ 	nss_tx_status_t status;
+-	int ret = 0;
++	uint32_t cookie = 0;
+ 
+ 	down(&wifili_pvt.sem);
+-	wifili_pvt.cb = (void *)nvm->cm.cb;
+-	wifili_pvt.app_data = (void *)nvm->cm.app_data;
++	request = kzalloc(sizeof(*request), GFP_KERNEL);
++	if (!request) {
++		up(&wifili_pvt.sem);
++		return NSS_TX_FAILURE;
++	}
++	init_completion(&request->complete);
++	request->result = NSS_TX_FAILURE;
++	request->callback = nvm->cm.cb;
++	request->app_data = nvm->cm.app_data;
+ 
+ 	nvm->cm.cb = (nss_ptr_t)nss_wifili_callback;
+-	nvm->cm.app_data = (nss_ptr_t)NULL;
++	nvm->cm.app_data = (nss_ptr_t)(uintptr_t)request;
+ 
+-	status = nss_wifili_tx_msg(nss_ctx, nvm);
+-	if (status != NSS_TX_SUCCESS) {
++	status = nss_wifili_tx_msg_tracked(nss_ctx, nvm, &cookie);
++	if (status != NSS_TX_SUCCESS)
+ 		nss_warning("%px: wifili_tx_msg failed\n", nss_ctx);
+-		up(&wifili_pvt.sem);
+-		return status;
+-	}
+-
+-	ret = wait_for_completion_timeout(&wifili_pvt.complete, msecs_to_jiffies(NSS_WIFILI_TX_TIMEOUT));
+-	if (!ret) {
++	else if (!wait_for_completion_timeout(&request->complete,
++					    msecs_to_jiffies(NSS_WIFILI_TX_TIMEOUT)))
+ 		nss_warning("%px: wifili msg tx failed due to timeout\n", nss_ctx);
+-		wifili_pvt.response = NSS_TX_FAILURE;
+-	}
+-
+-	status = wifili_pvt.response;
++	nss_wifili_cancel_msg(cookie);
++	if (status == NSS_TX_SUCCESS)
++		status = request->result;
++	nvm->cm.cb = request->callback;
++	nvm->cm.app_data = request->app_data;
++	kfree(request);
+ 	up(&wifili_pvt.sem);
+ 	return status;
+ }
+@@ -574,9 +856,17 @@
+ 
+ 	nss_info("nss_register_wifili_if if_num %d wifictx %px", if_num, netdev);
+ 
++	spin_lock_bh(&nss_wifili_peer_memory_lock);
++	if (nss_wifili_blocked_interfaces[if_num] & BIT(nss_ctx->id)) {
++		spin_unlock_bh(&nss_wifili_peer_memory_lock);
++		nss_warning("WIFILI interface %u has unresolved peer DMA ownership\n", if_num);
++		return NULL;
++	}
+ 	nss_core_register_subsys_dp(nss_ctx, if_num, wifili_callback, wifili_ext_callback, NULL, netdev, features);
+ 
+ 	nss_top_main.wifili_msg_callback = event_callback;
++	nss_wifili_registered_interfaces[if_num] = true;
++	spin_unlock_bh(&nss_wifili_peer_memory_lock);
+ 
+ 	return (struct nss_ctx_instance *)&nss_top_main.nss[nss_top_main.wifi_handler_id];
+ }
+@@ -597,6 +887,7 @@
+ 			|| (if_num == NSS_WIFILI_EXTERNAL_INTERFACE0)
+ 			|| (if_num == NSS_WIFILI_EXTERNAL_INTERFACE1));
+ 
++	nss_wifili_requests_unregister(if_num);
+ 	nss_core_unregister_subsys_dp(nss_ctx, if_num);
+ 	nss_wifili_release_external_if(if_num);
+ }
+@@ -659,7 +950,6 @@
+ 	nss_wifili_strings_dentry_create();
+ 
+ 	sema_init(&wifili_pvt.sem, 1);
+-	init_completion(&wifili_pvt.complete);
+ 
+ 	/*
+ 	 * Intialize the external interfaces info.
+--- a/exports/nss_wifili_if.h
++++ b/exports/nss_wifili_if.h
+@@ -26,6 +26,39 @@
+ #ifndef __NSS_WIFILI_H
+ #define __NSS_WIFILI_H
+ 
++#ifdef __KERNEL__
++struct device;
++struct nss_ctx_instance;
++struct nss_wifili_peer_memory;
++struct nss_wifili_msg;
++
++/* Peer lookup memory belongs to NSS after a successful CREATE submission.
++ * free() requires a proven non-submission, matching DELETE ACK or SOC reset.
++ * quarantine() transfers unresolved memory to this driver and prevents SOC
++ * interface reuse until HAL has halted that core and drained its IRQ/NAPI.
++ * These APIs are not for hardware ring descriptors or packet buffers.
++ */
++struct nss_wifili_peer_memory *
++nss_wifili_peer_memory_alloc(struct nss_ctx_instance *ctx, uint32_t if_num,
++			    struct device *dev, uint32_t size);
++void *nss_wifili_peer_memory_address(struct nss_wifili_peer_memory *memory);
++uint64_t nss_wifili_peer_memory_dma(struct nss_wifili_peer_memory *memory);
++void nss_wifili_peer_memory_free(struct nss_wifili_peer_memory *memory);
++void nss_wifili_peer_memory_quarantine(struct nss_wifili_peer_memory *memory);
++void nss_wifili_interface_quarantine(struct nss_ctx_instance *ctx, uint32_t if_num);
++/* Firmware sees a driver-owned callback and a non-reused 32-bit request ID.
++ * The original app_data is restored for the client callback. cancel_msg()
++ * is process-context and drains a callback that was already dispatched;
++ * forget_msg() only retires a token and does not provide a grace period.
++ */
++nss_tx_status_t nss_wifili_tx_msg_tracked(struct nss_ctx_instance *ctx,
++				       struct nss_wifili_msg *msg, uint32_t *cookie);
++void nss_wifili_forget_msg(uint32_t cookie);
++void nss_wifili_cancel_msg(uint32_t cookie);
++/* Driver-internal HAL hook; not exported to clients. */
++void nss_wifili_peer_memory_reclaim(struct nss_ctx_instance *ctx);
++#endif
++
+  /**
+   * @addtogroup nss_wifili_subsystem
+   * @{
+--- a/nss_hal/nss_hal.c
++++ b/nss_hal/nss_hal.c
+@@ -906,6 +906,9 @@
+ 		nss_hal_clean_up_irq(&nss_ctx->int_ctx[i]);
+ 	}
+ 
++	if (nss_top->hal_ops->core_halt)
++		nss_wifili_peer_memory_reclaim(nss_ctx);
++
+ 	/*
+ 	 * nss-drv is exiting, unregister and restore host data plane
+ 	 */
+

@@ -1,0 +1,100 @@
+--- /dev/null
++++ b/frontends/cmn/ecm_bridge_mcast_contract.h
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef ECM_BRIDGE_MCAST_CONTRACT_H
++#define ECM_BRIDGE_MCAST_CONTRACT_H
++
++#include <linux/skbuff.h>
++#include <linux/netdevice.h>
++#include <net/cfg80211.h>
++
++/* Only the NSS/Linux-snooper profile has the matching AP output-fanout
++ * exclusion. Preserve native M2U and collapsed HOSTS packets identically:
++ * neither may create a per-copy ECM flow or acquire classifier side effects.
++ * A lost/stale extension also stays untouched for ath11k's fail-closed check.
++ * This hook owns no packet/peer references and never clears the contract.
++ */
++#if defined(ECM_FRONT_END_NSS_ENABLE) && \
++    defined(ECM_MCAST_LINUX_SNOOPER_SUPPORT) && \
++    IS_ENABLED(CONFIG_BRIDGE_IGMP_SNOOPING) && \
++    IS_ENABLED(CONFIG_CFG80211_HEADERS)
++#define ECM_BRIDGE_AP_MCAST_CONTRACT 1
++static inline bool ecm_bridge_mcast_contract(const struct net_device *out,
++					    const struct sk_buff *skb)
++{
++	const struct wireless_dev *wdev = out ? out->ieee80211_ptr : NULL;
++
++	return wdev && skb->br_mcast_contract &&
++		(wdev->iftype == NL80211_IFTYPE_AP ||
++		 wdev->iftype == NL80211_IFTYPE_AP_VLAN);
++}
++#else
++static inline bool ecm_bridge_mcast_contract(const struct net_device *out,
++					    const struct sk_buff *skb)
++{
++	return false;
++}
++#endif
++
++#endif
+--- a/frontends/cmn/ecm_ipv4.c
++++ b/frontends/cmn/ecm_ipv4.c
+@@ -80,6 +80,7 @@
+ #include "ecm_interface.h"
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv4.h"
++#include "ecm_bridge_mcast_contract.h"
+ #ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
+ #include <ovsmgr.h>
+ #endif
+@@ -1936,6 +1937,9 @@
+ 	struct net_device *dest_dev __maybe_unused;
+ 	uint16_t vid __maybe_unused;
+ 
++	if (ecm_bridge_mcast_contract(out, skb))
++		return NF_ACCEPT;
++
+ 	DEBUG_TRACE("%px: IPv4 CMN Bridge: %s skb=%px\n", out, out->name, skb);
+ 
+ 	/*
+@@ -2223,6 +2227,9 @@
+ 	 */
+ 	{
+ 		.hook		= ecm_ipv4_bridge_post_routing_hook,
++#ifdef ECM_BRIDGE_AP_MCAST_CONTRACT
++		.hook_ops_type	= NF_HOOK_OP_BRIDGE_AP_MCAST_CONTRACT,
++#endif
+ 		.pf		= PF_BRIDGE,
+ 		.hooknum	= NF_BR_POST_ROUTING,
+ 		.priority	= NF_BR_PRI_FILTER_OTHER,
+--- a/frontends/cmn/ecm_ipv6.c
++++ b/frontends/cmn/ecm_ipv6.c
+@@ -86,6 +86,7 @@
+ #include "ecm_interface.h"
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv6.h"
++#include "ecm_bridge_mcast_contract.h"
+ #ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
+ #include <ovsmgr.h>
+ #endif
+@@ -2042,6 +2043,9 @@
+ 	struct net_device *dest_dev __maybe_unused;
+ 	uint16_t vid __maybe_unused;
+ 
++	if (ecm_bridge_mcast_contract(out, skb))
++		return NF_ACCEPT;
++
+ 	DEBUG_TRACE("%px: IPv6 CMN Bridge: %s\n", out, out->name);
+ 
+ 	/*
+@@ -2319,6 +2323,9 @@
+ 	 */
+ 	{
+ 		.hook		= ecm_ipv6_bridge_post_routing_hook,
++#ifdef ECM_BRIDGE_AP_MCAST_CONTRACT
++		.hook_ops_type	= NF_HOOK_OP_BRIDGE_AP_MCAST_CONTRACT,
++#endif
+ 		.pf		= PF_BRIDGE,
+ 		.hooknum	= NF_BR_POST_ROUTING,
+ 		.priority	= NF_BR_PRI_FILTER_OTHER,

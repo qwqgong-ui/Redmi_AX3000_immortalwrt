@@ -1,0 +1,67 @@
+Subject: [PATCH] nss: retire linear RX chain owners before replacing the head
+
+An unexpected FIRST with a pre-existing frag_list can be rejected after the
+previous chain is freed. Clear both ring pointers before the rejection path
+can return, so following segments cannot use the old head or tail. Consume
+the retained head's skb statistics count for full-frame replacements too.
+Clear the linear tail when switching to paged RX.
+
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -1464,18 +1464,22 @@
+ 
+ 	prefetch((void *)(nbuf->data));
+ 
+-	if (likely(bit_flags & N2H_BIT_FLAG_FIRST_SEGMENT) && likely(bit_flags & N2H_BIT_FLAG_LAST_SEGMENT)) {
+-
+-		/*
+-		 * We have received another head before we saw the last segment.
+-		 * Free the old head as the frag list is corrupt.
+-		 */
++	/*
++	 * Retire both ring owners before accepting or rejecting a new FIRST.
++	 * Non-head segments already consumed their NSS skb count; the old
++	 * head retains one until it is delivered or discarded here.
++	 */
++	if (unlikely(bit_flags & N2H_BIT_FLAG_FIRST_SEGMENT)) {
+ 		if (unlikely(head)) {
+-			nss_warning("%px: received a full frame before a last", head);
++			nss_warning("%px: received a head before a last", head);
++			NSS_PKT_STATS_DEC(&nss_ctx->nss_top->stats_drv[NSS_DRV_STATS_NSS_SKB_COUNT]);
+ 			dev_kfree_skb_any(head);
+-			*head_ptr = NULL;
+ 		}
++		*head_ptr = NULL;
++		*tail_ptr = NULL;
++	}
+ 
++	if (likely(bit_flags & N2H_BIT_FLAG_FIRST_SEGMENT) && likely(bit_flags & N2H_BIT_FLAG_LAST_SEGMENT)) {
+ 		nbuf->priority = desc->pri;
+ 
+ #ifdef CONFIG_NET_CLS_ACT
+@@ -1507,17 +1511,6 @@
+ 	 * Build a frag list out of segments.
+ 	 */
+ 	if (unlikely((bit_flags & N2H_BIT_FLAG_FIRST_SEGMENT))) {
+-
+-		/*
+-		 * We have received another head before we saw the last segment.
+-		 * Free the old head as the frag list is corrupt.
+-		 */
+-		if (unlikely(head)) {
+-			nss_warning("%px: received the second head before a last", head);
+-			NSS_PKT_STATS_DEC(&nss_ctx->nss_top->stats_drv[NSS_DRV_STATS_NSS_SKB_COUNT]);
+-			dev_kfree_skb_any(head);
+-		}
+-
+ 		/*
+ 		 * Found head.
+ 		 */
+@@ -1847,6 +1840,7 @@
+ 				dev_kfree_skb_any(n2h_desc_ring->head);
+ 				n2h_desc_ring->head = NULL;
+ 			}
++			n2h_desc_ring->tail = NULL;
+ 
+ 			if (!nss_core_handle_nr_frag_skb(nss_ctx, &nbuf, &n2h_desc_ring->jumbo_start, desc, buffer_type)) {
+ 				goto next;

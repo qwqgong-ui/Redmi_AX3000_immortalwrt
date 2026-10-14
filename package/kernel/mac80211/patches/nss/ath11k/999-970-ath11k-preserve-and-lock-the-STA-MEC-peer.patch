@@ -1,0 +1,82 @@
+Subject: [PATCH] ath11k: preserve the STA BSS peer for NSS MEC learning
+
+Creating an AP peer on a radio also serving a STA must not clear that
+STA's BSS peer. Clear the pointer only when that exact peer is unmapped.
+
+MEC receive runs concurrently with peer unmap. Read and use the BSS peer
+under base_lock, and reject notifications belonging to another VDEV, so a
+peer removed while a receive callback waits for the lock cannot be used.
+
+--- a/drivers/net/wireless/ath/ath11k/peer.c
++++ b/drivers/net/wireless/ath/ath11k/peer.c
+@@ -433,6 +433,10 @@ void ath11k_peer_unmap_event(struct ath11k *ar, u16 peer_id)
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++	if (ar->bss_peer == peer)
++		ar->bss_peer = NULL;
++#endif
+ 	list_del(&peer->list);
+ 	kfree(peer);
+ 	wake_up(&ar->peer_mapping_wq);
+ 
+ exit:
+ 	spin_unlock_bh(&ab->base_lock);
+@@ -472,7 +476,7 @@ void ath11k_peer_unmap_v2_event(struct ath11k *ar, u16 peer_id,
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+-	if (ar->bss_peer && ether_addr_equal(ar->bss_peer->addr, peer->addr))
++	if (ar->bss_peer == peer)
+ 		ar->bss_peer = NULL;
+ #endif
+ 	list_del(&peer->list);
+ 	kfree(peer);
+ 	wake_up(&ar->peer_mapping_wq);
+@@ -700,6 +704,10 @@ void ath11k_peer_cleanup(struct ath11k *ar, u32 vdev_id)
++#ifdef CPTCFG_ATH11K_NSS_SUPPORT
++		if (ar->bss_peer == peer)
++			ar->bss_peer = NULL;
++#endif
+ 		ath11k_peer_rhash_delete(ar, peer);
+ 		list_del(&peer->list);
+ 		kfree(peer);
+ 		ar->num_peers--;
+ 	}
+ 
+@@ -951,8 +951,6 @@ int ath11k_peer_create(struct ath11k *ar, struct ath11k_vif *arvif,
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ 	if (vif->type == NL80211_IFTYPE_STATION && ab->nss.enabled)
+ 		ar->bss_peer = peer;
+-	else
+-		ar->bss_peer = NULL;
+ #endif
+ 
+ 	if (sta) {
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -822,14 +822,11 @@ static void ath11k_nss_mec_handler(struct ath11k_vif *arvif, u8* mec_mac_addr)
+ {
+ 	struct ath11k *ar = arvif->ar;
+ 	struct ath11k_base *ab = ar->ab;
+-	struct ath11k_peer *peer = ar->bss_peer;
++	struct ath11k_peer *peer;
+ 	u8 mac_addr[ETH_ALEN];
+ 	u32 *mac_addr_l32;
+ 	u16 *mac_addr_h16;
+ 
+-	if (!peer)
+-		return;
+-
+ 	/* mec_mac_addr has the swapped mac_addr after 4 bytes (sizeof(u32))
+ 	 * mec_mac_addr[0]
+ 	 * |
+@@ -849,8 +846,10 @@ static void ath11k_nss_mec_handler(struct ath11k_vif *arvif, u8* mec_mac_addr)
+ 
+ 	if (!ether_addr_equal(arvif->vif->addr, mac_addr)) {
+ 		spin_lock_bh(&ab->base_lock);
+-		ath11k_peer_add_ast(ar, peer, mac_addr,
+-				    ATH11K_AST_TYPE_MEC);
++		peer = ar->bss_peer;
++		if (peer && peer->vdev_id == arvif->vdev_id)
++			ath11k_peer_add_ast(ar, peer, mac_addr,
++					    ATH11K_AST_TYPE_MEC);
+ 		spin_unlock_bh(&ab->base_lock);
+ 	}
+ }

@@ -1,0 +1,202 @@
+Subject: [PATCH] netfilter: add optional passive conntrack event observers
+
+Keep ctnetlink's primary notifier and delivery result when ECM observes
+connection teardown. Synchronize RCU at unregister. A separate Kconfig
+option also keeps the changed netns layout in the kernel module ABI hash.
+
+diff --git a/include/net/netfilter/nf_conntrack_ecache.h b/include/net/netfilter/nf_conntrack_ecache.h
+index 0c1dac318e..06dfac1bcd 100644
+--- a/include/net/netfilter/nf_conntrack_ecache.h
++++ b/include/net/netfilter/nf_conntrack_ecache.h
+@@ -69,6 +69,27 @@ void nf_conntrack_register_notifier(struct net *net,
+ 				   const struct nf_ct_event_notifier *nb);
+ void nf_conntrack_unregister_notifier(struct net *net);
+ 
++#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
++/* Passive connection observers coexist with the primary ctnetlink notifier.
++ * They cannot alter delivery/backpressure results or observe expectations.
++ * The caller owns nb until unregister returns.
++ */
++int nf_conntrack_register_event_observer(struct net *net,
++					 const struct nf_ct_event_notifier *nb);
++void nf_conntrack_unregister_event_observer(struct net *net,
++					    const struct nf_ct_event_notifier *nb);
++
++static inline bool nf_conntrack_has_event_observers(struct net *net)
++{
++	return !list_empty(&net->ct.event_observers);
++}
++#else
++static inline bool nf_conntrack_has_event_observers(struct net *net)
++{
++	return false;
++}
++#endif
++
+ void nf_ct_deliver_cached_events(struct nf_conn *ct);
+ int nf_conntrack_eventmask_report(unsigned int eventmask, struct nf_conn *ct,
+ 				  u32 portid, int report);
+@@ -101,7 +122,8 @@ nf_conntrack_event_cache(enum ip_conntrack_events event, struct nf_conn *ct)
+ 	struct net *net = nf_ct_net(ct);
+ 	struct nf_conntrack_ecache *e;
+ 
+-	if (!rcu_access_pointer(net->ct.nf_conntrack_event_cb))
++	if (!rcu_access_pointer(net->ct.nf_conntrack_event_cb) &&
++	    !nf_conntrack_has_event_observers(net))
+ 		return;
+ 
+ 	e = nf_ct_ecache_find(ct);
+diff --git a/include/net/netns/conntrack.h b/include/net/netns/conntrack.h
+index bae914815a..06d3ff2777 100644
+--- a/include/net/netns/conntrack.h
++++ b/include/net/netns/conntrack.h
+@@ -96,6 +96,9 @@ struct nf_ip_net {
+ struct netns_ct {
+ #ifdef CONFIG_NF_CONNTRACK_EVENTS
+ 	bool ecache_dwork_pending;
++#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
++	struct list_head event_observers;
++#endif
+ #endif
+ 	u8			sysctl_log_invalid; /* Log invalid packets */
+ 	u8			sysctl_events;
+diff --git a/net/netfilter/Kconfig b/net/netfilter/Kconfig
+index e10e3b8791..490a0e4741 100644
+--- a/net/netfilter/Kconfig
++++ b/net/netfilter/Kconfig
+@@ -164,6 +164,14 @@ config NF_CONNTRACK_EVENTS
+ 
+ 	  If unsure, say `N'.
+ 
++config NF_CONNTRACK_EVENTS_OBSERVER
++	bool "Passive connection tracking event observers"
++	depends on NF_CONNTRACK_EVENTS
++	help
++	  Allow connection acceleration managers to observe connection events
++	  without replacing ctnetlink's primary notifier or its delivery result.
++	  If unsure, say N.
++
+ config NF_CONNTRACK_TIMEOUT
+ 	bool  'Connection tracking timeout'
+ 	depends on NETFILTER_ADVANCED
+diff --git a/net/netfilter/nf_conntrack_ecache.c b/net/netfilter/nf_conntrack_ecache.c
+index efabee2063..2e7f10c926 100644
+--- a/net/netfilter/nf_conntrack_ecache.c
++++ b/net/netfilter/nf_conntrack_ecache.c
+@@ -20,6 +20,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/slab.h>
+ #include <linux/export.h>
++#include <linux/rculist.h>
+ 
+ #include <net/netfilter/nf_conntrack.h>
+ #include <net/netfilter/nf_conntrack_core.h>
+@@ -28,6 +29,27 @@
+ 
+ static DEFINE_MUTEX(nf_ct_ecache_mutex);
+ 
++#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
++struct nf_ct_event_observer {
++	struct list_head list;
++	const struct nf_ct_event_notifier *notify;
++};
++
++static void nf_conntrack_notify_observers(struct net *net, unsigned int events,
++					  const struct nf_ct_event *item)
++{
++	struct nf_ct_event_observer *observer;
++
++	list_for_each_entry_rcu(observer, &net->ct.event_observers, list)
++		observer->notify->ct_event(events, item);
++}
++#else
++static void nf_conntrack_notify_observers(struct net *net, unsigned int events,
++					  const struct nf_ct_event *item)
++{
++}
++#endif
++
+ #define DYING_NULLS_VAL			((1 << 30) + 1)
+ #define ECACHE_MAX_JIFFIES		msecs_to_jiffies(10)
+ #define ECACHE_RETRY_JIFFIES		msecs_to_jiffies(10)
+@@ -140,12 +162,13 @@ static int __nf_conntrack_eventmask_report(struct nf_conntrack_ecache *e,
+ 	rcu_read_lock();
+ 
+ 	notify = rcu_dereference(net->ct.nf_conntrack_event_cb);
+-	if (!notify) {
++	if (!notify && !nf_conntrack_has_event_observers(net)) {
+ 		rcu_read_unlock();
+ 		return 0;
+ 	}
+ 
+-	ret = notify->ct_event(events | missed, item);
++	ret = notify ? notify->ct_event(events | missed, item) : 0;
++	nf_conntrack_notify_observers(net, events | missed, item);
+ 	rcu_read_unlock();
+ 
+ 	if (likely(ret >= 0 && missed == 0))
+@@ -283,6 +306,54 @@ void nf_conntrack_unregister_notifier(struct net *net)
+ }
+ EXPORT_SYMBOL_GPL(nf_conntrack_unregister_notifier);
+ 
++#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
++int nf_conntrack_register_event_observer(struct net *net,
++					 const struct nf_ct_event_notifier *new)
++{
++	struct nf_ct_event_observer *observer, *entry;
++
++	if (!new || !new->ct_event)
++		return -EINVAL;
++
++	observer = kmalloc(sizeof(*observer), GFP_KERNEL);
++	if (!observer)
++		return -ENOMEM;
++	observer->notify = new;
++
++	mutex_lock(&nf_ct_ecache_mutex);
++	list_for_each_entry(entry, &net->ct.event_observers, list) {
++		if (entry->notify == new) {
++			mutex_unlock(&nf_ct_ecache_mutex);
++			kfree(observer);
++			return -EEXIST;
++		}
++	}
++	list_add_tail_rcu(&observer->list, &net->ct.event_observers);
++	mutex_unlock(&nf_ct_ecache_mutex);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(nf_conntrack_register_event_observer);
++
++void nf_conntrack_unregister_event_observer(struct net *net,
++					    const struct nf_ct_event_notifier *notify)
++{
++	struct nf_ct_event_observer *observer;
++
++	mutex_lock(&nf_ct_ecache_mutex);
++	list_for_each_entry(observer, &net->ct.event_observers, list) {
++		if (observer->notify != notify)
++			continue;
++		list_del_rcu(&observer->list);
++		mutex_unlock(&nf_ct_ecache_mutex);
++		synchronize_rcu();
++		kfree(observer);
++		return;
++	}
++	mutex_unlock(&nf_ct_ecache_mutex);
++}
++EXPORT_SYMBOL_GPL(nf_conntrack_unregister_event_observer);
++#endif
++
+ void nf_conntrack_ecache_work(struct net *net, enum nf_ct_ecache_state state)
+ {
+ 	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
+@@ -344,6 +415,9 @@ void nf_conntrack_ecache_pernet_init(struct net *net)
+ 	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
+ 
+ 	net->ct.sysctl_events = nf_ct_events;
++#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
++	INIT_LIST_HEAD(&net->ct.event_observers);
++#endif
+ 
+ 	INIT_DELAYED_WORK(&cnet->ecache.dwork, ecache_work);
+ 	INIT_HLIST_NULLS_HEAD(&cnet->ecache.dying_list, DYING_NULLS_VAL);

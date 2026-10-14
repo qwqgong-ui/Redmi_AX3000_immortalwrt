@@ -1,0 +1,103 @@
+#!/bin/sh
+# Repair a stuck initial PSK association with a bounded clean leave/retry.
+# M1 received => supplicant leaves ASSOCIATED; ongoing handshakes stay intact.
+umask 077
+. /usr/share/libubox/jshn.sh
+. /usr/lib/nss-relay-state.sh
+nr_dir=/var/run/nss-relay
+mkdir -p "$nr_dir" || exit 1
+chmod 700 "$nr_dir"
+trap 'rm -f "$nr_dir"/*.tmp."$$"; exit 0' TERM INT
+
+nss_relay_ctl() {
+	local object="$1" command="$2" request
+	json_init
+	json_add_string command "$command"
+	request="$(json_dump)"
+	ubus -t 2 call "$object" control "$request" 2>/dev/null | jsonfilter -e '@.result'
+}
+nss_relay_field() {
+	printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n1
+}
+nss_relay_load() {
+	nr_since=0 nr_attempts=0 nr_window=0 nr_last_id=- nr_last_bssid=- nr_seen=0 nr_last_index=0
+	if [ -f "$nr_dir/$nr_iface.state" ]; then
+		if ! read -r nr_since nr_attempts nr_window nr_last_id nr_last_bssid nr_seen nr_last_index < "$nr_dir/$nr_iface.state"; then
+			nr_since=0 nr_attempts=0 nr_window=0 nr_last_id=- nr_last_bssid=- nr_seen=0 nr_last_index=0
+		fi
+	fi
+}
+nss_relay_save() {
+	printf '%s %s %s %s %s %s %s\n' "$nr_since" "$nr_attempts" "$nr_window" "$nr_last_id" "$nr_last_bssid" "$nr_seen" "$nr_last_index" > "$nr_dir/$nr_iface.tmp.$$" &&
+		mv "$nr_dir/$nr_iface.tmp.$$" "$nr_dir/$nr_iface.state"
+}
+
+while :; do
+	if [ "$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null)" != 1 ] ||
+	   [ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" != 1 ]; then
+		rm -f "$nr_dir"/*.state
+		sleep 1
+		continue
+	fi
+	nr_objects=$(ubus -t 2 list 'wpa_supplicant.*' 2>/dev/null)
+	nr_fast=0
+	for nr_file in "$nr_dir"/*.state; do
+		[ -f "$nr_file" ] || continue
+		nr_saved=${nr_file##*/}
+		nr_saved=${nr_saved%.state}
+		printf '%s\n' "$nr_objects" | grep -Fxq "wpa_supplicant.$nr_saved" || rm -f "$nr_file"
+	done
+	for nr_object in $nr_objects; do
+		nr_iface=${nr_object#wpa_supplicant.}
+		case "$nr_iface" in ''|*[!a-zA-Z0-9_.-]*) continue ;; esac
+		nss_relay_load
+		nr_status="$(nss_relay_ctl "$nr_object" STATUS)"
+		if [ -z "$nr_status" ]; then
+			nr_since=0 nr_seen=0
+			nss_relay_save
+			continue
+		fi
+		nr_index=$(cat "/sys/class/net/$nr_iface/ifindex" 2>/dev/null)
+		nr_state=$(nss_relay_field "$nr_status" wpa_state)
+		nr_mode=$(nss_relay_field "$nr_status" mode)
+		nr_key=$(nss_relay_field "$nr_status" key_mgmt)
+		nr_freq=$(nss_relay_field "$nr_status" freq)
+		nr_id=$(nss_relay_field "$nr_status" id)
+		nr_bssid=$(nss_relay_field "$nr_status" bssid)
+		read -r nr_now nr_rest < /proc/uptime
+		nr_fraction=${nr_now#*.}
+		nr_fraction=${nr_fraction#0}
+		nr_now=$(( ${nr_now%%.*} * 100 + ${nr_fraction:-0} ))
+		if ! nss_relay_decide; then
+			rm -f "$nr_dir/$nr_iface.state"
+			continue
+		fi
+		# Catch the start of association promptly, including the immediate
+		# retry after SELECT_NETWORK. Cooldown and connected sessions poll slowly.
+		if [ "$nr_state" != COMPLETED ] && [ "$nr_attempts" -lt 3 ]; then
+			nr_fast=1
+		fi
+		if [ "$nr_action" = leave ]; then
+			# Recheck the exact association before requesting a clean leave.
+			nr_fresh="$(nss_relay_ctl "$nr_object" STATUS)"
+			if [ "$(nss_relay_field "$nr_fresh" wpa_state)" = ASSOCIATED ] &&
+			   [ "$(nss_relay_field "$nr_fresh" id)" = "$nr_id" ] &&
+			   [ "$(nss_relay_field "$nr_fresh" bssid)" = "$nr_bssid" ]; then
+				if [ "$(nss_relay_ctl "$nr_object" DISCONNECT)" = OK ]; then
+					# Allow the AP to retire the old peer before reassociation.
+					/usr/lib/nss-relay-wait
+					[ "$(nss_relay_ctl "$nr_object" "SELECT_NETWORK $nr_id")" = OK ] ||
+						nss_relay_ctl "$nr_object" RECONNECT >/dev/null
+					nss_relay_ctl "$nr_object" 'BSSID_IGNORE clear' >/dev/null
+					logger -t nss-relay "if=$nr_iface initial M1 missing; clean retry $nr_attempts/3"
+				fi
+			fi
+		fi
+		nss_relay_save
+	done
+	if [ "$nr_fast" = 1 ]; then
+		/usr/lib/nss-relay-wait
+	else
+		sleep 1
+	fi
+done

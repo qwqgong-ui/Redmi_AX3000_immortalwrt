@@ -1,0 +1,46 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] driver: drain 12.2 statistics lifetimes
+
+Track sized response buffers without copying beyond the embedded request.
+
+--- a/nss_if.c
++++ b/nss_if.c
+@@ -222,8 +222,8 @@
+ /* The client owns the returned token, not a pointer echoed by firmware.
+  * Cancel before destroying its callback context, even after a timeout.
+  */
+-nss_tx_status_t nss_if_tx_msg_tracked(struct nss_ctx_instance *ctx,
+-		struct nss_if_msg *msg, uint32_t *cookie)
++nss_tx_status_t nss_if_tx_msg_with_size_tracked(struct nss_ctx_instance *ctx,
++		struct nss_if_msg *msg, uint32_t buffer_size, uint32_t *cookie)
+ {
+ 	if (cookie)
+ 		*cookie = 0;
+@@ -235,8 +235,15 @@
+ 		return NSS_TX_FAILURE_BAD_PARAM;
+ 	if (!nss_control_open(ctx, NSS_CONTROL_BASE_IF, msg->cm.interface))
+ 		return NSS_TX_FAILURE_NOT_READY;
+-	return nss_control_send(ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++	return nss_control_send(ctx, msg, sizeof(*msg), buffer_size,
+ 			NSS_CONTROL_BASE_IF, cookie);
++}
++EXPORT_SYMBOL(nss_if_tx_msg_with_size_tracked);
++
++nss_tx_status_t nss_if_tx_msg_tracked(struct nss_ctx_instance *ctx,
++		struct nss_if_msg *msg, uint32_t *cookie)
++{
++	return nss_if_tx_msg_with_size_tracked(ctx, msg, NSS_NBUF_PAYLOAD_SIZE, cookie);
+ }
+ EXPORT_SYMBOL(nss_if_tx_msg_tracked);
+ 
+--- a/exports/nss_if.h
++++ b/exports/nss_if.h
+@@ -355,6 +355,8 @@
+ nss_tx_status_t nss_if_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
+ 		struct nss_if_msg *nim, uint32_t *cookie);
+ void nss_if_cancel_msg(uint32_t cookie);
++nss_tx_status_t nss_if_tx_msg_with_size_tracked(struct nss_ctx_instance *ctx,
++		struct nss_if_msg *msg, uint32_t buffer_size, uint32_t *cookie);
+ 
+ /**
+  * nss_if_msg_sync

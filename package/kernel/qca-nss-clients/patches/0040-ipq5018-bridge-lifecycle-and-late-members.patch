@@ -1,0 +1,426 @@
+Subject: [PATCH] bridge-mgr: manage IPQ5018 wireless bridge members
+
+Enable the non-PPE manager on IPQ5018. Track acknowledged joins and pending
+leaves, reconcile existing and late-registering wireless members under
+RTNL, and bound retries. Unknown host/DSA ports do not veto Linux bridge
+operations. Balance netdev references and remove instances at module exit.
+
+diff --git a/bridge/nss_bridge_mgr.c b/bridge/nss_bridge_mgr.c
+index 0ea1ce8c82..6c032dc43d 100644
+--- a/bridge/nss_bridge_mgr.c
++++ b/bridge/nss_bridge_mgr.c
+@@ -26,6 +26,8 @@
+ #include <linux/if_vlan.h>
+ #include <linux/of.h>
+ #include <linux/if_bridge.h>
++#include <linux/workqueue.h>
++#include <net/net_namespace.h>
+ #include <net/bonding.h>
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ #include <ref/ref_vsi.h>
+@@ -51,6 +53,45 @@ static bool ovs_enabled = false;
+ 
+ static struct nss_bridge_mgr_context br_mgr_ctx;
+ 
++struct nss_bridge_member {
++	struct list_head list;
++	struct net_device *dev;
++	int32_t ifnum;
++	bool leaving;
++};
++
++static struct delayed_work nss_bridge_reconcile_work;
++static unsigned int nss_bridge_reconcile_retries;
++static bool nss_bridge_stopping;
++
++static void nss_bridge_mgr_schedule_reconcile(void)
++{
++	if (READ_ONCE(nss_bridge_stopping))
++		return;
++	nss_bridge_reconcile_retries = 10;
++	mod_delayed_work(system_wq, &nss_bridge_reconcile_work, HZ);
++}
++
++static struct nss_bridge_member *nss_bridge_mgr_find_member(struct nss_bridge_pvt *br,
++							  struct net_device *dev)
++{
++	struct nss_bridge_member *member;
++
++	ASSERT_RTNL();
++	list_for_each_entry(member, &br->members, list)
++		if (member->dev == dev)
++			return member;
++	return NULL;
++}
++
++static void nss_bridge_mgr_delete_member(struct nss_bridge_member *member)
++{
++	ASSERT_RTNL();
++	list_del(&member->list);
++	dev_put(member->dev);
++	kfree(member);
++}
++
+ /*
+  * Module parameter to enable/disable FDB learning.
+  */
+@@ -81,6 +122,9 @@ static struct nss_bridge_pvt *nss_bridge_mgr_create_instance(struct net_device *
+ 		return NULL;
+ 
+ 	INIT_LIST_HEAD(&br->list);
++	INIT_LIST_HEAD(&br->members);
++	br->dev = dev;
++	dev_hold(dev);
+ 
+ 	return br;
+ }
+@@ -91,12 +135,17 @@ static struct nss_bridge_pvt *nss_bridge_mgr_create_instance(struct net_device *
+  */
+ static void nss_bridge_mgr_delete_instance(struct nss_bridge_pvt *br)
+ {
++	struct nss_bridge_member *member, *next;
++
++	list_for_each_entry_safe(member, next, &br->members, list)
++		nss_bridge_mgr_delete_member(member);
+ 	spin_lock(&br_mgr_ctx.lock);
+ 	if (!list_empty(&br->list))
+ 		list_del(&br->list);
+ 
+ 	spin_unlock(&br_mgr_ctx.lock);
+ 
++	dev_put(br->dev);
+ 	kfree(br);
+ }
+ 
+@@ -771,13 +820,39 @@ static void nss_bridge_mgr_l2_exception_acl_disable(void)
+ int nss_bridge_mgr_join_bridge(struct net_device *dev, struct nss_bridge_pvt *br)
+ {
+ 	int32_t ifnum;
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	struct nss_bridge_member *member;
++	struct nss_bridge_pvt *owner;
++#endif
+ 
+ 	ifnum = nss_cmn_get_interface_number_by_dev(dev);
+ 	if (ifnum < 0) {
+-		nss_bridge_mgr_warn("%s: failed to find interface number\n", dev->name);
+ 		return -EINVAL;
+ 	}
+ 
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	/* Do not bind the same firmware port to a new bridge until its old
++	 * membership has been detached successfully.
++	 */
++	list_for_each_entry(owner, &br_mgr_ctx.list, list) {
++		if (owner == br)
++			continue;
++		member = nss_bridge_mgr_find_member(owner, dev);
++		if (member) {
++			member->leaving = true;
++			return -EAGAIN;
++		}
++	}
++	member = nss_bridge_mgr_find_member(br, dev);
++	if (member && member->ifnum == ifnum)
++		return member->leaving ? -EAGAIN : 0;
++	if (member)
++		nss_bridge_mgr_delete_member(member);
++	member = kzalloc(sizeof(*member), GFP_KERNEL);
++	if (!member)
++		return -ENOMEM;
++#endif
++
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	if (NSS_BRIDGE_MGR_IF_IS_TYPE_PHYSICAL(ifnum)) {
+ 		fal_port_t port_num = (fal_port_t)ifnum;
+@@ -853,6 +928,9 @@ int nss_bridge_mgr_join_bridge(struct net_device *dev, struct nss_bridge_pvt *br
+ 
+ 	if (nss_bridge_tx_join_msg(br->ifnum, dev) != NSS_TX_SUCCESS) {
+ 		nss_bridge_mgr_warn("%px: Interface %s join bridge failed\n", br, dev->name);
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++		kfree(member);
++#endif
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 		if (NSS_BRIDGE_MGR_IF_IS_TYPE_PHYSICAL(ifnum)) {
+ 			fal_port_t port_num = (fal_port_t)ifnum;
+@@ -862,6 +940,12 @@ int nss_bridge_mgr_join_bridge(struct net_device *dev, struct nss_bridge_pvt *br
+ 		return -EIO;
+ 	}
+ 
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	member->dev = dev;
++	member->ifnum = ifnum;
++	dev_hold(dev);
++	list_add_tail(&member->list, &br->members);
++#endif
+ 	return 0;
+ }
+ 
+@@ -872,12 +956,27 @@ int nss_bridge_mgr_join_bridge(struct net_device *dev, struct nss_bridge_pvt *br
+ int nss_bridge_mgr_leave_bridge(struct net_device *dev, struct nss_bridge_pvt *br)
+ {
+ 	int32_t ifnum;
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	struct nss_bridge_member *member = nss_bridge_mgr_find_member(br, dev);
++
++	if (!member)
++		return 0;
++	ifnum = member->ifnum;
++	/* A destroyed VDEV has already dropped its firmware membership. Never
++	 * send a leave to an interface number that has since been reused.
++	 */
++	if (nss_cmn_get_interface_number_by_dev(dev) != ifnum) {
++		nss_bridge_mgr_delete_member(member);
++		return 0;
++	}
++#else
+ 
+ 	ifnum = nss_cmn_get_interface_number_by_dev(dev);
+ 	if (ifnum < 0) {
+ 		nss_bridge_mgr_warn("%s: failed to find interface number\n", dev->name);
+ 		return -1;
+ 	}
++#endif
+ 
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	if (NSS_BRIDGE_MGR_IF_IS_TYPE_PHYSICAL(ifnum)) {
+@@ -963,13 +1062,19 @@ int nss_bridge_mgr_leave_bridge(struct net_device *dev, struct nss_bridge_pvt *b
+ 		} else if (NSS_BRIDGE_MGR_IF_IS_TYPE_PHYSICAL(ifnum)) {
+ 			fal_port_t port_num = (fal_port_t)ifnum;
+ 
+-			fal_stp_port_state_set(NSS_BRIDGE_MGR_SWITCH_ID, NSS_BRIDGE_MGR_SPANNING_TREE_ID, port_num, FAL_STP_DISABLED);
+-			ppe_port_vsi_set(NSS_BRIDGE_MGR_SWITCH_ID, port_num, br->vsi);
+-		}
++				fal_stp_port_state_set(NSS_BRIDGE_MGR_SWITCH_ID, NSS_BRIDGE_MGR_SPANNING_TREE_ID, port_num, FAL_STP_DISABLED);
++				ppe_port_vsi_set(NSS_BRIDGE_MGR_SWITCH_ID, port_num, br->vsi);
++			}
++#endif
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++		member->leaving = true;
+ #endif
+ 		return -1;
+ 	}
+ 
++#if !defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
++	nss_bridge_mgr_delete_member(member);
++#endif
+ 	return 0;
+ }
+ 
+@@ -980,6 +1085,7 @@ int nss_bridge_mgr_leave_bridge(struct net_device *dev, struct nss_bridge_pvt *b
+ int nss_bridge_mgr_unregister_br(struct net_device *dev)
+ {
+ 	struct nss_bridge_pvt *b_pvt;
++	struct nss_bridge_member *member, *next;
+ 
+ 	/*
+ 	 * Do we have it on record?
+@@ -988,6 +1094,10 @@ int nss_bridge_mgr_unregister_br(struct net_device *dev)
+ 	if (!b_pvt)
+ 		return -1;
+ 
++	list_for_each_entry_safe(member, next, &b_pvt->members, list) {
++		nss_bridge_mgr_leave_bridge(member->dev, b_pvt);
++	}
++
+ 	/*
+ 	 * sequence of free:
+ 	 * 1. issue VSI unassign to NSS
+@@ -1044,6 +1154,8 @@ int nss_bridge_mgr_register_br(struct net_device *dev)
+ 	uint32_t vsi_id = 0;
+ #endif
+ 
++	if (nss_bridge_mgr_find_instance(dev))
++		return 0;
+ 	nss_bridge_mgr_info("%px: Bridge register: %s\n", dev, dev->name);
+ 
+ 	b_pvt = nss_bridge_mgr_create_instance(dev);
+@@ -1172,6 +1284,8 @@ static int nss_bridge_mgr_bond_slave_changeupper(struct netdev_notifier_changeup
+ 	 * Add or remove the slave based based on linking event
+ 	 */
+ 	if (cu_info->linking) {
++		if (nss_cmn_get_interface_number_by_dev(dev) < 0)
++			return NOTIFY_DONE;
+ 		if (nss_bridge_mgr_add_bond_slave(cu_info->upper_dev, bond_slave, b_pvt)) {
+ 			nss_bridge_mgr_warn("%px: Failed to add slave (%s) state in Bridge %s\n", b_pvt,
+ 					cu_info->upper_dev->name, master->name);
+@@ -1341,10 +1455,86 @@ static int nss_bridge_mgr_unregister_event(struct netdev_notifier_info *info)
+  * nss_bridge_mgr_netdevice_event()
+  *	Bridge manager handles bridge operation notifications.
+  */
++static void nss_bridge_mgr_reconcile(struct work_struct *work)
++{
++	struct net_device *dev, *lower;
++	struct list_head *iter;
++	struct nss_bridge_pvt *br;
++	struct nss_bridge_member *member, *next;
++	bool pending = false;
++
++	if (READ_ONCE(nss_bridge_stopping))
++		return;
++	rtnl_lock();
++	if (READ_ONCE(nss_bridge_stopping))
++		goto out;
++	for_each_netdev(&init_net, dev) {
++		if (!netif_is_bridge_master(dev))
++			continue;
++		br = nss_bridge_mgr_find_instance(dev);
++		if (!br) {
++			nss_bridge_mgr_register_br(dev);
++			br = nss_bridge_mgr_find_instance(dev);
++			if (!br) {
++				pending = true;
++				continue;
++			}
++		}
++		list_for_each_entry_safe(member, next, &br->members, list) {
++			if (member->leaving || !netif_running(member->dev) ||
++			    netdev_master_upper_dev_get(member->dev) != dev ||
++			    nss_cmn_get_interface_number_by_dev(member->dev) != member->ifnum) {
++				if (nss_bridge_mgr_leave_bridge(member->dev, br))
++					pending = true;
++			}
++		}
++		netdev_for_each_lower_dev(dev, lower, iter) {
++			if (!netif_running(lower))
++				continue;
++			if (nss_cmn_get_interface_number_by_dev(lower) < 0) {
++				/* DSA/host-only members are left to Linux. A wireless
++				 * VDEV may still be completing NSS registration.
++				 */
++				if (lower->ieee80211_ptr)
++					pending = true;
++				continue;
++			}
++			if (nss_bridge_mgr_join_bridge(lower, br))
++				pending = true;
++		}
++	}
++	if (pending && nss_bridge_reconcile_retries &&
++	    !READ_ONCE(nss_bridge_stopping)) {
++		nss_bridge_reconcile_retries--;
++		mod_delayed_work(system_wq, &nss_bridge_reconcile_work, HZ);
++	}
++out:
++	rtnl_unlock();
++}
++
++static void nss_bridge_mgr_forget_member(struct net_device *dev)
++{
++	struct nss_bridge_pvt *br;
++
++	ASSERT_RTNL();
++	list_for_each_entry(br, &br_mgr_ctx.list, list)
++		nss_bridge_mgr_leave_bridge(dev, br);
++}
++
+ static int nss_bridge_mgr_netdevice_event(struct notifier_block *unused,
+-				unsigned long event, void *ptr)
++			unsigned long event, void *ptr)
+ {
+ 	struct netdev_notifier_info *info = (struct netdev_notifier_info *)ptr;
++	struct net_device *dev = netdev_notifier_info_to_dev(info);
++
++	if (READ_ONCE(nss_bridge_stopping) || dev_net(dev) != &init_net)
++		return NOTIFY_DONE;
++	if ((event == NETDEV_REGISTER || event == NETDEV_UNREGISTER ||
++	     event == NETDEV_UP || event == NETDEV_DOWN ||
++	     event == NETDEV_CHANGE || event == NETDEV_CHANGEUPPER) &&
++	    (netif_is_bridge_master(dev) || netif_is_bridge_port(dev) ||
++	     event == NETDEV_CHANGEUPPER))
++		nss_bridge_mgr_schedule_reconcile();
+ 
+ 	switch (event) {
+ 	case NETDEV_CHANGEUPPER:
+@@ -1356,7 +1546,11 @@ static int nss_bridge_mgr_netdevice_event(struct notifier_block *unused,
+ 	case NETDEV_REGISTER:
+ 		return nss_bridge_mgr_register_event(info);
+ 	case NETDEV_UNREGISTER:
++		nss_bridge_mgr_forget_member(dev);
+ 		return nss_bridge_mgr_unregister_event(info);
++	case NETDEV_DOWN:
++		nss_bridge_mgr_forget_member(dev);
++		return NOTIFY_DONE;
+ 	}
+ 
+ 	/*
+@@ -1373,6 +1567,7 @@ static struct notifier_block nss_bridge_mgr_netdevice_nb __read_mostly = {
+  * nss_bridge_mgr_is_physical_dev()
+  *	Check if the device is on physical device.
+  */
++#if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ static bool nss_bridge_mgr_is_physical_dev(struct net_device *dev)
+ {
+ 	struct net_device *root_dev = dev;
+@@ -1596,21 +1791,46 @@ static struct ctl_table nss_bridge_mgr_table[] = {
+ 	}
+ };
+ 
++#endif /* NSS_BRIDGE_MGR_PPE_SUPPORT */
++
++static void nss_bridge_mgr_destroy_all(void)
++{
++	struct nss_bridge_pvt *br;
++
++	rtnl_lock();
++	while (!list_empty(&br_mgr_ctx.list)) {
++		br = list_first_entry(&br_mgr_ctx.list, struct nss_bridge_pvt, list);
++		nss_bridge_mgr_unregister_br(br->dev);
++	}
++	rtnl_unlock();
++}
++
+ /*
+  * nss_bridge_mgr_init_module()
+  *	bridge_mgr module init function
+  */
+ int __init nss_bridge_mgr_init_module(void)
+ {
++	int ret;
+ 	/*
+ 	 * Monitor bridge activity only on supported platform
+ 	 */
+-	if (!of_machine_is_compatible("qcom,ipq807x") && !of_machine_is_compatible("qcom,ipq6018") && !of_machine_is_compatible("qcom,ipq8074"))
+-		return 0;
++	if (!of_machine_is_compatible("qcom,ipq5018"))
++		return -ENODEV;
++	if (nss_cmn_get_state(nss_bridge_get_context()) != NSS_STATE_INITIALIZED)
++		return -ENODEV;
+ 
+ 	INIT_LIST_HEAD(&br_mgr_ctx.list);
+ 	spin_lock_init(&br_mgr_ctx.lock);
+-	register_netdevice_notifier(&nss_bridge_mgr_netdevice_nb);
++	INIT_DELAYED_WORK(&nss_bridge_reconcile_work, nss_bridge_mgr_reconcile);
++	ret = register_netdevice_notifier(&nss_bridge_mgr_netdevice_nb);
++	if (ret) {
++		WRITE_ONCE(nss_bridge_stopping, true);
++		cancel_delayed_work_sync(&nss_bridge_reconcile_work);
++		nss_bridge_mgr_destroy_all();
++		return ret;
++	}
++	nss_bridge_mgr_schedule_reconcile();
+ 	nss_bridge_mgr_info("Module (Build %s) loaded\n", NSS_CLIENT_BUILD_ID);
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	br_mgr_ctx.wan_if_num = -1;
+@@ -1637,7 +1857,10 @@ int __init nss_bridge_mgr_init_module(void)
+  */
+ void __exit nss_bridge_mgr_exit_module(void)
+ {
++	WRITE_ONCE(nss_bridge_stopping, true);
++	cancel_delayed_work_sync(&nss_bridge_reconcile_work);
+ 	unregister_netdevice_notifier(&nss_bridge_mgr_netdevice_nb);
++	nss_bridge_mgr_destroy_all();
+ 	nss_bridge_mgr_info("Module unloaded\n");
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)
+ 	br_fdb_update_unregister_notify(&nss_bridge_mgr_fdb_update_notifier);diff --git a/bridge/nss_bridge_mgr_priv.h b/bridge/nss_bridge_mgr_priv.h
+index 2ca505e8ee..9a01c85a55 100644
+--- a/bridge/nss_bridge_mgr_priv.h
++++ b/bridge/nss_bridge_mgr_priv.h
+@@ -105,6 +105,7 @@ struct nss_bridge_mgr_context {
+  */
+ struct nss_bridge_pvt {
+ 	struct list_head list;			/* List of bridge instance */
++	struct list_head members;		/* Successful non-PPE joins; RTNL protected */
+ 	struct net_device *dev;			/* Bridge netdevice */
+ 	uint32_t ifnum;				/* Dynamic interface for bridge */
+ #if defined(NSS_BRIDGE_MGR_PPE_SUPPORT)

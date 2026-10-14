@@ -1,0 +1,97 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+USE_PROCD=1
+
+ecm_state=/var/run/ecm
+ecm_debug=/sys/kernel/debug/ecm
+
+restore_events() {
+	local previous
+	[ -r "$ecm_state/conntrack_events" ] || return 0
+	previous="$(cat "$ecm_state/conntrack_events")"
+	case "$previous" in 0|1|2) ;; *) return 1 ;; esac
+	if [ "$(cat /proc/sys/net/netfilter/nf_conntrack_events 2>/dev/null)" = 1 ]; then
+		printf '%s\n' "$previous" > /proc/sys/net/netfilter/nf_conntrack_events
+	fi
+	rm -f "$ecm_state/conntrack_events"
+}
+
+stop_acceleration() {
+	local stop
+	for stop in "$ecm_debug/front_end_ipv4_stop" "$ecm_debug/front_end_ipv6_stop"; do
+		[ ! -w "$stop" ] || echo 1 > "$stop"
+	done
+	[ ! -w "$ecm_debug/ecm_db/defunct_all" ] || echo 1 > "$ecm_debug/ecm_db/defunct_all"
+}
+
+start_service() {
+	local enabled flow_offload delay events bridge=0
+	. /lib/functions.sh
+	config_load ecm
+	config_get_bool enabled main enabled 1
+	config_get delay main accel_delay_pkts 1
+	[ "$enabled" = 1 ] || { stop_service; return 0; }
+	[ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" = 1 ] &&
+	[ -d /sys/module/qca_nss_bridge_mgr ] &&
+	[ "$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null)" = 1 ] || {
+		stop_service
+		logger -t qca-nss-ecm 'NSS Wi-Fi is not ready; keeping host routing'
+		return 0
+	}
+	flow_offload="$(uci -q get 'firewall.@defaults[0].flow_offloading')"
+	if [ "$flow_offload" = 1 ]; then
+		stop_service || return 1
+		logger -t qca-nss-ecm 'Firewall flow offloading is enabled; keeping ECM stopped'
+		return 0
+	fi
+	case "$delay" in ''|*[!0-9]*) return 1 ;; esac
+	modprobe nf_conntrack || return 1
+	modprobe qca-dsa-nss || return 1
+	mkdir -p "$ecm_state" || return 1
+	if [ ! -r "$ecm_state/conntrack_events" ]; then
+		events="$(cat /proc/sys/net/netfilter/nf_conntrack_events)" || return 1
+		case "$events" in 0|1|2) ;; *) return 1 ;; esac
+		printf '%s\n' "$events" > "$ecm_state/conntrack_events" || return 1
+	fi
+	echo 1 > /proc/sys/net/netfilter/nf_conntrack_events || return 1
+	[ ! -x /etc/init.d/nss-lan ] || /etc/init.d/nss-lan start || { restore_events; return 1; }
+	if [ "$(cat /sys/module/qca_dsa_nss/parameters/ready 2>/dev/null)" = Y ]; then
+		modprobe nf_conntrack_bridge || { restore_events; return 1; }
+		bridge=1
+	fi
+	if [ ! -d /sys/module/ecm ]; then
+		# insmod preserves parameters; OpenWrt kmodloader modprobe does not.
+		insmod ecm front_end_selection=1 register_br_post_routing="$bridge" \
+			ecm_front_end_ipv4_stopped=1 ecm_front_end_ipv6_stopped=1 || { restore_events; return 1; }
+	fi
+	stop_acceleration
+	printf '%s\n' "$delay" > "$ecm_debug/ecm_classifier_default/accel_delay_pkts" || { stop_service; return 1; }
+	# Observe both directions before installing rules through an ingress shaper.
+	if [ -w /proc/sys/net/ecm/igs_enabled ]; then
+		echo 1 > /proc/sys/net/ecm/igs_enabled || { stop_service; return 1; }
+	fi
+	echo 0 > "$ecm_debug/front_end_ipv4_stop" || { stop_service; return 1; }
+	[ ! -w "$ecm_debug/front_end_ipv6_stop" ] || echo 0 > "$ecm_debug/front_end_ipv6_stop"
+	logger -t qca-nss-ecm 'NSS wireless connection acceleration enabled'
+}
+
+stop_service() {
+	stop_acceleration
+	if [ -w /sys/module/qca_dsa_nss/parameters/enabled ]; then
+		printf '%s' 0 > /sys/module/qca_dsa_nss/parameters/enabled || return 1
+	fi
+	if [ -d /sys/module/ecm ]; then
+		rmmod ecm || return 1
+	fi
+	restore_events
+}
+
+reload_service() {
+	stop_service && start_service
+}
+
+service_triggers() {
+	procd_add_reload_trigger ecm nss-wifi network firewall
+}

@@ -1,0 +1,711 @@
+Subject: [PATCH] ath11k: track IRQ resource stages and configure before core startup
+
+Rollback only successfully requested IRQ actions and initialized
+tasklets/NAPI. Keep managed stop state separate from temporary masks.
+Complete IRQ configuration before QMI can dispatch FW-ready work.
+
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -222,7 +222,7 @@
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		struct ath11k_ce_pipe *ce_pipe = &ab->ce.ce_pipe[i];
+ 
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		if (!ce_pipe->tasklet_initialized)
+ 			continue;
+ 
+ 		tasklet_kill(&ce_pipe->intr_tq);
+@@ -233,7 +233,7 @@
+ {
+ 	int i;
+ 
+-	for (i = 0; i < irq_grp->num_irq; i++)
++	for (i = 0; i < irq_grp->num_irq_requested; i++)
+ 		disable_irq_nosync(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+ }
+ 
+@@ -244,7 +244,10 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		ath11k_ahb_ext_grp_disable(irq_grp);
++		if (irq_grp->irq_enabled) {
++			ath11k_ahb_ext_grp_disable(irq_grp);
++			irq_grp->irq_enabled = false;
++		}
+ 
+ 		if (irq_grp->napi_enabled) {
+ 			napi_synchronize(&irq_grp->napi);
+@@ -258,7 +261,7 @@
+ {
+ 	int i;
+ 
+-	for (i = 0; i < irq_grp->num_irq; i++)
++	for (i = 0; i < irq_grp->num_irq_requested; i++)
+ 		enable_irq(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+ }
+ 
+@@ -283,6 +286,10 @@
+ 	const struct ce_attr *ce_attr;
+ 	const struct ce_ie_addr *ce_ie_addr = ab->hw_params.ce_ie_addr;
+ 	u32 ie1_reg_addr, ie2_reg_addr, ie3_reg_addr;
++
++	if (!ab->ce.ce_pipe[ce_id].irq_requested ||
++	    !READ_ONCE(ab->ce.ce_pipe[ce_id].irq_enabled))
++		return;
+ 
+ 	ie1_reg_addr = ce_ie_addr->ie1_reg_addr;
+ 	ie2_reg_addr = ce_ie_addr->ie2_reg_addr;
+@@ -305,6 +312,9 @@
+ 	const struct ce_ie_addr *ce_ie_addr = ab->hw_params.ce_ie_addr;
+ 	u32 ie1_reg_addr, ie2_reg_addr, ie3_reg_addr;
+ 
++	if (!ab->ce.ce_pipe[ce_id].irq_requested)
++		return;
++
+ 	ie1_reg_addr = ce_ie_addr->ie1_reg_addr;
+ 	ie2_reg_addr = ce_ie_addr->ie2_reg_addr;
+ 	ie3_reg_addr = ce_ie_addr->ie3_reg_addr;
+@@ -326,7 +336,7 @@
+ 	int irq_idx;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		if (!ab->ce.ce_pipe[i].irq_requested)
+ 			continue;
+ 
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+@@ -342,7 +352,7 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		for (j = 0; j < irq_grp->num_irq; j++) {
++		for (j = 0; j < irq_grp->num_irq_requested; j++) {
+ 			irq_idx = irq_grp->irqs[j];
+ 			synchronize_irq(ab->irq_num[irq_idx]);
+ 		}
+@@ -354,9 +364,13 @@
+ 	int i;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[i];
++
++		if (!pipe->irq_requested || pipe->irq_enabled)
+ 			continue;
++		pipe->irq_enabled = true;
+ 		ath11k_ahb_ce_irq_enable(ab, i);
++		enable_irq(ab->irq_num[ATH11K_IRQ_CE0_OFFSET + i]);
+ 	}
+ }
+ 
+@@ -365,9 +379,14 @@
+ 	int i;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[i];
++
++		if (!pipe->irq_requested || !pipe->irq_enabled)
+ 			continue;
+-		ath11k_ahb_ce_irq_disable(ab, i);
++		pipe->irq_enabled = false;
++		if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
++			ath11k_ahb_ce_irq_disable(ab, i);
++		disable_irq_nosync(ab->irq_num[ATH11K_IRQ_CE0_OFFSET + i]);
+ 	}
+ }
+ 
+@@ -386,12 +405,17 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
++		if (!irq_grp->napi_added)
++			continue;
+ 		if (!irq_grp->napi_enabled) {
+ 			dev_set_threaded(irq_grp->napi_ndev, true);
+ 			napi_enable(&irq_grp->napi);
+ 			irq_grp->napi_enabled = true;
+ 		}
+-		ath11k_ahb_ext_grp_enable(irq_grp);
++		if (!irq_grp->irq_enabled) {
++			irq_grp->irq_enabled = true;
++			ath11k_ahb_ext_grp_enable(irq_grp);
++		}
+ 	}
+ }
+ 
+@@ -403,8 +427,7 @@
+ 
+ static void ath11k_ahb_stop(struct ath11k_base *ab)
+ {
+-	if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+-		ath11k_ahb_ce_irqs_disable(ab);
++	ath11k_ahb_ce_irqs_disable(ab);
+ 	ath11k_ahb_sync_ce_irqs(ab);
+ 	ath11k_ahb_kill_tasklets(ab);
+ 	timer_delete_sync(&ab->rx_replenish_retry);
+@@ -449,11 +472,18 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		for (j = 0; j < irq_grp->num_irq; j++)
++		for (j = 0; j < irq_grp->num_irq_requested; j++)
+ 			free_irq(ab->irq_num[irq_grp->irqs[j]], irq_grp);
+ 
+-		netif_napi_del(&irq_grp->napi);
+-		free_netdev(irq_grp->napi_ndev);
++		irq_grp->num_irq_requested = 0;
++		if (irq_grp->napi_added) {
++			netif_napi_del(&irq_grp->napi);
++			irq_grp->napi_added = false;
++		}
++		if (irq_grp->napi_ndev) {
++			free_netdev(irq_grp->napi_ndev);
++			irq_grp->napi_ndev = NULL;
++		}
+ 	}
+ }
+ 
+@@ -465,11 +495,20 @@
+ 	if (ab->hw_params.hybrid_bus_type)
+ 		return ath11k_pcic_free_irq(ab);
+ 
++	ath11k_ahb_ce_irqs_disable(ab);
++	ath11k_ahb_ext_irq_disable(ab);
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+-			continue;
++		struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[i];
++
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+-		free_irq(ab->irq_num[irq_idx], &ab->ce.ce_pipe[i]);
++		if (pipe->irq_requested) {
++			free_irq(ab->irq_num[irq_idx], pipe);
++			pipe->irq_requested = false;
++		}
++		if (pipe->tasklet_initialized) {
++			tasklet_kill(&pipe->intr_tq);
++			pipe->tasklet_initialized = false;
++		}
+ 	}
+ 
+ 	ath11k_ahb_free_ext_irq(ab);
+@@ -487,6 +526,9 @@
+ static irqreturn_t ath11k_ahb_ce_interrupt_handler(int irq, void *arg)
+ {
+ 	struct ath11k_ce_pipe *ce_pipe = arg;
++
++	if (!READ_ONCE(ce_pipe->irq_enabled))
++		return IRQ_HANDLED;
+ 
+ 	/* last interrupt received for this CE */
+ 	ce_pipe->timestamp = jiffies;
+@@ -507,8 +549,7 @@
+ 	int work_done;
+ 
+ 	work_done = ath11k_dp_service_srng(ab, irq_grp, budget);
+-	if (work_done < budget) {
+-		napi_complete_done(napi, work_done);
++	if (work_done < budget && napi_complete_done(napi, work_done)) {
+ 		ath11k_ahb_ext_grp_enable(irq_grp);
+ 	}
+ 
+@@ -525,9 +566,10 @@
+ 	/* last interrupt received for this group */
+ 	irq_grp->timestamp = jiffies;
+ 
+-	ath11k_ahb_ext_grp_disable(irq_grp);
+-
+-	napi_schedule(&irq_grp->napi);
++	if (READ_ONCE(irq_grp->irq_enabled) && napi_schedule_prep(&irq_grp->napi)) {
++		ath11k_ahb_ext_grp_disable(irq_grp);
++		__napi_schedule(&irq_grp->napi);
++	}
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -554,14 +596,17 @@
+ 		irq_grp->grp_id = i;
+ 
+ 		irq_grp->napi_ndev = alloc_netdev_dummy(0);
+-		if (!irq_grp->napi_ndev)
+-			return -ENOMEM;
++		if (!irq_grp->napi_ndev) {
++			ret = -ENOMEM;
++			goto fail;
++		}
+ 
+ 		snprintf(irq_grp->napi_ndev->name, sizeof(irq_grp->napi_ndev->name), "%s%d:%d",
+ 			 "ath11k_ahb", devidx, i);
+ 
+ 		netif_napi_add(irq_grp->napi_ndev, &irq_grp->napi,
+ 			       ath11k_ahb_ext_grp_napi_poll);
++		irq_grp->napi_added = true;
+ 
+ 		for (j = 0; j < ATH11K_EXT_IRQ_NUM_MAX; j++) {
+ 			if (!nss_offload && ab->hw_params.ring_mask->tx[i] & BIT(j)) {
+@@ -613,6 +658,10 @@
+ 
+ 			irq = platform_get_irq_byname(ab->pdev,
+ 						      irq_name[irq_idx]);
++			if (irq < 0) {
++				ret = irq;
++				goto fail;
++			}
+ 			ab->irq_num[irq_idx] = irq;
+ 			irq_set_status_flags(irq, IRQ_NOAUTOEN | IRQ_DISABLE_UNLAZY);
+ 			ret = request_irq(irq, ath11k_ahb_ext_interrupt_handler,
+@@ -621,13 +670,18 @@
+ 			if (ret) {
+ 				ath11k_err(ab, "failed request_irq for %d\n",
+ 					   irq);
++				goto fail;
+ 			}
++			irq_grp->num_irq_requested++;
+ 		}
+ 	}
+ 
+ 	devidx++;
+ 
+ 	return 0;
++fail:
++	ath11k_ahb_free_ext_irq(ab);
++	return ret;
+ }
+ 
+ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -648,19 +702,30 @@
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+ 
+ 		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
++		ce_pipe->tasklet_initialized = true;
+ 		irq = platform_get_irq_byname(ab->pdev, irq_name[irq_idx]);
++		if (irq < 0) {
++			ret = irq;
++			goto fail;
++		}
++		ab->irq_num[irq_idx] = irq;
++		irq_set_status_flags(irq, IRQ_NOAUTOEN | IRQ_DISABLE_UNLAZY);
+ 		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
+ 				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
+ 				  ce_pipe);
+ 		if (ret)
+-			return ret;
+-
+-		ab->irq_num[irq_idx] = irq;
++			goto fail;
++
++		ce_pipe->irq_requested = true;
+ 	}
+ 
+ 	/* Configure external interrupts */
+ 	ret = ath11k_ahb_config_ext_irq(ab);
+-
++	if (ret)
++		goto fail;
++	return ret;
++fail:
++	ath11k_ahb_free_irq(ab);
+ 	return ret;
+ }
+ 
+@@ -1301,21 +1366,27 @@
+ 		goto err_ce_free;
+ 	}
+ 
+-	ret = ath11k_core_init(ab);
+-	if (ret) {
+-		ath11k_err(ab, "failed to init core: %d\n", ret);
+-		goto err_ce_free;
+-	}
+-
++	/* QMI can dispatch FW-ready work as soon as core_init starts. Publish all
++	 * IRQ/tasklet/NAPI resources before allowing that asynchronous startup.
++	 */
+ 	ret = ath11k_ahb_config_irq(ab);
+ 	if (ret) {
+ 		ath11k_err(ab, "failed to configure irq: %d\n", ret);
+ 		goto err_ce_free;
+ 	}
+ 
++	ret = ath11k_core_init(ab);
++	if (ret) {
++		ath11k_err(ab, "failed to init core: %d\n", ret);
++		goto err_irq_free;
++	}
++
+ 	ath11k_qmi_fwreset_from_cold_boot(ab);
+ 
+ 	return 0;
++
++err_irq_free:
++	ath11k_ahb_free_irq(ab);
+ 
+ err_ce_free:
+ 	ath11k_ce_free_pipes(ab);
+--- a/drivers/net/wireless/ath/ath11k/pcic.c
++++ b/drivers/net/wireless/ath/ath11k/pcic.c
+@@ -334,11 +334,18 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		for (j = 0; j < irq_grp->num_irq; j++)
++		for (j = 0; j < irq_grp->num_irq_requested; j++)
+ 			free_irq(ab->irq_num[irq_grp->irqs[j]], irq_grp);
+ 
+-		netif_napi_del(&irq_grp->napi);
+-		free_netdev(irq_grp->napi_ndev);
++		irq_grp->num_irq_requested = 0;
++		if (irq_grp->napi_added) {
++			netif_napi_del(&irq_grp->napi);
++			irq_grp->napi_added = false;
++		}
++		if (irq_grp->napi_ndev) {
++			free_netdev(irq_grp->napi_ndev);
++			irq_grp->napi_ndev = NULL;
++		}
+ 	}
+ }
+ 
+@@ -346,11 +353,20 @@
+ {
+ 	int i, irq_idx;
+ 
++	ath11k_pcic_ce_irq_disable_sync(ab);
++	ath11k_pcic_ext_irq_disable(ab);
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+-			continue;
++		struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[i];
++
+ 		irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
+-		free_irq(ab->irq_num[irq_idx], &ab->ce.ce_pipe[i]);
++		if (pipe->irq_requested) {
++			free_irq(ab->irq_num[irq_idx], pipe);
++			pipe->irq_requested = false;
++		}
++		if (pipe->tasklet_initialized) {
++			tasklet_kill(&pipe->intr_tq);
++			pipe->tasklet_initialized = false;
++		}
+ 	}
+ 
+ 	ath11k_pcic_free_ext_irq(ab);
+@@ -360,6 +376,9 @@
+ static void ath11k_pcic_ce_irq_enable(struct ath11k_base *ab, u16 ce_id)
+ {
+ 	u32 irq_idx;
++
++	if (!ab->ce.ce_pipe[ce_id].irq_requested)
++		return;
+ 
+ 	/* In case of one MSI vector, we handle irq enable/disable in a
+ 	 * uniform way since we only have one irq
+@@ -375,6 +394,9 @@
+ {
+ 	u32 irq_idx;
+ 
++	if (!ab->ce.ce_pipe[ce_id].irq_requested)
++		return;
++
+ 	/* In case of one MSI vector, we handle irq enable/disable in a
+ 	 * uniform way since we only have one irq
+ 	 */
+@@ -389,7 +411,8 @@
+ {
+ 	int i;
+ 
+-	clear_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags);
++	if (!test_and_clear_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags))
++		return;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+@@ -404,7 +427,7 @@
+ 	int irq_idx;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		if (!ab->ce.ce_pipe[i].irq_requested)
+ 			continue;
+ 
+ 		irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
+@@ -452,7 +475,7 @@
+ 	if (!test_bit(ATH11K_FLAG_MULTI_MSI_VECTORS, &ab->dev_flags))
+ 		return;
+ 
+-	for (i = 0; i < irq_grp->num_irq; i++)
++	for (i = 0; i < irq_grp->num_irq_requested; i++)
+ 		disable_irq_nosync(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+ }
+ 
+@@ -465,7 +488,10 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		ath11k_pcic_ext_grp_disable(irq_grp);
++		if (irq_grp->irq_enabled) {
++			ath11k_pcic_ext_grp_disable(irq_grp);
++			irq_grp->irq_enabled = false;
++		}
+ 
+ 		if (irq_grp->napi_enabled) {
+ 			napi_synchronize(&irq_grp->napi);
+@@ -486,7 +512,7 @@
+ 	if (!test_bit(ATH11K_FLAG_MULTI_MSI_VECTORS, &ab->dev_flags))
+ 		return;
+ 
+-	for (i = 0; i < irq_grp->num_irq; i++)
++	for (i = 0; i < irq_grp->num_irq_requested; i++)
+ 		enable_irq(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+ }
+ 
+@@ -494,15 +520,21 @@
+ {
+ 	int i;
+ 
++	set_bit(ATH11K_FLAG_EXT_IRQ_ENABLED, &ab->dev_flags);
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
++		if (!irq_grp->napi_added)
++			continue;
+ 		if (!irq_grp->napi_enabled) {
+ 			dev_set_threaded(irq_grp->napi_ndev, true);
+ 			napi_enable(&irq_grp->napi);
+ 			irq_grp->napi_enabled = true;
+ 		}
+-		ath11k_pcic_ext_grp_enable(irq_grp);
++		if (!irq_grp->irq_enabled) {
++			irq_grp->irq_enabled = true;
++			ath11k_pcic_ext_grp_enable(irq_grp);
++		}
+ 	}
+ 
+ 	set_bit(ATH11K_FLAG_EXT_IRQ_ENABLED, &ab->dev_flags);
+@@ -516,7 +548,7 @@
+ 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+ 
+-		for (j = 0; j < irq_grp->num_irq; j++) {
++		for (j = 0; j < irq_grp->num_irq_requested; j++) {
+ 			irq_idx = irq_grp->irqs[j];
+ 			synchronize_irq(ab->irq_num[irq_idx]);
+ 		}
+@@ -540,9 +572,8 @@
+ 	int i;
+ 
+ 	work_done = ath11k_dp_service_srng(ab, irq_grp, budget);
+-	if (work_done < budget) {
+-		napi_complete_done(napi, work_done);
+-		for (i = 0; i < irq_grp->num_irq; i++)
++	if (work_done < budget && napi_complete_done(napi, work_done)) {
++		for (i = 0; i < irq_grp->num_irq_requested; i++)
+ 			enable_irq(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+ 	}
+ 
+@@ -566,10 +597,11 @@
+ 	/* last interrupt received for this group */
+ 	irq_grp->timestamp = jiffies;
+ 
+-	for (i = 0; i < irq_grp->num_irq; i++)
+-		disable_irq_nosync(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
+-
+-	napi_schedule(&irq_grp->napi);
++	if (napi_schedule_prep(&irq_grp->napi)) {
++		for (i = 0; i < irq_grp->num_irq_requested; i++)
++			disable_irq_nosync(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
++		__napi_schedule(&irq_grp->napi);
++	}
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -582,7 +614,7 @@
+ 
+ static int ath11k_pcic_ext_irq_config(struct ath11k_base *ab)
+ {
+-	int i, j, n, ret, num_vectors = 0;
++	int i, j, ret, num_vectors = 0;
+ 	u32 user_base_data = 0, base_vector = 0;
+ 	struct ath11k_ext_irq_grp *irq_grp;
+ 	unsigned long irq_flags;
+@@ -593,6 +625,8 @@
+ 						  &base_vector);
+ 	if (ret < 0)
+ 		return ret;
++	if (!num_vectors)
++		return -EINVAL;
+ 
+ 	irq_flags = IRQF_SHARED;
+ 	if (!test_bit(ATH11K_FLAG_MULTI_MSI_VECTORS, &ab->dev_flags))
+@@ -615,6 +649,7 @@
+ 
+ 		netif_napi_add(irq_grp->napi_ndev, &irq_grp->napi,
+ 			       ath11k_pcic_ext_grp_napi_poll);
++		irq_grp->napi_added = true;
+ 
+ 		/* tcl, reo, rx_err, wbm release, rxdma rings are offloaded to nss. */
+ 		if (ab->nss.enabled &&
+@@ -657,12 +692,9 @@
+ 			if (ret) {
+ 				ath11k_err(ab, "failed request irq %d: %d\n",
+ 					   vector, ret);
+-				for (n = 0; n <= i; n++) {
+-					irq_grp = &ab->ext_irq_grp[n];
+-					free_netdev(irq_grp->napi_ndev);
+-				}
+-				return ret;
++				goto fail_irq;
+ 			}
++			irq_grp->num_irq_requested++;
+ 		}
+ 		ath11k_pcic_ext_grp_disable(irq_grp);
+ 	}
+@@ -671,13 +703,8 @@
+ 
+ 	return 0;
+ fail_irq:
+-	/* i ->napi_ndev was properly allocated. Free it also */
+-	i += 1;
+ fail_allocate:
+-	for (n = 0; n < i; n++) {
+-		irq_grp = &ab->ext_irq_grp[n];
+-		free_netdev(irq_grp->napi_ndev);
+-	}
++	ath11k_pcic_free_ext_irq(ab);
+ 	return ret;
+ }
+ 
+@@ -695,6 +722,8 @@
+ 						  &msi_data_start, &msi_irq_start);
+ 	if (ret)
+ 		return ret;
++	if (!msi_data_count)
++		return -EINVAL;
+ 
+ 	irq_flags = IRQF_SHARED;
+ 	if (!test_bit(ATH11K_FLAG_MULTI_MSI_VECTORS, &ab->dev_flags))
+@@ -707,24 +736,28 @@
+ 
+ 		msi_data = (msi_data_idx % msi_data_count) + msi_irq_start;
+ 		irq = ath11k_pcic_get_msi_irq(ab, msi_data);
+-		if (irq < 0)
+-			return irq;
++		if (irq < 0) {
++			ret = irq;
++			goto fail;
++		}
+ 
+ 		ce_pipe = &ab->ce.ce_pipe[i];
+ 
+ 		irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
+ 
+ 		tasklet_setup(&ce_pipe->intr_tq, ath11k_pcic_ce_tasklet);
++		ce_pipe->tasklet_initialized = true;
++		ab->irq_num[irq_idx] = irq;
+ 
+ 		ret = request_irq(irq, ath11k_pcic_ce_interrupt_handler,
+ 				  irq_flags, irq_name[irq_idx], ce_pipe);
+ 		if (ret) {
+ 			ath11k_err(ab, "failed to request irq %d: %d\n",
+ 				   irq_idx, ret);
+-			return ret;
+-		}
+-
+-		ab->irq_num[irq_idx] = irq;
++			goto fail;
++		}
++
++		ce_pipe->irq_requested = true;
+ 		msi_data_idx++;
+ 
+ 		ath11k_pcic_ce_irq_disable(ab, i);
+@@ -732,9 +765,12 @@
+ 
+ 	ret = ath11k_pcic_ext_irq_config(ab);
+ 	if (ret)
+-		return ret;
++		goto fail;
+ 
+ 	return 0;
++fail:
++	ath11k_pcic_free_irq(ab);
++	return ret;
+ }
+ EXPORT_SYMBOL(ath11k_pcic_config_irq);
+ 
+@@ -742,7 +778,8 @@
+ {
+ 	int i;
+ 
+-	set_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags);
++	if (test_and_set_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags))
++		return;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+@@ -759,7 +796,7 @@
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+ 		struct ath11k_ce_pipe *ce_pipe = &ab->ce.ce_pipe[i];
+ 
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
++		if (!ce_pipe->tasklet_initialized)
+ 			continue;
+ 
+ 		tasklet_kill(&ce_pipe->intr_tq);
+@@ -857,7 +894,8 @@
+ 	int i;
+ 
+ 	for (i = 0; i < ab->hw_params.ce_count; i++) {
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR ||
++		if (!ab->ce.ce_pipe[i].irq_requested ||
++		    ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR ||
+ 		    i == ATH11K_PCI_CE_WAKE_IRQ)
+ 			continue;
+ 		ath11k_pcic_ce_irq_enable(ab, i);
+@@ -875,13 +913,15 @@
+ 		ce_pipe = &ab->ce.ce_pipe[i];
+ 		irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
+ 
+-		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR ||
++		if (!ce_pipe->irq_requested ||
++		    ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR ||
+ 		    i == ATH11K_PCI_CE_WAKE_IRQ)
+ 			continue;
+ 
+ 		disable_irq_nosync(ab->irq_num[irq_idx]);
+ 		synchronize_irq(ab->irq_num[irq_idx]);
+-		tasklet_kill(&ce_pipe->intr_tq);
++		if (ce_pipe->tasklet_initialized)
++			tasklet_kill(&ce_pipe->intr_tq);
+ 	}
+ }
+ EXPORT_SYMBOL(ath11k_pci_disable_ce_irqs_except_wake_irq);
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -191,9 +191,12 @@
+ 	struct ath11k_base *ab;
+ 	u32 irqs[ATH11K_EXT_IRQ_NUM_MAX];
+ 	u32 num_irq;
++	u32 num_irq_requested;
+ 	u32 grp_id;
+ 	u64 timestamp;
+ 	bool napi_enabled;
++	bool napi_added;
++	bool irq_enabled;
+ 	struct napi_struct napi;
+ 	struct net_device *napi_ndev;
+ };
+--- a/drivers/net/wireless/ath/ath11k/ce.h
++++ b/drivers/net/wireless/ath/ath11k/ce.h
+@@ -176,6 +176,9 @@
+ 	void (*recv_cb)(struct ath11k_base *, struct sk_buff *);
+ 
+ 	struct tasklet_struct intr_tq;
++	bool tasklet_initialized;
++	bool irq_requested;
++	bool irq_enabled;
+ 	struct ath11k_ce_ring *src_ring;
+ 	struct ath11k_ce_ring *dest_ring;
+ 	struct ath11k_ce_ring *status_ring;

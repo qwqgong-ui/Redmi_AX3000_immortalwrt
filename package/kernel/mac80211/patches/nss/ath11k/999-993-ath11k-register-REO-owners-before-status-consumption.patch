@@ -1,0 +1,597 @@
+Subject: [PATCH] ath11k: serialize REO publication and callback ownership
+
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -66,6 +66,7 @@
+ 	struct list_head list;
+ 	struct dp_rx_tid data;
+ 	int cmd_num;
++	u16 status_tag;
+ 	void (*handler)(struct ath11k_dp *, void *,
+ 			enum hal_reo_cmd_status status);
+ };
+@@ -328,6 +329,20 @@
+ 	u16 ssn;
+ };
+ 
++struct ath11k_reo_cmd_stats {
++	u64 submitted;
++	u64 status_requested;
++	u64 completed;
++	u64 callbacks_registered;
++	u64 callbacks_claimed;
++	u64 submit_failed;
++	u64 allocation_failed;
++	u64 slot_busy;
++	u64 unexpected_status;
++	u64 tag_mismatch;
++	u32 pending;
++};
++
+ struct ath11k_dp {
+ 	struct ath11k_base *ab;
+ 	enum ath11k_htc_ep_id eid;
+@@ -356,8 +371,14 @@
+ 	 * - reo_cmd_list
+ 	 * - reo_cmd_cache_flush_list
+ 	 * - reo_cmd_cache_flush_count
++	 * - reo_cmd_accepting, reo_cmd_epoch, reo_cmd_status_tag, reo_cmd_stats
+ 	 */
+ 	spinlock_t reo_cmd_lock;
++	bool reo_cmd_accepting;
++	u64 reo_cmd_epoch;
++	/* Fixed ring IDs may be reused only after their requested status is consumed. */
++	u16 reo_cmd_status_tag[DP_REO_CMD_RING_SIZE + 1];
++	struct ath11k_reo_cmd_stats reo_cmd_stats;
+ 	spinlock_t reo_stats_lock;
+ 	struct ath11k_reo_update_stats reo_update_stats;
+ 	struct list_head reo_cmd_update_rx_queue_list;
+@@ -370,6 +391,33 @@
+ 	struct ath11k_hp_update_timer tx_ring_timer[DP_TCL_NUM_RING_MAX];
+ };
+ 
++static inline void ath11k_dp_reo_cmd_close(struct ath11k_dp *dp)
++{
++	/* A publication gate, not a hardware halt or a DMA completion fence. */
++	spin_lock_bh(&dp->reo_cmd_lock);
++	dp->reo_cmd_accepting = false;
++	dp->reo_cmd_epoch++;
++	spin_unlock_bh(&dp->reo_cmd_lock);
++}
++
++static inline int ath11k_dp_reo_cmd_status_tag(enum hal_reo_cmd_type type)
++{
++	switch (type) {
++	case HAL_REO_CMD_GET_QUEUE_STATS:
++		return HAL_REO_GET_QUEUE_STATS_STATUS;
++	case HAL_REO_CMD_FLUSH_CACHE:
++		return HAL_REO_FLUSH_CACHE_STATUS;
++	case HAL_REO_CMD_UPDATE_RX_QUEUE:
++		return HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;
++	case HAL_REO_CMD_FLUSH_QUEUE:
++	case HAL_REO_CMD_UNBLOCK_CACHE:
++	case HAL_REO_CMD_FLUSH_TIMEOUT_LIST:
++		return -EOPNOTSUPP;
++	default:
++		return -EINVAL;
++	}
++}
++
+ static inline struct ath11k_reo_update_input
+ ath11k_dp_reo_update_input(const struct ath11k_hal_reo_cmd *cmd)
+ {
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2052,6 +2052,9 @@
+ 
+ static void ath11k_core_stop(struct ath11k_base *ab)
+ {
++	ath11k_dp_reo_cmd_close(&ab->dp);
++	/* hif_stop drains CE; REO status callbacks run in DP NAPI. */
++	ath11k_hif_irq_disable(ab);
+ 	if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+ 		ath11k_qmi_firmware_stop(ab);
+ 
+@@ -2204,6 +2207,7 @@
+ 	ath11k_thermal_unregister(ab);
+ 	ath11k_mac_unregister(ab);
+ 
++	ath11k_dp_reo_cmd_close(&ab->dp);
+ 	ath11k_nss_teardown(ab);
+ 	ab->nss.enabled = false;
+ 
+@@ -2406,6 +2410,8 @@
+ 	ath11k_core_stop(ab);
+ 	ath11k_mac_destroy(ab);
+ err_dp_free:
++	ath11k_dp_reo_cmd_close(&ab->dp);
++	ath11k_hif_irq_disable(ab);
+ 	ath11k_dp_free(ab);
+ 	mutex_unlock(&ab->core_lock);
+ err_firmware_stop:
+@@ -2420,6 +2426,8 @@
+ 
+ 	mutex_lock(&ab->core_lock);
+ 
++	ath11k_dp_reo_cmd_close(&ab->dp);
++	ath11k_hif_irq_disable(ab);
+ 	ret = ath11k_nss_teardown(ab);
+ 	if (ret) {
+ 		ath11k_err(ab, "NSS reset failed: %d; preserving shared DMA rings\n", ret);
+@@ -2928,6 +2936,11 @@
+ 	spin_lock_init(&ab->base_lock);
+ 	/* SOC debugfs precedes dp_alloc; reads must have an initialized lock. */
+ 	spin_lock_init(&ab->dp.reo_stats_lock);
++	spin_lock_init(&ab->dp.reo_cmd_lock);
++	spin_lock_init(&ab->dp.reo_cmd_update_queue_lock);
++	INIT_LIST_HEAD(&ab->dp.reo_cmd_list);
++	INIT_LIST_HEAD(&ab->dp.reo_cmd_cache_flush_list);
++	INIT_LIST_HEAD(&ab->dp.reo_cmd_update_rx_queue_list);
+ 	INIT_LIST_HEAD(&ab->nss.retained_host_peers);
+ 	mutex_init(&ab->vdev_id_11d_lock);
+ 	init_completion(&ab->reset_complete);
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -374,6 +374,7 @@
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	int i;
+ 
++	ath11k_dp_reo_cmd_close(dp);
+ 	ath11k_dp_stop_shadow_timers(ab);
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+ 		return;
+@@ -1082,6 +1083,7 @@
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	int i, j;
+ 
++	ath11k_dp_reo_cmd_close(dp);
+ 	if (READ_ONCE(ab->nss.ownership_uncertain)) {
+ 		ath11k_dp_stop_shadow_timers(ab);
+ 		return;
+@@ -1126,15 +1128,25 @@
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+ 		return -ESHUTDOWN;
+ 
++	spin_lock_bh(&dp->reo_cmd_update_queue_lock);
++	spin_lock_bh(&dp->reo_cmd_lock);
++	/* Previous callbacks and owners must be retired before reopening. */
++	if (dp->reo_cmd_accepting || dp->reo_cmd_stats.pending ||
++	    !list_empty(&dp->reo_cmd_list) ||
++	    !list_empty(&dp->reo_cmd_cache_flush_list) ||
++	    !list_empty(&dp->reo_cmd_update_rx_queue_list)) {
++		spin_unlock_bh(&dp->reo_cmd_lock);
++		spin_unlock_bh(&dp->reo_cmd_update_queue_lock);
++		return -EBUSY;
++	}
++	memset(dp->reo_cmd_status_tag, 0, sizeof(dp->reo_cmd_status_tag));
++	memset(&dp->reo_cmd_stats, 0, sizeof(dp->reo_cmd_stats));
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	spin_unlock_bh(&dp->reo_cmd_update_queue_lock);
++
+ 	dp->ab = ab;
+ 	ath11k_dp_reo_update_reset(dp);
+-
+-	INIT_LIST_HEAD(&dp->reo_cmd_list);
+-	INIT_LIST_HEAD(&dp->reo_cmd_cache_flush_list);
+-	INIT_LIST_HEAD(&dp->reo_cmd_update_rx_queue_list);
+ 	INIT_LIST_HEAD(&dp->dp_full_mon_mpdu_list);
+-	spin_lock_init(&dp->reo_cmd_lock);
+-	spin_lock_init(&dp->reo_cmd_update_queue_lock);
+ 
+ 	dp->reo_cmd_cache_flush_count = 0;
+ 
+@@ -1178,6 +1190,10 @@
+ 
+ 	/* Init any SOC level resource for DP */
+ 
++	spin_lock_bh(&dp->reo_cmd_lock);
++	dp->reo_cmd_epoch++;
++	dp->reo_cmd_accepting = true;
++	spin_unlock_bh(&dp->reo_cmd_lock);
+ 	return 0;
+ 
+ fail_cmn_srng_cleanup:
+--- a/drivers/net/wireless/ath/ath11k/hal_rx.c
++++ b/drivers/net/wireless/ath/ath11k/hal_rx.c
+@@ -220,17 +220,34 @@
+ 			    struct ath11k_hal_reo_cmd *cmd)
+ {
+ 	struct hal_tlv_hdr *reo_desc;
++	struct hal_reo_cmd_hdr *hdr;
++	u16 cmd_num;
+ 	int ret;
+ 
++	lockdep_assert_held(&ab->dp.reo_cmd_lock);
+ 	spin_lock_bh(&srng->lock);
+ 
+ 	ath11k_hal_srng_access_begin(ab, srng);
+-	reo_desc = (struct hal_tlv_hdr *)ath11k_hal_srng_src_get_next_entry(ab, srng);
++	/* Inspect before advancing HP: every error must leave the slot unpublished. */
++	reo_desc = (struct hal_tlv_hdr *)ath11k_hal_srng_src_peek(ab, srng);
+ 	if (!reo_desc) {
+ 		ret = -ENOBUFS;
+ 		goto out;
+ 	}
+ 
++	hdr = (struct hal_reo_cmd_hdr *)reo_desc->value;
++	cmd_num = FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER, hdr->info0);
++	if (!cmd_num || cmd_num > srng->num_entries ||
++	    cmd_num >= ARRAY_SIZE(ab->dp.reo_cmd_status_tag)) {
++		ret = -EINVAL;
++		goto out;
++	}
++	if (ab->dp.reo_cmd_status_tag[cmd_num]) {
++		ab->dp.reo_cmd_stats.slot_busy++;
++		ret = -EBUSY;
++		goto out;
++	}
++
+ 	switch (type) {
+ 	case HAL_REO_CMD_GET_QUEUE_STATS:
+ 		ret = ath11k_hal_reo_cmd_queue_stats(reo_desc, cmd);
+@@ -253,7 +270,10 @@
+ 		break;
+ 	}
+ 
+-	ath11k_dp_shadow_start_timer(ab, srng, &ab->dp.reo_cmd_timer);
++	if (ret > 0) {
++		ath11k_hal_srng_src_get_next_entry(ab, srng);
++		ath11k_dp_shadow_start_timer(ab, srng, &ab->dp.reo_cmd_timer);
++	}
+ 
+ out:
+ 	ath11k_hal_srng_access_end(ab, srng);
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -935,54 +935,88 @@
+ 					 enum hal_reo_cmd_status))
+ {
+ 	struct ath11k_dp *dp = &ab->dp;
+-	struct dp_reo_cmd *dp_cmd;
++	struct dp_reo_cmd *dp_cmd = NULL;
+ 	struct hal_srng *cmd_ring;
+ 	struct ath11k_reo_update_input input = {};
+ 	bool observe = type == HAL_REO_CMD_UPDATE_RX_QUEUE;
+-	int cmd_num;
++	u64 epoch;
++	int cmd_num, status_tag;
+ 
+ 	if (observe)
+ 		input = ath11k_dp_reo_update_input(cmd);
+-	if (test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags)) {
+-		if (observe)
+-			ath11k_dp_reo_update_record(dp, &input, -ESHUTDOWN);
+-		return -ESHUTDOWN;
++	status_tag = ath11k_dp_reo_cmd_status_tag(type);
++	if (status_tag < 0) {
++		cmd_num = status_tag;
++		goto out;
++	}
++
++	spin_lock_bh(&dp->reo_cmd_lock);
++	epoch = dp->reo_cmd_epoch;
++	if (!dp->reo_cmd_accepting ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    READ_ONCE(ab->nss.ownership_uncertain)) {
++		cmd_num = -ESHUTDOWN;
++		goto unlock;
++	}
++	spin_unlock_bh(&dp->reo_cmd_lock);
++
++	/* Allocate before publication: an allocation error must have no HW side effect. */
++	if (cb) {
++		if (!rx_tid || !(cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS)) {
++			cmd_num = -EINVAL;
++			goto out;
++		}
++		dp_cmd = kzalloc(sizeof(*dp_cmd), GFP_ATOMIC);
++		if (!dp_cmd) {
++			spin_lock_bh(&dp->reo_cmd_lock);
++			dp->reo_cmd_stats.allocation_failed++;
++			spin_unlock_bh(&dp->reo_cmd_lock);
++			cmd_num = -ENOMEM;
++			goto out;
++		}
++		memcpy(&dp_cmd->data, rx_tid, sizeof(*rx_tid));
++		dp_cmd->status_tag = status_tag;
++		dp_cmd->handler = cb;
++	}
++
++	spin_lock_bh(&dp->reo_cmd_lock);
++	if (!dp->reo_cmd_accepting || epoch != dp->reo_cmd_epoch ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    READ_ONCE(ab->nss.ownership_uncertain)) {
++		cmd_num = -ESHUTDOWN;
++		goto unlock;
+ 	}
+ 
+ 	cmd_ring = &ab->hal.srng_list[dp->reo_cmd_ring.ring_id];
+ 	cmd_num = ath11k_hal_reo_cmd_send(ab, cmd_ring, type, cmd);
+-	if (observe)
+-		ath11k_dp_reo_update_record(dp, &input, cmd_num);
++	if (cmd_num <= 0) {
++		if (!cmd_num)
++			cmd_num = -EINVAL;
++		dp->reo_cmd_stats.submit_failed++;
++		goto unlock;
++	}
+ 
+-	/* cmd_num should start from 1, during failure return the error code */
+-	if (cmd_num < 0)
+-		return cmd_num;
+-
+-	/* reo cmd ring descriptors has cmd_num starting from 1 */
+-	if (cmd_num == 0)
+-		return -EINVAL;
+-
+-	if (!cb)
+-		return 0;
+-
+-	/* Can this be optimized so that we keep the pending command list only
+-	 * for tid delete command to free up the resource on the command status
+-	 * indication?
+-	 */
+-	dp_cmd = kzalloc(sizeof(*dp_cmd), GFP_ATOMIC);
+-
+-	if (!dp_cmd)
+-		return -ENOMEM;
+-
+-	memcpy(&dp_cmd->data, rx_tid, sizeof(struct dp_rx_tid));
+-	dp_cmd->cmd_num = cmd_num;
+-	dp_cmd->handler = cb;
++	dp->reo_cmd_stats.submitted++;
++	if (cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS) {
++		dp->reo_cmd_status_tag[cmd_num] = status_tag;
++		dp->reo_cmd_stats.status_requested++;
++		dp->reo_cmd_stats.pending++;
++	}
++	if (dp_cmd) {
++		dp_cmd->cmd_num = cmd_num;
++		list_add_tail(&dp_cmd->list, &dp->reo_cmd_list);
++		dp->reo_cmd_stats.callbacks_registered++;
++		/* Ownership transfers only after publication and registration succeeded. */
++		dp_cmd = NULL;
++	}
+ 
+-	spin_lock_bh(&dp->reo_cmd_lock);
+-	list_add_tail(&dp_cmd->list, &dp->reo_cmd_list);
++unlock:
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
+-
+-	return 0;
++out:
++	kfree(dp_cmd);
++	if (observe)
++		ath11k_dp_reo_update_record(dp, &input, cmd_num);
++	return cmd_num > 0 ? 0 : cmd_num;
+ }
+ 
+ static int
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -776,6 +776,7 @@
+ 	struct dp_reo_update_rx_queue_elem *cmd_queue, *tmp_queue;
+ 	struct dp_rx_tid *rx_tid;
+ 
++	ath11k_dp_reo_cmd_close(dp);
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+ 		return;
+ 
+@@ -821,6 +822,9 @@
+ 		}
+ 		kfree(cmd_cache);
+ 	}
++	/* Only the caller's hardware-stop and DP IRQ drain make this reuse safe. */
++	memset(dp->reo_cmd_status_tag, 0, sizeof(dp->reo_cmd_status_tag));
++	dp->reo_cmd_stats.pending = 0;
+ 	spin_unlock_bh(&dp->reo_cmd_lock);
+ }
+ 
+@@ -861,15 +865,11 @@
+ 		ret = ath11k_dp_tx_send_reo_cmd(ab, rx_tid,
+ 						HAL_REO_CMD_FLUSH_CACHE, &cmd,
+ 						NULL);
+-		if (ret)
++		if (ret) {
+ 			rx_tid->pending_desc_size = tot_desc_sz + desc_sz;
+-
+-		/* If this fails with ring full condition, then
+-		 * no need to retry below as it is expected to
+-		 * fail within short time
+-		 */
+-		if (ret == -ENOBUFS)
++			/* Preserve every unsubmitted extension, including an ID-busy slot. */
+ 			goto exit;
++		}
+ 	}
+ 
+ 	rx_tid->pending_desc_size = desc_sz;
+@@ -5395,14 +5395,53 @@
+ 	return budget - quota;
+ }
+ 
++static struct dp_reo_cmd *
++ath11k_dp_reo_cmd_take(struct ath11k_dp *dp, u16 cmd_num, u16 tag, bool *accepted)
++{
++	struct dp_reo_cmd *cmd, *found = NULL;
++
++	lockdep_assert_held(&dp->reo_cmd_lock);
++	*accepted = false;
++	if (!cmd_num || cmd_num >= ARRAY_SIZE(dp->reo_cmd_status_tag) ||
++	    !dp->reo_cmd_status_tag[cmd_num]) {
++		dp->reo_cmd_stats.unexpected_status++;
++		goto out;
++	}
++	if (dp->reo_cmd_status_tag[cmd_num] != tag) {
++		/* Preserve the ID and owner until a matching status or a stopped epoch. */
++		dp->reo_cmd_stats.tag_mismatch++;
++		goto out;
++	}
++	list_for_each_entry(cmd, &dp->reo_cmd_list, list) {
++		if (cmd->cmd_num != cmd_num)
++			continue;
++		if (cmd->status_tag != tag) {
++			dp->reo_cmd_stats.tag_mismatch++;
++			goto out;
++		}
++		found = cmd;
++		list_del(&cmd->list);
++		dp->reo_cmd_stats.callbacks_claimed++;
++		break;
++	}
++	dp->reo_cmd_status_tag[cmd_num] = 0;
++	dp->reo_cmd_stats.pending--;
++	dp->reo_cmd_stats.completed++;
++	*accepted = true;
++out:
++	return found;
++}
++
+ void ath11k_dp_process_reo_status(struct ath11k_base *ab)
+ {
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	struct hal_srng *srng;
+-	struct dp_reo_cmd *cmd, *tmp;
+-	bool found = false;
++	struct dp_reo_cmd *cmd;
++	bool accepted;
+ 	u32 *reo_desc;
+ 	u16 tag;
++	u8 status;
++	int cmd_num;
+ 	struct hal_reo_status reo_status;
+ 
+ 	if (READ_ONCE(ab->nss.ownership_uncertain))
+@@ -5426,6 +5465,30 @@
+ 
+ 		switch (tag) {
+ 		case HAL_REO_GET_QUEUE_STATS_STATUS:
++		case HAL_REO_FLUSH_QUEUE_STATUS:
++		case HAL_REO_FLUSH_CACHE_STATUS:
++		case HAL_REO_UNBLOCK_CACHE_STATUS:
++		case HAL_REO_FLUSH_TIMEOUT_LIST_STATUS:
++		case HAL_REO_UPDATE_RX_REO_QUEUE_STATUS:
++			break;
++		case HAL_REO_DESCRIPTOR_THRESHOLD_REACHED_STATUS:
++			ath11k_hal_reo_desc_thresh_reached_status(ab, reo_desc, &reo_status);
++			continue;
++		default:
++			ath11k_warn(ab, "Unknown reo status type %d\n", tag);
++			continue;
++		}
++		/* Validate the common header before parsers can change HAL resources. */
++		cmd_num = ath11k_hal_reo_process_status((u8 *)reo_desc, &status);
++		spin_lock_bh(&dp->reo_cmd_lock);
++		cmd = ath11k_dp_reo_cmd_take(dp, cmd_num, tag, &accepted);
++		if (!accepted) {
++			spin_unlock_bh(&dp->reo_cmd_lock);
++			continue;
++		}
++
++		switch (tag) {
++		case HAL_REO_GET_QUEUE_STATS_STATUS:
+ 			ath11k_hal_reo_status_queue_stats(ab, reo_desc,
+ 							  &reo_status);
+ 			break;
+@@ -5445,37 +5508,21 @@
+ 			ath11k_hal_reo_flush_timeout_list_status(ab, reo_desc,
+ 								 &reo_status);
+ 			break;
+-		case HAL_REO_DESCRIPTOR_THRESHOLD_REACHED_STATUS:
+-			ath11k_hal_reo_desc_thresh_reached_status(ab, reo_desc,
+-								  &reo_status);
+-			break;
+ 		case HAL_REO_UPDATE_RX_REO_QUEUE_STATUS:
+ 			ath11k_hal_reo_update_rx_reo_queue_status(ab, reo_desc,
+ 							  &reo_status);
+ 			ath11k_dp_reo_update_status(dp, &reo_status.uniform_hdr);
+ 			break;
+ 		default:
+-			ath11k_warn(ab, "Unknown reo status type %d\n", tag);
+-			continue;
++			break;
+ 		}
+ 
+-		spin_lock_bh(&dp->reo_cmd_lock);
+-		list_for_each_entry_safe(cmd, tmp, &dp->reo_cmd_list, list) {
+-			if (reo_status.uniform_hdr.cmd_num == cmd->cmd_num) {
+-				found = true;
+-				list_del(&cmd->list);
+-				break;
+-			}
+-		}
+ 		spin_unlock_bh(&dp->reo_cmd_lock);
+-
+-		if (found) {
++		if (cmd) {
+ 			cmd->handler(dp, (void *)&cmd->data,
+ 				     reo_status.uniform_hdr.cmd_status);
+ 			kfree(cmd);
+ 		}
+-
+-		found = false;
+ 	}
+ 
+ 	ath11k_hal_srng_access_end(ab, srng);
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -784,7 +784,7 @@
+ 		stats.status[0], stats.status[1], stats.status[2], stats.status[3],
+ 		stats.status_unknown);
+ 	len += scnprintf(buf + len, size - len,
+-		"last_submit_cmd: %u\nlast_hal_submit_errno: %d\nlast_paddr: 0x%llx\n"
++		"last_submit_cmd: %u\nlast_submit_errno: %d\nlast_paddr: 0x%llx\n"
+ 		"last_flags: 0x%x\nlast_upd0: 0x%x\nlast_requested_window: %u\n"
+ 		"last_requested_ssn: %u\nlast_status_cmd: %u\nlast_status: %u\n"
+ 		"last_hw_timestamp: %u\n",
+@@ -808,6 +808,41 @@
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t ath11k_debugfs_reo_cmd_stats(struct file *file,
++					 char __user *user_buf, size_t count, loff_t *ppos)
++{
++	struct ath11k_base *ab = file->private_data;
++	struct ath11k_dp *dp = &ab->dp;
++	struct ath11k_reo_cmd_stats stats;
++	char buf[768];
++	bool accepting;
++	u64 epoch;
++	int len;
++
++	spin_lock_bh(&dp->reo_cmd_lock);
++	stats = dp->reo_cmd_stats;
++	accepting = dp->reo_cmd_accepting;
++	epoch = dp->reo_cmd_epoch;
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	len = scnprintf(buf, sizeof(buf),
++		"accepting: %u\nepoch: %llu\npending: %u\nsubmitted: %llu\nstatus_requested: %llu\n"
++		"completed: %llu\ncallbacks_registered: %llu\ncallbacks_claimed: %llu\n"
++		"submit_failed: %llu\nallocation_failed: %llu\nslot_busy: %llu\n"
++		"unexpected_status: %llu\ntag_mismatch: %llu\n",
++		accepting, epoch, stats.pending, stats.submitted, stats.status_requested,
++		stats.completed, stats.callbacks_registered, stats.callbacks_claimed,
++		stats.submit_failed, stats.allocation_failed, stats.slot_busy,
++		stats.unexpected_status, stats.tag_mismatch);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations fops_reo_cmd_stats = {
++	.read = ath11k_debugfs_reo_cmd_stats,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ static ssize_t ath11k_write_fw_dbglog(struct file *file,
+ 				      const char __user *user_buf,
+ 				      size_t count, loff_t *ppos)
+@@ -1013,6 +1048,8 @@
+ 			    &fops_soc_dp_stats);
+ 	debugfs_create_file("reo_update_stats", 0400, ab->debugfs_soc, ab,
+ 			    &fops_reo_update_stats);
++	debugfs_create_file("reo_cmd_stats", 0400, ab->debugfs_soc, ab,
++			    &fops_reo_cmd_stats);
+ 
+ 	if (ab->hw_params.sram_dump.start != 0)
+ 		debugfs_create_file("sram", 0400, ab->debugfs_soc, ab,

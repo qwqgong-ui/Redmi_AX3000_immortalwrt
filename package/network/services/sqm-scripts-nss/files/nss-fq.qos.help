@@ -1,0 +1,6 @@
+NSS FQ-CoDel on supported Wi-Fi and physical NSS devices. Each flow is
+scheduled with a 5 ms CoDel target and a 100 ms interval, without setting
+a bandwidth limit. Set upload/download to zero: this script still creates
+the hardware AQM queue. A queue can follow a logical network with option
+network, a wireless UCI section with option wireless_interface, or a fixed
+netdev with option nss_watch 1. Packet depth is bounded, link rate is not.

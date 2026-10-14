@@ -1,0 +1,115 @@
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -357,6 +357,7 @@
+ 
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ void ath11k_nss_me_debugfs_register(struct ath11k *ar);
++int ath11k_nss_me_host_rx(struct ath11k_vif *arvif);
+ void ath11k_nss_me_tx_observe(struct ath11k_vif *arvif,
+ 			    const struct sk_buff *skb, int encap_type);
+ void ath11k_nss_reoq_init(struct ath11k_base *ab);
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -3764,6 +3764,11 @@
+ 	if (arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)
+ 		return 0;
+ 
++	/* Establish the host multicast RX boundary before publishing NSS UP. */
++	ret = ath11k_nss_me_host_rx(arvif);
++	if (ret)
++		return ret;
++
+ #ifdef CPTCFG_ATH11K_NSS_MESH_SUPPORT
+ 	if (arvif->vif->type == NL80211_IFTYPE_MESH_POINT) {
+ 		status = (nss_tx_status_t)nss_wifi_meshmgr_if_up(arvif->nss.mesh_handle);
+--- a/drivers/net/wireless/ath/ath11k/nss_me.c
++++ b/drivers/net/wireless/ath/ath11k/nss_me.c
+@@ -57,7 +57,6 @@
+ 		atomic64_inc(&arvif->nss.me.tx_probe_unicast_da);
+ }
+ 
+-#ifdef CPTCFG_ATH11K_DEBUGFS
+ struct ath11k_nss_me_request {
+ 	struct completion complete;
+ 	u32 type;
+@@ -102,7 +101,8 @@
+ 	struct ath11k_base *ab = ar->ab;
+ 
+ 	lockdep_assert_held(&ab->base_lock);
+-	if (ar->state != ATH11K_STATE_ON || !ab->nss.enabled || !ab->nss.registered ||
++	if ((ar->state != ATH11K_STATE_ON && ar->state != ATH11K_STATE_RESTARTED) ||
++	    !ab->nss.enabled || !ab->nss.registered ||
+ 	    ab->nss.quiescing || ab->nss.ownership_uncertain || !arvif->nss.created ||
+ 	    !smp_load_acquire(&arvif->nss.format_ready) ||
+ 	    ath11k_nss_vdev_key_failed(arvif) ||
+@@ -189,6 +189,47 @@
+ 	return ret;
+ }
+ 
++/* Ordinary AP multicast RX must reach the bridge before firmware AP_BRIDGE
++ * forwarding. This production command is independent of debugfs/test mode;
++ * it does not enable ME or change unicast AP_BRIDGE forwarding.
++ */
++int ath11k_nss_me_host_rx(struct ath11k_vif *arvif)
++{
++	struct ath11k_nss_me_state *me = &arvif->nss.me;
++	struct ath11k_base *ab = arvif->ar->ab;
++	struct nss_wifi_vdev_msg *msg;
++	int ret;
++
++	lockdep_assert_held(&arvif->ar->conf_mutex);
++	if (arvif->vif->type != NL80211_IFTYPE_AP)
++		return 0;
++	if (arvif->nss.encap != HAL_TCL_ENCAP_TYPE_ETHERNET ||
++	    arvif->nss.decap != ATH11K_HW_TXRX_ETHERNET)
++		return 0;
++	spin_lock_bh(&ab->base_lock);
++	ret = ath11k_nss_me_admit(arvif);
++	spin_unlock_bh(&ab->base_lock);
++	if (ret)
++		return ret;
++	if (me->rx_mcbc_known && me->rx_mcbc == 1)
++		return 0;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg)
++		return -ENOMEM;
++	msg->msg.vdev_cmd.cmd = NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD;
++	msg->msg.vdev_cmd.value = 1;
++	me->rx_mcbc_known = false;
++	ret = ath11k_nss_me_exchange(arvif, msg, NSS_WIFI_VDEV_INTERFACE_CMD_MSG,
++				    sizeof(msg->msg.vdev_cmd), NULL, NULL);
++	if (!ret) {
++		me->rx_mcbc = 1;
++		me->rx_mcbc_known = true;
++	}
++	kfree(msg);
++	return ret;
++}
++
++#ifdef CPTCFG_ATH11K_DEBUGFS
+ static int ath11k_nss_me_ip4(const char *text, __be32 *ip, u8 *mac)
+ {
+ 	const char *end;
+@@ -584,7 +625,7 @@
+ 	struct ath11k *ar = seq->private;
+ 	struct ath11k_vif *arvif;
+ 
+-	seq_printf(seq, "scope: explicit_AP_ME_control\ntest_enabled: %u\n", READ_ONCE(nss_me_test));
++	seq_printf(seq, "scope: AP_RX_host_policy_and_explicit_ME_control\ntest_enabled: %u\n", READ_ONCE(nss_me_test));
+ 	mutex_lock(&ar->conf_mutex);
+ 	list_for_each_entry(arvif, &ar->arvifs, list) {
+ 		struct ath11k_nss_me_state *me = &arvif->nss.me;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -1802,6 +1802,11 @@
+ 	ret = ath11k_nss_vdev_up(arvif);
+ 	if(ret) {
+ 		ath11k_warn(ar->ab, "failure in nss vdev up %d\r\n",ret);
++		ret = ath11k_wmi_vdev_down(ar, arvif->vdev_id);
++		if (ret)
++			ath11k_warn(ar->ab, "failed to unwind AP vdev %d: %d\n",
++				    arvif->vdev_id, ret);
++		arvif->is_up = false;
+ 		return;
+ 	}
+ 

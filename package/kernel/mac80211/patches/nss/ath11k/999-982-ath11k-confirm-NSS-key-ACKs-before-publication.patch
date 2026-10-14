@@ -1,0 +1,710 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ath11k: confirm NSS key requests before publishing host key state
+
+Keep a peer-instance lease across WMI/NSS configuration, wait for private
+VDEV/security/authorization ACKs outside base_lock, and stop the affected
+interface after a partial install. Require fresh VDEV creation to remove
+the failed-key gate instead of resetting and reinstalling an old key with
+unknown hardware packet numbers.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -312,6 +312,57 @@
+ 	kfree(state);
+ }
+ 
++bool ath11k_nss_vdev_key_failed(struct ath11k_vif *arvif)
++{
++	return READ_ONCE(arvif->nss.key_failed) ||
++		(arvif->nss.ap_vif && READ_ONCE(arvif->nss.ap_vif->nss.key_failed));
++}
++
++int ath11k_nss_key_check(struct ath11k *ar, struct ath11k_peer *peer,
++			 struct ath11k_nss_peer_state *state)
++{
++	struct ath11k_base *ab = ar->ab;
++
++	lockdep_assert_held(&ab->base_lock);
++	if (!state)
++		return ab->nss.enabled ? -ESHUTDOWN : 0;
++	if (!ab->nss.enabled || ab->nss.quiescing ||
++	    ab->nss.ownership_uncertain || !ab->nss.registered)
++		return -ESHUTDOWN;
++	if (!peer->vif || ath11k_nss_vdev_key_failed(ath11k_vif_to_arvif(peer->vif)))
++		return -ESHUTDOWN;
++	if (state->peer != peer || peer->nss.state != state ||
++	    state->delete_submitted ||
++	    ath11k_peer_find(ar, state->vdev_id, state->addr) != peer)
++		return -ENOENT;
++	if (!state->create_done)
++		return -EAGAIN;
++	return state->create_result;
++}
++
++struct ath11k_nss_peer_state *ath11k_nss_key_get(struct ath11k *ar,
++					       struct ath11k_peer *peer)
++{
++	struct ath11k_nss_peer_state *state;
++	int ret;
++
++	lockdep_assert_held(&ar->ab->base_lock);
++	if (!ar->ab->nss.enabled)
++		return NULL;
++	state = peer->nss.state;
++	ret = ath11k_nss_key_check(ar, peer, state);
++	if (ret)
++		return ERR_PTR(ret);
++	refcount_inc(&state->refs);
++	return state;
++}
++
++void ath11k_nss_key_put(struct ath11k_nss_peer_state *state)
++{
++	if (state)
++		ath11k_nss_peer_state_put(state);
++}
++
+ static void ath11k_nss_peer_state_retire(struct ath11k_base *ab,
+ 				       struct ath11k_nss_peer_state *state,
+ 				       bool quarantine)
+@@ -754,6 +805,7 @@
+ 
+ struct ath11k_nss_vdev_request {
+ 	struct completion complete;
++	u32 type;
+ 	u32 if_num;
+ 	int result;
+ 	u32 response;
+@@ -765,7 +817,7 @@
+ {
+ 	struct ath11k_nss_vdev_request *request = app_data;
+ 
+-	if (!request || msg->type != NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG ||
++	if (!request || msg->type != request->type ||
+ 	    msg->interface != request->if_num || msg->response == NSS_CMN_RESPONSE_NOTIFY)
+ 		return;
+ 
+@@ -828,6 +880,11 @@
+ 	int hdr_len;
+ 	u8 *qc;
+ 
++	if (ath11k_nss_vdev_key_failed(ath11k_vif_to_arvif(vif))) {
++		dev_kfree_skb_any(skb);
++		return -ESHUTDOWN;
++	}
++
+ 	dev = skb->dev;
+ 
+ 	if (eth)
+@@ -1195,6 +1252,10 @@
+ 
+ 	wifi_metadata = (struct nss_wifi_vdev_per_packet_metadata *)(skb->head +
+ 			 NSS_WIFI_VDEV_PER_PACKET_METADATA_OFFSET);
++	if (ath11k_nss_vdev_key_failed(arvif)) {
++		dev_kfree_skb_any(skb);
++		return;
++	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS_WDS,
+ 		   "dp special data from nss: wifi_metadata->pkt_type %d",
+@@ -2398,7 +2459,11 @@
+ 	ab = arvif->ar->ab;
+ 
+ 	wifi_metadata = (struct nss_wifi_vdev_per_packet_metadata *)(skb->head +
+-			NSS_WIFI_VDEV_PER_PACKET_METADATA_OFFSET);
++			 NSS_WIFI_VDEV_PER_PACKET_METADATA_OFFSET);
++	if (ath11k_nss_vdev_key_failed(arvif)) {
++		dev_kfree_skb_any(skb);
++		return;
++	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS_MESH,
+ 		   "dp special data from nss on mesh link vap: pkt_type %d\n",
+@@ -2449,6 +2514,9 @@
+ 	struct ath11k_soc_dp_stats *soc_stats = &ar->ab->soc_stats;
+ 	char dump_msg[100] = {0};
+ 
++	if (ath11k_nss_vdev_key_failed(arvif))
++		return -ESHUTDOWN;
++
+ 	if (!arvif->ar->ab->nss.debug_mode && encap_type != arvif->nss.encap) {
+ 		ath11k_dbg(ar->ab, ATH11K_DBG_DP_TX, "encap mismatch in nss tx skb encap type %d" \
+ 			    " vif encap type %d\n", encap_type, arvif->nss.encap);
+@@ -2610,6 +2678,7 @@
+ 	if (!request)
+ 		return -ENOMEM;
+ 	init_completion(&request->complete);
++	request->type = NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG;
+ 	request->if_num = arvif->nss.if_num;
+ 	request->result = -ETIMEDOUT;
+ 	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_KERNEL);
+@@ -3167,6 +3236,10 @@
+ 	}
+ 
+ 	arvif->nss.created = true;
++	/* Only a newly allocated and configured VDEV clears a partial install.
++	 * The already-created early return above must preserve this gate.
++	 */
++	WRITE_ONCE(arvif->nss.key_failed, false);
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS,
+ 		   "nss vdev interface created ctx %pK, ifnum %d\n",
+@@ -3210,6 +3283,9 @@
+ 	nss_tx_status_t status;
+ 	int ret = 0;
+ 
++	if (ath11k_nss_vdev_key_failed(arvif))
++		return -ESHUTDOWN;
++
+ 	if (!ar->ab->nss.enabled)
+ 		return 0;
+ 
+@@ -3597,6 +3673,8 @@
+ 
+ 	if (!ar->ab->nss.enabled)
+ 		return 0;
++	if (ath11k_nss_vdev_key_failed(arvif))
++		return -ESHUTDOWN;
+ 
+ 	if (arvif->vif->type != NL80211_IFTYPE_AP_VLAN)
+ 		return -EINVAL;
+@@ -3742,25 +3820,160 @@
+ 
+ /*----------------------------Peer Setup/Config -----------------------------*/
+ 
+-int ath11k_nss_set_peer_sec_type(struct ath11k *ar,
+-				 struct ath11k_peer *peer,
+-				 struct ieee80211_key_conf *key_conf)
++struct ath11k_nss_key_request {
++	struct completion complete;
++	u32 type;
++	u32 if_num;
++	u16 peer_id;
++	u8 pkt_type;
++	u8 security_type;
++	u8 auth_flag;
++	int result;
++};
++
++static void ath11k_nss_key_response(void *context, struct nss_wifili_msg *msg)
++{
++	struct ath11k_nss_key_request *request = (void *)(uintptr_t)msg->cm.app_data;
++	int ret;
++
++	(void)context;
++	if (!request || msg->cm.type != request->type ||
++	    msg->cm.interface != request->if_num ||
++	    msg->cm.response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++	ret = msg->cm.response == NSS_CMN_RESPONSE_ACK ? 0 : -EREMOTEIO;
++	if (msg->cm.len) {
++		if (request->type == NSS_WIFILI_PEER_SECURITY_TYPE_MSG) {
++			if (msg->cm.len < sizeof(msg->msg.securitymsg) ||
++			    msg->msg.securitymsg.peer_id != request->peer_id ||
++			    msg->msg.securitymsg.pkt_type != request->pkt_type ||
++			    msg->msg.securitymsg.security_type != request->security_type)
++				ret = -EPROTO;
++		} else if (msg->cm.len < sizeof(msg->msg.peer_auth) ||
++			   msg->msg.peer_auth.peer_id != request->peer_id ||
++			   msg->msg.peer_auth.auth_flag != request->auth_flag) {
++			ret = -EPROTO;
++		}
++	}
++	request->result = ret;
++	complete(&request->complete);
++}
++
++static int ath11k_nss_key_send(struct ath11k *ar, struct ath11k_peer *peer,
++			       struct ath11k_nss_peer_state *state,
++			       struct nss_wifili_msg *msg)
++{
++	struct ath11k_nss_key_request *request;
++	nss_tx_status_t status = NSS_TX_FAILURE;
++	u32 cookie = 0;
++	unsigned long waited = 0;
++	int ret;
++
++	request = kzalloc(sizeof(*request), GFP_KERNEL);
++	if (!request)
++		return -ENOMEM;
++	init_completion(&request->complete);
++	request->type = msg->cm.type;
++	request->if_num = msg->cm.interface;
++	request->peer_id = state->peer_id;
++	request->pkt_type = msg->msg.securitymsg.pkt_type;
++	request->security_type = msg->msg.securitymsg.security_type;
++	request->auth_flag = msg->msg.peer_auth.auth_flag;
++	request->result = -ETIMEDOUT;
++	msg->cm.cb = (nss_ptr_t)(uintptr_t)ath11k_nss_key_response;
++	msg->cm.app_data = (nss_ptr_t)(uintptr_t)request;
++	/* Validate this peer instance and enqueue without allowing unmap between
++	 * them. Allocation, ACK waiting and callback drains stay outside the lock.
++	 */
++	spin_lock_bh(&ar->ab->base_lock);
++	ret = ath11k_nss_key_check(ar, peer, state);
++	if (!ret)
++		status = nss_wifili_tx_msg_tracked(ar->nss.ctx, msg, &cookie);
++	spin_unlock_bh(&ar->ab->base_lock);
++	if (!ret && status != NSS_TX_SUCCESS)
++		ret = -EIO;
++	if (!ret) {
++		waited = wait_for_completion_timeout(&request->complete,
++						msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	}
++	nss_wifili_cancel_msg(cookie);
++	if (!ret)
++		ret = waited || completion_done(&request->complete) ?
++			READ_ONCE(request->result) : -ETIMEDOUT;
++	msg->cm.cb = 0;
++	msg->cm.app_data = 0;
++	kfree(request);
++	return ret;
++}
++
++static int ath11k_nss_key_vdev_security(struct ath11k_vif *arvif,
++					struct ath11k_peer *peer,
++					struct ath11k_nss_peer_state *state,
++					u32 cipher)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_nss_vdev_request *request;
++	struct nss_wifi_vdev_msg *msg;
++	nss_tx_status_t status = NSS_TX_FAILURE;
++	u32 cookie = 0;
++	unsigned long waited = 0;
++	int ret;
++
++	request = kzalloc(sizeof(*request), GFP_KERNEL);
++	if (!request)
++		return -ENOMEM;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg) {
++		kfree(request);
++		return -ENOMEM;
++	}
++	init_completion(&request->complete);
++	request->type = NSS_WIFI_VDEV_INTERFACE_CMD_MSG;
++	request->if_num = arvif->nss.if_num;
++	request->result = -ETIMEDOUT;
++	msg->msg.vdev_cmd.cmd = NSS_WIFI_VDEV_SECURITY_TYPE_CMD;
++	msg->msg.vdev_cmd.value = ath11k_nss_cipher_type(ar->ab, cipher);
++	nss_wifi_vdev_msg_init(msg, request->if_num, request->type,
++			       sizeof(msg->msg.vdev_cmd),
++			       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_cfg_cb,
++			       request);
++	spin_lock_bh(&ar->ab->base_lock);
++	ret = ath11k_nss_key_check(ar, peer, state);
++	if (!ret && (arvif->vdev_id != state->vdev_id || !arvif->nss.created))
++		ret = -ENOENT;
++	if (!ret)
++		status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, msg, &cookie);
++	spin_unlock_bh(&ar->ab->base_lock);
++	if (!ret && status != NSS_TX_SUCCESS)
++		ret = -EIO;
++	if (!ret)
++		waited = wait_for_completion_timeout(&request->complete,
++						msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	nss_wifi_vdev_cancel_msg(cookie);
++	if (!ret)
++		ret = waited || completion_done(&request->complete) ?
++			READ_ONCE(request->result) : -ETIMEDOUT;
++	kfree(msg);
++	kfree(request);
++	return ret;
++}
++
++static int ath11k_nss_set_peer_sec_type(struct ath11k *ar,
++				       struct ath11k_peer *peer,
++				       struct ath11k_nss_peer_state *state,
++				       struct ieee80211_key_conf *key_conf)
+ {
+ 	struct nss_wifili_peer_security_type_msg *sec_msg;
+-	nss_wifili_msg_callback_t msg_cb;
+ 	struct nss_wifili_msg *wlmsg;
+-	nss_tx_status_t status;
+ 	u8 *mic_key;
++	int ret;
+ 
+-	if (!ar->ab->nss.enabled)
+-		return 0;
+-
+-	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_ATOMIC);
++	wlmsg = kzalloc(sizeof(*wlmsg), GFP_KERNEL);
+ 	if (!wlmsg)
+ 		return -ENOMEM;
+ 
+ 	sec_msg = &wlmsg->msg.securitymsg;
+-	sec_msg->peer_id = peer->peer_id;
++	sec_msg->peer_id = state->peer_id;
+ 
+ 	/* 0 -unicast , 1 - mcast/unicast */
+ 	sec_msg->pkt_type = !(key_conf->flags & IEEE80211_KEY_FLAG_PAIRWISE);
+@@ -3773,64 +3986,110 @@
+ 		memcpy(&sec_msg->mic_key[0], mic_key, NSS_WIFILI_MIC_KEY_LEN);
+ 	}
+ 
+-	msg_cb = ath11k_nss_wifili_event_receive;
+-
+ 	nss_cmn_msg_init(&wlmsg->cm, ar->ab->nss.if_num,
+ 			 NSS_WIFILI_PEER_SECURITY_TYPE_MSG,
+ 			 sizeof(struct nss_wifili_peer_security_type_msg),
+-			 msg_cb, NULL);
+-
+-	status = nss_wifili_tx_msg(ar->nss.ctx, wlmsg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss peer %d security cfg fail %d\n",
+-			    peer->peer_id, status);
+-		goto free;
+-	}
+-
+-	ath11k_dbg(ar->ab, ATH11K_DBG_NSS, "nss peer id %d security cfg complete\n",
+-		   peer->peer_id);
+-free:
++			 NULL, NULL);
++	ret = ath11k_nss_key_send(ar, peer, state, wlmsg);
+ 	kfree(wlmsg);
+-	return status;
++	return ret;
+ }
+ 
+-int ath11k_nss_set_peer_authorize(struct ath11k *ar, u16 peer_id)
++static int ath11k_nss_set_peer_authorize(struct ath11k *ar,
++					struct ath11k_peer *peer,
++					struct ath11k_nss_peer_state *state)
+ {
+ 	struct nss_wifili_peer_update_auth_flag *auth_msg;
+-	nss_wifili_msg_callback_t msg_cb;
+ 	struct nss_wifili_msg *wlmsg;
+-	nss_tx_status_t status;
+-
+-	if (!ar->ab->nss.enabled)
+-		return 0;
++	int ret;
+ 
+-	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_ATOMIC);
++	wlmsg = kzalloc(sizeof(*wlmsg), GFP_KERNEL);
+ 	if (!wlmsg)
+ 		return -ENOMEM;
+ 
+ 	auth_msg = &wlmsg->msg.peer_auth;
+-	auth_msg->peer_id = peer_id;
++	auth_msg->peer_id = state->peer_id;
+ 	auth_msg->auth_flag = 1;
+ 
+-	msg_cb = ath11k_nss_wifili_event_receive;
+-
+ 	nss_cmn_msg_init(&wlmsg->cm, ar->ab->nss.if_num,
+ 			 NSS_WIFILI_PEER_UPDATE_AUTH_FLAG,
+ 			 sizeof(struct nss_wifili_peer_update_auth_flag),
+-			 msg_cb, NULL);
++			 NULL, NULL);
++	ret = ath11k_nss_key_send(ar, peer, state, wlmsg);
++	kfree(wlmsg);
++	return ret;
++}
+ 
+-	status = nss_wifili_tx_msg(ar->nss.ctx, wlmsg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss peer %d auth cfg fail %d\n",
+-			    peer_id, status);
+-		goto free;
++int ath11k_nss_key_config(struct ath11k_vif *arvif, struct ath11k_peer *peer,
++			  struct ath11k_nss_peer_state *state,
++			  struct ieee80211_key_conf *key)
++{
++	struct ath11k *ar = arvif->ar;
++	const char *phase = "vdev security";
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (!state)
++		return ar->ab->nss.enabled ? -ESHUTDOWN : 0;
++	ret = ath11k_nss_key_vdev_security(arvif, peer, state, key->cipher);
++	if (!ret) {
++		phase = "peer security";
++		ret = ath11k_nss_set_peer_sec_type(ar, peer, state, key);
++	}
++	if (!ret) {
++		phase = "peer authorize";
++		ret = ath11k_nss_set_peer_authorize(ar, peer, state);
+ 	}
++	if (ret)
++		ath11k_warn(ar->ab, "NSS key config vdev %u peer %u %s failed: %d\n",
++			    state->vdev_id, state->peer_id, phase, ret);
++	return ret;
++}
+ 
+-	ath11k_dbg(ar->ab, ATH11K_DBG_NSS, "nss peer id %d auth cfg complete\n",
+-		   peer_id);
+-free:
+-	kfree(wlmsg);
+-	return status;
++void ath11k_nss_key_recover(struct ath11k_vif *arvif, struct ath11k_peer *peer,
++			    struct ath11k_nss_peer_state *state)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct wireless_dev *wdev;
++	bool stop = false;
++	bool wait_delete = false;
++	int ret = 0;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (!state)
++		return;
++	spin_lock_bh(&ab->base_lock);
++	if (!arvif->nss.key_failed &&
++	    !test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags)) {
++		WRITE_ONCE(arvif->nss.key_failed, true);
++		/* Only delete the instance retained by this key operation. */
++		if (state->peer == peer && peer->nss.state == state &&
++		    ath11k_peer_find(ar, state->vdev_id, state->addr) == peer)
++			ret = ath11k_nss_peer_submit_delete(ab, state);
++		wait_delete = !ret && state->delete_submitted;
++		stop = true;
++	}
++	spin_unlock_bh(&ab->base_lock);
++	if (!stop)
++		return;
++	/* Stop asynchronously outside base_lock. This disconnects STA or stops
++	 * AP, but does not recreate the VDEV: keep the gate until interface
++	 * removal and a fresh create. Never reset hardware and reinstall an old
++	 * key with unknown transmit/RX PN as an error rollback.
++	 */
++	wdev = ieee80211_vif_to_wdev_relaxed(arvif->vif);
++	if (wdev)
++		cfg80211_stop_iface(ar->hw->wiphy, wdev, GFP_KERNEL);
++	if (wait_delete) {
++		if (!wait_for_completion_timeout(&state->deleted,
++						 msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS)))
++			ret = -ETIMEDOUT;
++		else
++			ret = READ_ONCE(state->delete_result);
++	}
++	ath11k_warn(ab, "NSS partial key state stopped vdev %u; interface recreation required (peer cleanup %d)\n",
++		    arvif->vdev_id, ret);
+ }
+ 
+ void ath11k_nss_update_sta_stats(struct ath11k_vif *arvif,
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -225,6 +225,8 @@
+ 	/* WDS cfg should be done only once for ext vdev */
+ 	bool wds_cfg_done;
+ 	bool created;
++	/* A partial key install requires a new VDEV/security session. */
++	bool key_failed;
+ 
+ 	bool mpp_aging;
+ 	bool mpp_dump_req;
+@@ -293,6 +295,7 @@
+ 
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
+ bool ath11k_nss_hw_quarantined(u32 hw_rev);
++bool ath11k_nss_vdev_key_failed(struct ath11k_vif *arvif);
+ int ath11k_nss_tx(struct ath11k_vif *arvif, struct sk_buff *skb);
+ int ath11k_nss_vdev_set_cmd(struct ath11k_vif *arvif, enum ath11k_nss_vdev_cmd cmd,
+ 			    int val);
+@@ -301,7 +304,16 @@
+ int ath11k_nss_vdev_up(struct ath11k_vif *arvif);
+ int ath11k_nss_vdev_down(struct ath11k_vif *arvif);
+ int ath11k_nss_peer_delete(struct ath11k *ar, u32 vdev_id, const u8 *addr);
+-int ath11k_nss_set_peer_authorize(struct ath11k *ar, u16 peer_id);
++struct ath11k_nss_peer_state *ath11k_nss_key_get(struct ath11k *ar,
++						struct ath11k_peer *peer);
++void ath11k_nss_key_put(struct ath11k_nss_peer_state *state);
++int ath11k_nss_key_check(struct ath11k *ar, struct ath11k_peer *peer,
++			 struct ath11k_nss_peer_state *state);
++int ath11k_nss_key_config(struct ath11k_vif *arvif, struct ath11k_peer *peer,
++			  struct ath11k_nss_peer_state *state,
++			  struct ieee80211_key_conf *key);
++void ath11k_nss_key_recover(struct ath11k_vif *arvif, struct ath11k_peer *peer,
++			    struct ath11k_nss_peer_state *state);
+ int ath11k_nss_peer_create(struct ath11k *ar, struct ath11k_peer *peer);
+ int ath11k_nss_peer_wait_created(struct ath11k *ar, u32 vdev_id, const u8 *addr);
+ void ath11k_nss_peer_detach(struct ath11k *ar, struct ath11k_peer *peer);
+@@ -328,8 +340,6 @@
+ int ath11k_nss_ext_vdev_cfg_dyn_vlan(struct ath11k_vif *arvif, u16 vlan_id);
+ int ath11k_nss_dyn_vlan_set_group_key(struct ath11k_vif *arvif, u16 vlan_id,
+ 				      u16 group_key);
+-int ath11k_nss_set_peer_sec_type(struct ath11k *ar, struct ath11k_peer *peer,
+-				 struct ieee80211_key_conf *key_conf);
+ void ath11k_nss_update_sta_stats(struct ath11k_vif *arvif,
+ 				 struct station_info *sinfo,
+ 				 struct ieee80211_sta *sta);
+@@ -373,6 +383,11 @@
+ 	return false;
+ }
+ 
++static inline bool ath11k_nss_vdev_key_failed(struct ath11k_vif *arvif)
++{
++	return false;
++}
++
+ static inline int ath11k_nss_vdev_set_cmd(struct ath11k_vif *arvif, enum ath11k_nss_vdev_cmd cmd,
+ 					  int val)
+ {
+@@ -384,11 +399,35 @@
+ 	return 0;
+ }
+ 
+-static inline int ath11k_nss_set_peer_authorize(struct ath11k *ar, u16 peer_id)
++static inline struct ath11k_nss_peer_state *
++ath11k_nss_key_get(struct ath11k *ar, struct ath11k_peer *peer)
++{
++	return NULL;
++}
++
++static inline void ath11k_nss_key_put(struct ath11k_nss_peer_state *state)
++{
++}
++
++static inline int ath11k_nss_key_check(struct ath11k *ar, struct ath11k_peer *peer,
++				    struct ath11k_nss_peer_state *state)
+ {
+ 	return 0;
+ }
+ 
++static inline int ath11k_nss_key_config(struct ath11k_vif *arvif,
++				     struct ath11k_peer *peer,
++				     struct ath11k_nss_peer_state *state,
++				     struct ieee80211_key_conf *key)
++{
++	return 0;
++}
++
++static inline void ath11k_nss_key_recover(struct ath11k_vif *arvif, struct ath11k_peer *peer,
++					struct ath11k_nss_peer_state *state)
++{
++}
++
+ static inline void ath11k_nss_vdev_delete(struct ath11k_vif *arvif)
+ {
+ }
+@@ -512,12 +551,6 @@
+ 	return;
+ }
+ 
+-static inline int ath11k_nss_set_peer_sec_type(struct ath11k *ar, struct ath11k_peer *peer,
+-					       struct ieee80211_key_conf *key_conf)
+-{
+-	return 0;
+-}
+-
+ static inline int ath11k_nss_setup(struct ath11k_base *ab)
+ {
+ 	return 0;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4506,9 +4506,11 @@
+ 	struct ath11k_vif *arvif, *ap_vlan_arvif = NULL;
+ 	struct ath11k_peer *peer;
+ 	struct ath11k_peer *key_peer = NULL;
++	struct ath11k_nss_peer_state *key_state = NULL;
+ 	struct ath11k_sta *arsta = NULL;
+ 	bool is_ap_with_no_sta;
+ 	bool change_pn = false;
++	bool wmi_key_attempted = false;
+ 	const u8 *peer_addr;
+ 	int ret = 0;
+ 	u32 flags = 0;
+@@ -4578,6 +4580,15 @@
+ 		}
+ 		ath11k_peer_get(peer);
+ 		key_peer = peer;
++		if (cmd == SET_KEY) {
++			key_state = ath11k_nss_key_get(ar, peer);
++			if (IS_ERR(key_state)) {
++				ret = PTR_ERR(key_state);
++				key_state = NULL;
++				spin_unlock_bh(&ab->base_lock);
++				goto exit;
++			}
++		}
+ 		change_pn = (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+ 			(cmd == SET_KEY || peer->ucast_keyidx == key->keyidx);
+ 	}
+@@ -4647,6 +4658,7 @@
+ 	is_ap_with_no_sta = (vif->type == NL80211_IFTYPE_AP &&
+ 			     !arvif->num_stations);
+ 	if (flags == WMI_KEY_PAIRWISE || cmd == SET_KEY || is_ap_with_no_sta) {
++		wmi_key_attempted = cmd == SET_KEY;
+ 		ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+ 		if (ret) {
+ 			ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
+@@ -4741,30 +4753,15 @@
+ 		goto unlock;
+ 	}
+ 
+-	/* DISABLE_KEY must not reinstall the cipher or authorize the peer.
+-	 * GTK removal may deliberately retain the firmware key during AP rekey.
++	spin_unlock_bh(&ar->ab->base_lock);
++	/* Private ACK waits and callback drains must not hold base_lock.
++	 * DISABLE_KEY neither reinstalls a cipher nor authorizes a peer.
+ 	 */
+ 	if (cmd == SET_KEY) {
+-		ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_SECURITY_TYPE_CMD, key->cipher);
+-		if (ret) {
+-			ath11k_warn(ab, "failure to set vdev security type in nss");
+-			goto unlock;
+-		}
+-
+-		ret = ath11k_nss_set_peer_sec_type(ar, peer, key);
+-		if (ret) {
+-			ath11k_warn(ab, "failure to set peer security type in nss");
+-			goto unlock;
+-		}
+-
+-		ret = ath11k_nss_set_peer_authorize(ar, peer->peer_id);
+-		if (ret) {
+-			ath11k_warn(ab, "failure to authorize peer in nss");
+-			goto unlock;
+-		}
++		ret = ath11k_nss_key_config(arvif, key_peer, key_state, key);
++		if (ret)
++			goto exit;
+ 	}
+-
+-	spin_unlock_bh(&ar->ab->base_lock);
+ 	if (ap_vlan_arvif && ar->state == ATH11K_STATE_RESTARTED) {
+ 		/* Keys are getting installed during ieee80211_reconfig(). Configuring
+ 		 * dynamic vlan is pending and the state is saved in the ap_vlan
+@@ -4790,6 +4787,11 @@
+ 		ret = cmd == SET_KEY ? -ENOENT : 0;
+ 		goto unlock;
+ 	}
++	if (cmd == SET_KEY) {
++		ret = ath11k_nss_key_check(ar, key_peer, key_state);
++		if (ret)
++			goto unlock;
++	}
+ 	if (peer && cmd == SET_KEY) {
+ 		peer->keys[key->keyidx] = key;
+ 		if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
+@@ -4834,6 +4836,9 @@
+ unlock:
+ 	spin_unlock_bh(&ab->base_lock);
+ exit:
++	if (ret && wmi_key_attempted)
++		ath11k_nss_key_recover(arvif, key_peer, key_state);
++	ath11k_nss_key_put(key_state);
+ 	ath11k_peer_put(ar, key_peer);
+ 	mutex_unlock(&ar->conf_mutex);
+ 	/* Positive NSS transport statuses are errors, not software-crypto fallback. */
+@@ -6656,6 +6661,16 @@
+ 		skb_cb->flags |= ATH11K_SKB_CIPHER_SET;
+ 	}
+ 
++	/* QoS null frames can bypass the NSS payload TX path via WMI. Keep
++	 * teardown management frames available while rejecting old-key data.
++	 */
++	if (ar->ab->nss.enabled && ath11k_nss_vdev_key_failed(arvif) &&
++	    ((info_flags & IEEE80211_TX_CTL_HW_80211_ENCAP) ||
++	     ieee80211_is_data(hdr->frame_control))) {
++		ieee80211_free_txskb(ar->hw, skb);
++		return;
++	}
++
+ 	if (info_flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
+ 		skb_cb->flags |= ATH11K_SKB_HW_80211_ENCAP;
+ 	} else if (ieee80211_is_mgmt(hdr->frame_control)) {

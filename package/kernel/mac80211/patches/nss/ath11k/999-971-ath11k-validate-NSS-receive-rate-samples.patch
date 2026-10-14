@@ -1,0 +1,191 @@
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -3679,86 +3679,102 @@
+-void ath11k_nss_update_sta_rxrate(struct hal_rx_mon_ppdu_info *ppdu_info,
+-				  struct ath11k_peer *peer,
+-				  struct hal_rx_user_status *user_stats)
+-{
+-	u16 ath11k_hal_rx_legacy_rates[] =
+-	{ 10, 20, 55, 60, 90, 110, 120, 180, 240, 360, 480, 540 };
+-	u16 rate = 0;
+-	u32 preamble_type;
+-	u8 mcs, nss;
+-	struct ath11k_vif *arvif = ath11k_vif_to_arvif(peer->vif);
+-	struct ath11k *ar = arvif->ar;
+-	struct ath11k_base *ab = ar->ab;
+-
+-	if (!ab->nss.enabled)
+-		return;
+-
+-	if (!ieee80211_is_data(__cpu_to_le16(ppdu_info->frame_control)))
+-		return;
+-
+-	if (!peer->nss.nss_stats)
+-		return;
+-
+-	if (user_stats) {
+-		mcs = user_stats->mcs;
+-		nss = user_stats->nss;
+-		preamble_type = user_stats->preamble_type;
+-	} else {
+-		mcs = ppdu_info->mcs;
+-		nss = ppdu_info->nss;
+-		preamble_type = ppdu_info->preamble_type;
+-	}
+-
+-	if ((preamble_type == WMI_RATE_PREAMBLE_CCK ||
+-		preamble_type == WMI_RATE_PREAMBLE_OFDM) &&
+-		(ppdu_info->rate < ATH11K_LEGACY_NUM)) {
+-		rate = ath11k_hal_rx_legacy_rates[ppdu_info->rate];
+-	}
+-
+-	memset(&peer->nss.nss_stats->rxrate, 0, sizeof(peer->nss.nss_stats->rxrate));
+-
+-	switch (preamble_type) {
+-	case WMI_RATE_PREAMBLE_OFDM:
+-		peer->nss.nss_stats->rxrate.legacy = rate;
+-		break;
+-	case WMI_RATE_PREAMBLE_CCK:
+-		peer->nss.nss_stats->rxrate.legacy = rate;
+-		break;
+-	case WMI_RATE_PREAMBLE_HT:
+-		if (mcs >= ATH11K_HT_MCS_NUM) {
+-			ath11k_dbg(ar->ab, ATH11K_DBG_NSS,
+-				    "Received invalid mcs in HT mode %d\n", mcs);
+-			return;
+-		}
+-		peer->nss.nss_stats->rxrate.mcs = mcs;
+-		peer->nss.nss_stats->rxrate.flags = RATE_INFO_FLAGS_MCS;
+-		if (ppdu_info->gi)
+-			peer->nss.nss_stats->rxrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
+-		break;
+-	case WMI_RATE_PREAMBLE_VHT:
+-		if (mcs > ATH11K_VHT_MCS_MAX) {
+-			ath11k_dbg(ar->ab, ATH11K_DBG_NSS,
+-				    "Received invalid mcs in VHT mode %d\n", mcs);
+-			return;
+-		}
+-		peer->nss.nss_stats->rxrate.mcs = mcs;
+-		peer->nss.nss_stats->rxrate.flags = RATE_INFO_FLAGS_VHT_MCS;
+-		if (ppdu_info->gi)
+-			peer->nss.nss_stats->rxrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
+-		break;
+-	case WMI_RATE_PREAMBLE_HE:
+-		if (mcs > ATH11K_HE_MCS_MAX) {
+-			ath11k_dbg(ar->ab, ATH11K_DBG_NSS,
+-				    "Received invalid mcs in HE mode %d\n", mcs);
+-			return;
+-		}
+-		peer->nss.nss_stats->rxrate.mcs = mcs;
+-		peer->nss.nss_stats->rxrate.flags = RATE_INFO_FLAGS_HE_MCS;
+-		peer->nss.nss_stats->rxrate.he_dcm = ppdu_info->dcm;
+-		peer->nss.nss_stats->rxrate.he_gi = ath11k_mac_he_gi_to_nl80211_he_gi(ppdu_info->gi);
+-		peer->nss.nss_stats->rxrate.he_ru_alloc = ppdu_info->ru_alloc;
+-		break;
+-	}
+-
+-	peer->nss.nss_stats->rxrate.nss = nss;
+-	peer->nss.nss_stats->rxrate.bw = ath11k_mac_bw_to_mac80211_bw(ppdu_info->bw);
+-}
++void ath11k_nss_update_sta_rxrate(struct hal_rx_mon_ppdu_info *ppdu_info,
++				  struct ath11k_peer *peer,
++				  struct hal_rx_user_status *user_stats)
++{
++	static const u16 ath11k_hal_rx_legacy_rates[] =
++	{ 10, 20, 55, 60, 90, 110, 120, 180, 240, 360, 480, 540 };
++	struct rate_info rxrate = {};
++	u32 preamble_type;
++	u8 mcs, nss;
++	bool cck;
++	struct ath11k_vif *arvif = ath11k_vif_to_arvif(peer->vif);
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++
++	if (!ab->nss.enabled)
++		return;
++
++	if (!ieee80211_is_data(__cpu_to_le16(ppdu_info->frame_control)))
++		return;
++
++	if (!peer->nss.nss_stats)
++		return;
++
++	if (user_stats) {
++		mcs = user_stats->mcs;
++		nss = user_stats->nss;
++		preamble_type = user_stats->preamble_type;
++	} else {
++		mcs = ppdu_info->mcs;
++		nss = ppdu_info->nss;
++		preamble_type = ppdu_info->preamble_type;
++	}
++
++	if (preamble_type == WMI_RATE_PREAMBLE_CCK ||
++	    preamble_type == WMI_RATE_PREAMBLE_OFDM) {
++		if (ppdu_info->rate >= ARRAY_SIZE(ath11k_hal_rx_legacy_rates))
++			goto invalid;
++
++		cck = ppdu_info->rate == 0 || ppdu_info->rate == 1 ||
++		      ppdu_info->rate == 2 || ppdu_info->rate == 5;
++		if (cck != (preamble_type == WMI_RATE_PREAMBLE_CCK))
++			goto invalid;
++
++		rxrate.legacy = ath11k_hal_rx_legacy_rates[ppdu_info->rate];
++		peer->nss.nss_stats->rxrate = rxrate;
++		return;
++	}
++
++	if (!nss || nss > ar->num_rx_chains ||
++	    ppdu_info->bw >= HAL_RX_BW_MAX)
++		goto invalid;
++
++	switch (preamble_type) {
++	case WMI_RATE_PREAMBLE_HT:
++		if (mcs >= ATH11K_HT_MCS_NUM || nss != (mcs >> 3) + 1 ||
++		    ppdu_info->bw > HAL_RX_BW_40MHZ ||
++		    ppdu_info->gi > HAL_RX_GI_0_4_US)
++			goto invalid;
++
++		rxrate.mcs = mcs;
++		rxrate.flags = RATE_INFO_FLAGS_MCS;
++		if (ppdu_info->gi == HAL_RX_GI_0_4_US)
++			rxrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
++		break;
++	case WMI_RATE_PREAMBLE_VHT:
++		if (mcs > ATH11K_VHT_MCS_MAX ||
++		    ppdu_info->gi > HAL_RX_GI_0_4_US)
++			goto invalid;
++
++		rxrate.mcs = mcs;
++		rxrate.flags = RATE_INFO_FLAGS_VHT_MCS;
++		if (ppdu_info->gi == HAL_RX_GI_0_4_US)
++			rxrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
++		break;
++	case WMI_RATE_PREAMBLE_HE:
++		if (mcs > ATH11K_HE_MCS_MAX ||
++		    (ppdu_info->gi != HAL_RX_GI_0_8_US &&
++		     ppdu_info->gi != HAL_RX_GI_1_6_US &&
++		     ppdu_info->gi != HAL_RX_GI_3_2_US))
++			goto invalid;
++
++		rxrate.mcs = mcs;
++		rxrate.flags = RATE_INFO_FLAGS_HE_MCS;
++		rxrate.he_dcm = ppdu_info->dcm;
++		rxrate.he_gi = ath11k_mac_he_gi_to_nl80211_he_gi(ppdu_info->gi);
++		rxrate.he_ru_alloc = ppdu_info->ru_alloc;
++		break;
++	default:
++		goto invalid;
++	}
++
++	rxrate.nss = nss;
++	rxrate.bw = ath11k_mac_bw_to_mac80211_bw(ppdu_info->bw);
++	/* Reject malformed monitor metadata without destroying the last rate. */
++	peer->nss.nss_stats->rxrate = rxrate;
++	return;
++
++invalid:
++	ath11k_warn(ab, "invalid NSS RX rate preamble %u mcs %u nss %u bw %u gi %u rate %u chains %u\n",
++		    preamble_type, mcs, nss, ppdu_info->bw, ppdu_info->gi,
++		    ppdu_info->rate, ar->num_rx_chains);
++}

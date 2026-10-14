@@ -1,0 +1,452 @@
+Subject: [PATCH] ath11k: add ACK-bound ME control transactions
+
+Use private tracked requests for explicit AP ME control, validating identity,
+ACK/error, payload length and echo. Drain callbacks before releasing waiters,
+recheck VDEV/key/peer lifetime and keep ME state independent of formats.
+Default-off control tests establish the MP12.2 contract needed by the future
+MDB consumer and actual unknown-group fallback; they do not publish MDB state.
+
+--- a/drivers/net/wireless/ath/ath11k/Makefile
++++ b/drivers/net/wireless/ath/ath11k/Makefile
+@@ -30,7 +30,7 @@
+ ath11k-$(CPTCFG_ATH11K_SPECTRAL) += spectral.o
+ ath11k-$(CONFIG_PM) += wow.o
+ ath11k-$(CONFIG_DEV_COREDUMP) += coredump.o
+-ath11k-$(CPTCFG_ATH11K_NSS_SUPPORT) += nss.o
++ath11k-$(CPTCFG_ATH11K_NSS_SUPPORT) += nss.o nss_me.o
+ 
+ ifeq ($(and $(CPTCFG_ATH11K_DEBUGFS),$(CPTCFG_ATH11K_NSS_MESH_SUPPORT)),y)
+ ath11k-y += debug_nss.o
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -197,6 +197,22 @@
+ #endif
+ };
+ 
++struct ath11k_nss_me_state {
++	u64 attempts;
++	u32 type;
++	u32 response;
++	u32 error;
++	u32 len;
++	int result;
++	u32 mode;
++	u32 global_mode;
++	u8 table;
++	bool echo_match;
++	bool mode_known;
++	bool table_known;
++	bool uncertain;
++};
++
+ /* Structure to hold the vif related info for nss offload support */
+ struct arvif_nss {
+ 	/* dynamic ifnum allocated by nss driver for vif */
+@@ -215,6 +231,8 @@
+ 	/* Only cold VDEV configuration may change packet formats. */
+ 	bool format_ready;
+ 	bool format_failed;
++	/* ME control has its own state; it never changes packet-format gates. */
++	struct ath11k_nss_me_state me;
+ 	/* AP_VLAN vif context obtained on ext vdev register */
+ 	void* ctx;
+ 	/* Parent AP vif stored in case of AP_VLAN vif */
+@@ -329,6 +347,7 @@
+ };
+ 
+ #ifdef CPTCFG_ATH11K_NSS_SUPPORT
++void ath11k_nss_me_debugfs_register(struct ath11k *ar);
+ void ath11k_nss_reoq_init(struct ath11k_base *ab);
+ void ath11k_nss_reoq_start(struct ath11k_base *ab);
+ void ath11k_nss_reoq_stop(struct ath11k_base *ab);
+@@ -421,6 +440,10 @@
+ 	return 0;
+ }
+ 
++static inline void ath11k_nss_me_debugfs_register(struct ath11k *ar)
++{
++}
++
+ static inline bool ath11k_nss_hw_quarantined(u32 hw_rev)
+ {
+ 	return false;
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -3702,6 +3702,7 @@
+ 	}
+ 
+ 	arvif->nss.created = true;
++	memset(&arvif->nss.me, 0, sizeof(arvif->nss.me));
+ 	WRITE_ONCE(arvif->nss.format_ready, false);
+ 	WRITE_ONCE(arvif->nss.format_failed, false);
+ 	/* Only a newly allocated and configured VDEV clears a partial install.
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -2347,6 +2347,7 @@
+ 		debugfs_create_file("nss_peer_stats_config", 0644,
+ 				    ar->debug.debugfs_pdev, ar,
+ 				    &fops_nss_stats);
++	ath11k_nss_me_debugfs_register(ar);
+ 
+ 	return 0;
+ }
+--- /dev/null
++++ b/drivers/net/wireless/ath/ath11k/nss_me.c
+@@ -0,0 +1,357 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++/* ACK-bound ME control. MDB publication and TX fallback are separate work. */
++#include <linux/debugfs.h>
++#include <linux/etherdevice.h>
++#include <linux/inet.h>
++#include <linux/inetdevice.h>
++#include <linux/moduleparam.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <net/ip.h>
++
++#include "core.h"
++#include "debugfs.h"
++#include "nss.h"
++#include "peer.h"
++
++static bool nss_me_test;
++module_param_named(nss_me_test, nss_me_test, bool, 0644);
++MODULE_PARM_DESC(nss_me_test, "Allow explicit ordinary AP ME control tests (default off)");
++
++#ifdef CPTCFG_ATH11K_DEBUGFS
++struct ath11k_nss_me_request {
++	struct completion complete;
++	u32 type;
++	u32 if_num;
++	u32 expected_len;
++	u32 response;
++	u32 error;
++	u32 len;
++	int result;
++	bool echo_match;
++	u8 expected[];
++};
++
++static void ath11k_nss_me_reply(void *data, struct nss_cmn_msg *cm)
++{
++	struct ath11k_nss_me_request *request = data;
++	struct nss_wifi_vdev_msg *msg;
++
++	if (!request || cm->type != request->type || cm->interface != request->if_num ||
++	    cm->response == NSS_CMN_RESPONSE_NOTIFY)
++		return;
++	request->result = -EREMOTEIO;
++	request->response = cm->response;
++	request->error = cm->error;
++	request->len = cm->len;
++	if (cm->response == NSS_CMN_RESPONSE_ACK && !cm->error) {
++		if (cm->len != request->expected_len) {
++			request->result = -EMSGSIZE;
++		} else {
++			msg = container_of(cm, struct nss_wifi_vdev_msg, cm);
++			request->echo_match = !memcmp(&msg->msg, request->expected,
++						     request->expected_len);
++			request->result = request->echo_match ? 0 : -EPROTO;
++		}
++	}
++	complete(&request->complete);
++}
++
++static int ath11k_nss_me_admit(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++
++	lockdep_assert_held(&ab->base_lock);
++	if (ar->state != ATH11K_STATE_ON || !ab->nss.enabled || !ab->nss.registered ||
++	    ab->nss.quiescing || ab->nss.ownership_uncertain || !arvif->nss.created ||
++	    !smp_load_acquire(&arvif->nss.format_ready) ||
++	    ath11k_nss_vdev_key_failed(arvif) ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
++		return -ESHUTDOWN;
++	return arvif->vif->type == NL80211_IFTYPE_AP ? 0 : -EOPNOTSUPP;
++}
++
++static int ath11k_nss_me_exchange(struct ath11k_vif *arvif,
++				 struct nss_wifi_vdev_msg *msg, u32 type, u32 len,
++				 struct ath11k_peer *peer,
++				 struct ath11k_nss_peer_state *state)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_nss_me_state *me = &arvif->nss.me;
++	struct ath11k_nss_me_request *request;
++	nss_tx_status_t status = NSS_TX_FAILURE;
++	unsigned long waited = 0;
++	u32 cookie = 0;
++	int ret;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (len > sizeof(msg->msg))
++		return -EINVAL;
++	request = kzalloc(struct_size(request, expected, len), GFP_KERNEL);
++	if (!request)
++		return -ENOMEM;
++	init_completion(&request->complete);
++	request->type = type;
++	request->if_num = arvif->nss.if_num;
++	request->expected_len = len;
++	request->result = -ETIMEDOUT;
++	request->response = U32_MAX;
++	memcpy(request->expected, &msg->msg, len);
++	nss_wifi_vdev_msg_init(msg, request->if_num, type, len,
++			       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_me_reply, request);
++	spin_lock_bh(&ab->base_lock);
++	ret = ath11k_nss_me_admit(arvif);
++	if (!ret && peer)
++		ret = ath11k_nss_key_check(ar, peer, state);
++	if (!ret && peer && (!peer->is_authorized || peer->vif != arvif->vif))
++		ret = -ENOENT;
++	if (!ret)
++		status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, msg, &cookie);
++	spin_unlock_bh(&ab->base_lock);
++	if (!ret && status != NSS_TX_SUCCESS)
++		ret = -EIO;
++	if (!ret)
++		waited = wait_for_completion_timeout(&request->complete,
++					    msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	/* No callback can touch request memory after this cancellation/drain. */
++	nss_wifi_vdev_cancel_msg(cookie);
++	if (!ret)
++		ret = waited || completion_done(&request->complete) ?
++			READ_ONCE(request->result) : -ETIMEDOUT;
++	spin_lock_bh(&ab->base_lock);
++	if (!ret)
++		ret = ath11k_nss_me_admit(arvif);
++	if (!ret && arvif->nss.if_num != request->if_num)
++		ret = -ESHUTDOWN;
++	if (!ret && peer)
++		ret = ath11k_nss_key_check(ar, peer, state);
++	if (!ret && peer && (!peer->is_authorized || peer->vif != arvif->vif))
++		ret = -ENOENT;
++	spin_unlock_bh(&ab->base_lock);
++	me->attempts++;
++	me->type = type;
++	me->response = request->response;
++	me->error = request->error;
++	me->len = request->len;
++	me->echo_match = request->echo_match;
++	me->result = ret;
++	if (ret && status == NSS_TX_SUCCESS) {
++		/* Canceling a waiter does not undo a command accepted by firmware. */
++		me->uncertain = true;
++		me->table_known = false;
++		if (type == NSS_WIFI_VDEV_INTERFACE_CMD_MSG) {
++			me->mode_known = false;
++			me->global_mode = 0;
++		}
++	}
++	kfree(request);
++	return ret;
++}
++
++static int ath11k_nss_me_ip4(const char *text, __be32 *ip, u8 *mac)
++{
++	const char *end;
++	u8 *bytes = (u8 *)ip;
++
++	if (!in4_pton(text, -1, bytes, -1, &end) || *end)
++		return -EINVAL;
++	if ((bytes[0] & 0xf0) != 0xe0 || (bytes[0] == 224 && !bytes[1] && !bytes[2]))
++		return -EINVAL;
++	ip_eth_mc_map(*ip, mac);
++	return 0;
++}
++
++/* Explicit tests only. No autonomous table publication until fallback is proven. */
++static int ath11k_nss_me_command(struct ath11k_vif *arvif, char **argv, int argc)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_nss_me_state *me = &arvif->nss.me;
++	struct ath11k_nss_peer_state *state = NULL;
++	struct ath11k_peer *peer = NULL;
++	struct nss_wifi_vdev_msg *msg;
++	__be32 group;
++	u8 group_mac[ETH_ALEN], member_mac[ETH_ALEN];
++	u32 type = 0, len = 0, mode = 0;
++	int ret = -EINVAL;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (!READ_ONCE(nss_me_test))
++		return -EACCES;
++	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (!msg)
++		return -ENOMEM;
++	if (argc == 2 && !strcmp(argv[0], "mode")) {
++		if (kstrtou32(argv[1], 0, &mode) || (mode != 4 && mode != 5 && mode != 6))
++			goto out;
++		if (me->uncertain && mode != 4) {
++			ret = -EUCLEAN;
++			goto out;
++		}
++		type = NSS_WIFI_VDEV_INTERFACE_CMD_MSG;
++		len = sizeof(msg->msg.vdev_cmd);
++		msg->msg.vdev_cmd.cmd = NSS_WIFI_VDEV_ENABLE_ME_CMD;
++		msg->msg.vdev_cmd.value = mode;
++	} else {
++		if (me->uncertain || (me->global_mode != 5 && me->global_mode != 6)) {
++			ret = -EUCLEAN;
++			goto out;
++		}
++		if (argc == 1 && !strcmp(argv[0], "reset")) {
++			type = NSS_WIFI_VDEV_SNOOPLIST_RESET_MSG;
++		} else if (argc == 1 && !strcmp(argv[0], "toggle")) {
++			if (!me->table_known) {
++				ret = -EUCLEAN;
++				goto out;
++			}
++			type = NSS_WIFI_VDEV_SNOOPLIST_TOGGLE_MSG;
++		} else if (argc == 2 && !strcmp(argv[0], "groupadd")) {
++			if (ath11k_nss_me_ip4(argv[1], &group, group_mac))
++				goto out;
++			type = NSS_WIFI_VDEV_SNOOPLIST_GRP_LIST_CREATE_MSG;
++			len = sizeof(msg->msg.vdev_grp_list_create);
++			msg->msg.vdev_grp_list_create.ether_type = ETH_P_IP;
++			msg->msg.vdev_grp_list_create.u.grpaddr_ip4 = (__force u32)group;
++			ether_addr_copy(msg->msg.vdev_grp_list_create.grp_addr, group_mac);
++		} else if (argc == 3 && !strcmp(argv[0], "memberadd")) {
++			if (ath11k_nss_me_ip4(argv[1], &group, group_mac) ||
++			    !mac_pton(argv[2], member_mac) || !is_valid_ether_addr(member_mac))
++				goto out;
++			spin_lock_bh(&ab->base_lock);
++			peer = ath11k_peer_find(ar, arvif->vdev_id, member_mac);
++			if (!peer || !peer->sta || !peer->is_authorized || peer->vif != arvif->vif) {
++				ret = -ENOENT;
++				peer = NULL;
++			} else {
++				state = ath11k_nss_key_get(ar, peer);
++				if (IS_ERR_OR_NULL(state)) {
++					ret = state ? PTR_ERR(state) : -ESHUTDOWN;
++					state = NULL;
++					peer = NULL;
++				} else {
++					ath11k_peer_get(peer);
++					msg->msg.vdev_grp_member_add.peer_id = peer->peer_id;
++					ret = 0;
++				}
++			}
++			spin_unlock_bh(&ab->base_lock);
++			if (ret)
++				goto out;
++			type = NSS_WIFI_VDEV_SNOOPLIST_GRP_MEMBER_ADD_MSG;
++			len = sizeof(msg->msg.vdev_grp_member_add);
++			msg->msg.vdev_grp_member_add.ether_type = ETH_P_IP;
++			msg->msg.vdev_grp_member_add.u.grpaddr_ip4 = (__force u32)group;
++			ether_addr_copy(msg->msg.vdev_grp_member_add.grp_addr, group_mac);
++			ether_addr_copy(msg->msg.vdev_grp_member_add.grp_member_addr, member_mac);
++			ether_addr_copy(msg->msg.vdev_grp_member_add.ra_entry.ramac, member_mac);
++			/* EXCLUDE with an empty source list accepts all sources in MP12.2. */
++			msg->msg.vdev_grp_member_add.mode = 2;
++		} else {
++			goto out;
++		}
++	}
++	ret = ath11k_nss_me_exchange(arvif, msg, type, len, peer, state);
++	if (!ret && type == NSS_WIFI_VDEV_INTERFACE_CMD_MSG) {
++		me->mode = mode;
++		me->mode_known = true;
++		me->uncertain = false;
++		if (mode != 4) {
++			me->global_mode = mode;
++			me->table = 0;
++			me->table_known = true;
++		}
++	} else if (!ret && type == NSS_WIFI_VDEV_SNOOPLIST_TOGGLE_MSG) {
++		me->table ^= 1;
++	}
++out:
++	if (peer)
++		ath11k_peer_put(ar, peer);
++	if (state)
++		ath11k_nss_key_put(state);
++	kfree(msg);
++	return ret;
++}
++
++static int ath11k_nss_me_show(struct seq_file *seq, void *unused)
++{
++	struct ath11k *ar = seq->private;
++	struct ath11k_vif *arvif;
++
++	seq_printf(seq, "scope: explicit_AP_ME_control\ntest_enabled: %u\n", READ_ONCE(nss_me_test));
++	mutex_lock(&ar->conf_mutex);
++	list_for_each_entry(arvif, &ar->arvifs, list) {
++		struct ath11k_nss_me_state *me = &arvif->nss.me;
++
++		if (!arvif->nss.created || arvif->vif->type != NL80211_IFTYPE_AP)
++			continue;
++		seq_printf(seq, "vdev=%u ifnum=%d mode_known=%u mode=%u global_mode=%u table_known=%u table=%u uncertain=%u attempts=%llu type=%u response=%u error=%u len=%u echo_match=%u result=%d\n",
++			   arvif->vdev_id, arvif->nss.if_num, me->mode_known, me->mode,
++			   me->global_mode, me->table_known, me->table, me->uncertain,
++			   me->attempts, me->type, me->response, me->error, me->len,
++			   me->echo_match, me->result);
++	}
++	mutex_unlock(&ar->conf_mutex);
++	return 0;
++}
++
++static int ath11k_nss_me_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ath11k_nss_me_show, inode->i_private);
++}
++
++static ssize_t ath11k_nss_me_write(struct file *file, const char __user *user,
++				  size_t count, loff_t *position)
++{
++	struct ath11k *ar = ((struct seq_file *)file->private_data)->private;
++	struct ath11k_vif *arvif;
++	char buffer[128], *cursor, *token, *argv[5];
++	u32 vdev;
++	int argc = 0, ret = -ENOENT;
++
++	if (!count || count >= sizeof(buffer))
++		return -E2BIG;
++	if (copy_from_user(buffer, user, count))
++		return -EFAULT;
++	buffer[count] = 0;
++	cursor = strim(buffer);
++	while ((token = strsep(&cursor, " \t\n"))) {
++		if (!*token)
++			continue;
++		if (argc == ARRAY_SIZE(argv))
++			return -EINVAL;
++		argv[argc++] = token;
++	}
++	if (argc < 2 || kstrtou32(argv[0], 0, &vdev))
++		return -EINVAL;
++	mutex_lock(&ar->conf_mutex);
++	list_for_each_entry(arvif, &ar->arvifs, list) {
++		if (arvif->vdev_id != vdev)
++			continue;
++		ret = ath11k_nss_me_command(arvif, &argv[1], argc - 1);
++		break;
++	}
++	mutex_unlock(&ar->conf_mutex);
++	return ret ? ret : count;
++}
++
++static const struct file_operations ath11k_nss_me_fops = {
++	.owner = THIS_MODULE,
++	.open = ath11k_nss_me_open,
++	.read = seq_read,
++	.write = ath11k_nss_me_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++#endif
++
++void ath11k_nss_me_debugfs_register(struct ath11k *ar)
++{
++#ifdef CPTCFG_ATH11K_DEBUGFS
++	if (ar->ab->nss.enabled)
++		debugfs_create_file("nss_me_control", 0600, ar->debug.debugfs_pdev, ar,
++				    &ath11k_nss_me_fops);
++#endif
++}

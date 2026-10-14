@@ -1,0 +1,215 @@
+--- a/include/linux/if_bridge.h
++++ b/include/linux/if_bridge.h
+@@ -85,6 +85,34 @@
+ 	bool router_ipv4;
+ 	bool router_ipv6;
+ 	bool vlan_snooping;
++};
++
++/* Complete forwarding inputs from one multicast-lock epoch. Unlike the raw
++ * source-list snapshot, keys include all bridge MDB entries, even S,G entries
++ * present only on other ports. A missing local S,G is a real negative result.
++ */
++struct br_mcast_offload_host {
++	struct br_ip addr;
++	u8 host_mac[ETH_ALEN];
++	u8 filter_mode;
++	u8 flags;
++};
++
++struct br_mcast_offload_lookup_snapshot {
++	u64 seq;
++	u32 host_count;
++	u32 key_count;
++	int bridge_ifindex;
++	bool snooping;
++	bool vlan_snooping;
++	bool source_filter_ipv4;
++	bool source_filter_ipv6;
++	bool querier_ipv4;
++	bool querier_ipv6;
++	bool router_ipv4;
++	bool router_ipv6;
++	bool forwarding;
++	bool multicast_to_unicast;
+ };
+ 
+ #define BR_HAIRPIN_MODE		BIT(0)
+@@ -138,6 +166,10 @@
+ 		struct br_mcast_offload_member members[], u32 member_capacity,
+ 		struct br_mcast_offload_source sources[], u32 source_capacity,
+ 		struct br_mcast_offload_snapshot *snapshot);
++int br_mcast_offload_snapshot_lookups(struct net_device *dev,
++		struct br_mcast_offload_host hosts[], u32 host_capacity,
++		struct br_ip keys[], u32 key_capacity,
++		struct br_mcast_offload_lookup_snapshot *snapshot);
+ int br_mcast_offload_get_ifindexes(struct net_device *dev,
+ 		const struct br_ip *addr, u32 ifindexes[], u32 capacity, u64 *seq);
+ /* Only for expansion of a proven native MFC output, never input/L2 copies. */
+--- a/net/bridge/br_mdb.c
++++ b/net/bridge/br_mdb.c
+@@ -1827,6 +1827,90 @@
+ }
+ EXPORT_SYMBOL_GPL(br_mcast_offload_snapshot_port);
+ 
++int br_mcast_offload_snapshot_lookups(struct net_device *dev,
++		struct br_mcast_offload_host hosts[], u32 host_capacity,
++		struct br_ip keys[], u32 key_capacity,
++		struct br_mcast_offload_lookup_snapshot *snapshot)
++{
++	struct net_bridge_mdb_entry *mp;
++	struct net_bridge_port_group *pg;
++	struct net_bridge_port *p;
++	struct net_bridge *br;
++	struct ethhdr eth = { .h_proto = htons(ETH_P_IP) };
++	u32 host_count = 0, key_count = 0, i = 0;
++	int ret = -ENODEV;
++
++	if (!snapshot || (!hosts && host_capacity) || (!keys && key_capacity))
++		return -EINVAL;
++	rcu_read_lock();
++	p = br_port_get_rcu(dev);
++	if (!p)
++		goto out;
++	br = p->br;
++	spin_lock_bh(&br->multicast_lock);
++	hlist_for_each_entry(pg, &p->mglist, mglist)
++		host_count++;
++	hlist_for_each_entry(mp, &br->mdb_list, mdb_node)
++		key_count++;
++	memset(snapshot, 0, sizeof(*snapshot));
++	snapshot->seq = atomic64_read(&br->mcast_offload_seq);
++	snapshot->host_count = host_count;
++	snapshot->key_count = key_count;
++	snapshot->bridge_ifindex = br->dev->ifindex;
++	snapshot->snooping = br_opt_get(br, BROPT_MULTICAST_ENABLED);
++	snapshot->vlan_snooping = br_opt_get(br, BROPT_MCAST_VLAN_SNOOPING_ENABLED);
++	snapshot->source_filter_ipv4 =
++		br_multicast_should_handle_mode(&br->multicast_ctx, eth.h_proto);
++	snapshot->querier_ipv4 =
++		br_multicast_querier_exists(&br->multicast_ctx, &eth, NULL);
++	snapshot->router_ipv4 = !hlist_unhashed(&p->multicast_ctx.ip4_rlist);
++#if IS_ENABLED(CONFIG_IPV6)
++	eth.h_proto = htons(ETH_P_IPV6);
++	snapshot->source_filter_ipv6 =
++		br_multicast_should_handle_mode(&br->multicast_ctx, eth.h_proto);
++	snapshot->querier_ipv6 =
++		br_multicast_querier_exists(&br->multicast_ctx, &eth, NULL);
++	snapshot->router_ipv6 = !hlist_unhashed(&p->multicast_ctx.ip6_rlist);
++#endif
++	snapshot->forwarding = p->state == BR_STATE_FORWARDING;
++	snapshot->multicast_to_unicast = !!(p->flags & BR_MULTICAST_TO_UNICAST);
++	if (snapshot->vlan_snooping) {
++		ret = -EOPNOTSUPP;
++		goto unlock;
++	}
++	/* Do not expose a partial set: an omitted foreign S,G changes EXCLUDE. */
++	if (host_count > host_capacity || key_count > key_capacity) {
++		ret = -E2BIG;
++		goto unlock;
++	}
++	hlist_for_each_entry(pg, &p->mglist, mglist) {
++		struct br_mcast_offload_host *host = &hosts[i++];
++
++		memset(host, 0, sizeof(*host));
++		host->addr = pg->key.addr;
++		ether_addr_copy(host->host_mac, pg->eth_addr);
++		host->filter_mode = pg->filter_mode;
++		if (pg->host_specific)
++			host->flags |= BR_MCAST_OFFLOAD_HOST_SPECIFIC;
++		if (pg->flags & MDB_PG_FLAGS_PERMANENT)
++			host->flags |= BR_MCAST_OFFLOAD_PERMANENT;
++		if (pg->flags & MDB_PG_FLAGS_STAR_EXCL)
++			host->flags |= BR_MCAST_OFFLOAD_STAR_EXCL;
++		if (pg->flags & MDB_PG_FLAGS_BLOCKED)
++			host->flags |= BR_MCAST_OFFLOAD_BLOCKED;
++	}
++	i = 0;
++	hlist_for_each_entry(mp, &br->mdb_list, mdb_node)
++		keys[i++] = mp->addr;
++	ret = 0;
++unlock:
++	spin_unlock_bh(&br->multicast_lock);
++out:
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(br_mcast_offload_snapshot_lookups);
++
+ int br_mcast_offload_set_mcu(struct net_device *dev, int bridge_ifindex,
+ 			   u64 seq, bool enabled)
+ {
+--- a/net/bridge/br_multicast.c
++++ b/net/bridge/br_multicast.c
+@@ -1160,11 +1160,17 @@
+ 	if (ipv6_dev_get_saddr(dev_net(brmctx->br->dev), brmctx->br->dev,
+ 			       &ip6h->daddr, 0, &ip6h->saddr)) {
+ 		kfree_skb(skb);
+-		br_opt_toggle(brmctx->br, BROPT_HAS_IPV6_ADDR, false);
++		if (br_opt_get(brmctx->br, BROPT_HAS_IPV6_ADDR)) {
++			br_opt_toggle(brmctx->br, BROPT_HAS_IPV6_ADDR, false);
++			br_mcast_offload_config_notify(brmctx->br);
++		}
+ 		return NULL;
+ 	}
+ 
+-	br_opt_toggle(brmctx->br, BROPT_HAS_IPV6_ADDR, true);
++	if (!br_opt_get(brmctx->br, BROPT_HAS_IPV6_ADDR)) {
++		br_opt_toggle(brmctx->br, BROPT_HAS_IPV6_ADDR, true);
++		br_mcast_offload_config_notify(brmctx->br);
++	}
+ 	ipv6_eth_mc_map(&ip6h->daddr, eth->h_dest);
+ 
+ 	hopopt = (u8 *)(ip6h + 1);
+@@ -1781,9 +1787,30 @@
+ }
+ #endif
+ 
+-static void br_multicast_query_delay_expired(struct timer_list *t)
+-{
+-}
++static void br_multicast_query_delay_expired(struct net_bridge_mcast *brmctx)
++{
++	spin_lock(&brmctx->br->multicast_lock);
++	br_mcast_offload_config_notify(brmctx->br);
++	spin_unlock(&brmctx->br->multicast_lock);
++}
++
++static void br_ip4_multicast_query_delay_expired(struct timer_list *t)
++{
++	struct net_bridge_mcast *brmctx = from_timer(brmctx, t,
++					     ip4_other_query.delay_timer);
++
++	br_multicast_query_delay_expired(brmctx);
++}
++
++#if IS_ENABLED(CONFIG_IPV6)
++static void br_ip6_multicast_query_delay_expired(struct timer_list *t)
++{
++	struct net_bridge_mcast *brmctx = from_timer(brmctx, t,
++					     ip6_other_query.delay_timer);
++
++	br_multicast_query_delay_expired(brmctx);
++}
++#endif
+ 
+ static void br_multicast_select_own_querier(struct net_bridge_mcast *brmctx,
+ 					    struct br_ip *ip,
+@@ -4145,7 +4172,7 @@
+ 	timer_setup(&brmctx->ip4_other_query.timer,
+ 		    br_ip4_multicast_querier_expired, 0);
+ 	timer_setup(&brmctx->ip4_other_query.delay_timer,
+-		    br_multicast_query_delay_expired, 0);
++		    br_ip4_multicast_query_delay_expired, 0);
+ 	timer_setup(&brmctx->ip4_own_query.timer,
+ 		    br_ip4_multicast_query_expired, 0);
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -4154,7 +4181,7 @@
+ 	timer_setup(&brmctx->ip6_other_query.timer,
+ 		    br_ip6_multicast_querier_expired, 0);
+ 	timer_setup(&brmctx->ip6_other_query.delay_timer,
+-		    br_multicast_query_delay_expired, 0);
++		    br_ip6_multicast_query_delay_expired, 0);
+ 	timer_setup(&brmctx->ip6_own_query.timer,
+ 		    br_ip6_multicast_query_expired, 0);
+ #endif

@@ -1,0 +1,41 @@
+Subject: [PATCH] ecm: observe conntrack without replacing ctnetlink
+
+Use the passive connection event observer API on the supported kernel.
+Registration failures unwind cleanly and unregister waits for RCU readers,
+so ECM and ctnetlink can retain their independent callback lifetimes.
+
+diff --git a/ecm_conntrack_notifier.c b/ecm_conntrack_notifier.c
+index 1d4174ad76..9d3793e9a4 100644
+--- a/ecm_conntrack_notifier.c
++++ b/ecm_conntrack_notifier.c
+@@ -521,7 +521,11 @@ int ecm_conntrack_notifier_init(struct dentry *dentry)
+ 		goto init_cleanup_1;
+ 	}
+ #else
+-	nf_conntrack_register_notifier(&init_net, &ecm_conntrack_notifier);
++	result = nf_conntrack_register_event_observer(&init_net, &ecm_conntrack_notifier);
++	if (result < 0) {
++		DEBUG_ERROR("Can't register conntrack event observer.\n");
++		goto init_cleanup_1;
++	}
+ #endif
+ 
+ 	/*
+@@ -549,7 +553,7 @@ init_cleanup_2:
+ #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
+ 	nf_conntrack_unregister_notifier(&init_net, &ecm_conntrack_notifier);
+ #else
+-	nf_conntrack_unregister_notifier(&init_net);
++	nf_conntrack_unregister_event_observer(&init_net, &ecm_conntrack_notifier);
+ #endif
+ 
+ init_cleanup_1:
+@@ -577,7 +581,7 @@ void ecm_conntrack_notifier_exit(void)
+ #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
+ 	nf_conntrack_unregister_notifier(&init_net, &ecm_conntrack_notifier);
+ #else
+-	nf_conntrack_unregister_notifier(&init_net);
++	nf_conntrack_unregister_event_observer(&init_net, &ecm_conntrack_notifier);
+ #endif
+ #endif
+ 	/*

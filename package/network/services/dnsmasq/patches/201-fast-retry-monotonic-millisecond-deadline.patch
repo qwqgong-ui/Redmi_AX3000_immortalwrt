@@ -1,0 +1,105 @@
+Subject: [PATCH] dnsmasq: honor fast retry windows in monotonic milliseconds
+
+Keep the retry budget in milliseconds and measure it from the initial
+request. Whole-second timestamps can cut a 2000 ms budget short before
+the retry at 1500 ms. Clamp backoff and wake at the actual deadline.
+
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -814,6 +814,7 @@
+   int forwardall, flags;
+   time_t time;
+   u32 forward_timestamp;
++  u32 forward_start_timestamp;
+   int forward_delay;
+   struct blockdata *stash; /* saved query or saved reply, whilst we validate */
+   size_t stash_len;
+--- a/src/forward.c
++++ b/src/forward.c
+@@ -635,13 +635,14 @@
+       u32 millis = dnsmasq_milliseconds();
+       
+       for (f = daemon->frec_list; f; f = f->next)
+-	if (f->sentto && difftime(now, f->time) < daemon->fast_retry_timeout)
++	if (f->sentto && (u32)(millis - f->forward_start_timestamp) < (u32)daemon->fast_retry_timeout)
+ 	  {
+ #ifdef HAVE_DNSSEC
+ 	    if (f->blocking_query || (f->flags & FREC_GONE_TO_TCP))
+ 	      continue;
+ #endif
+ 	    /* t is milliseconds since last query sent. */ 
++	    int remaining = daemon->fast_retry_timeout - (u32)(millis - f->forward_start_timestamp);
+ 	    int to_run, t = (int)(millis - f->forward_timestamp);
+ 	    
+ 	    if (t < f->forward_delay)
+@@ -660,8 +661,14 @@
+ 		
+ 		forward_query(-1, NULL, NULL, 0, header, f->stash_len, 0, now, f, 0, 1);
+ 		
+-		to_run = f->forward_delay = 2 * f->forward_delay;
++		/* Clamp before doubling: a large configured timeout must not
++		   overflow the signed exponential-backoff delay. */
++		to_run = f->forward_delay = f->forward_delay > daemon->fast_retry_timeout / 2 ?
++		  daemon->fast_retry_timeout : 2 * f->forward_delay;
+ 	      }
++
++	    if (to_run > remaining)
++	      to_run = remaining;
+ 
+ 	    if (ret == -1 || ret > to_run)
+ 	      ret = to_run;
+@@ -3201,6 +3208,7 @@
+   if (target)
+     {
+       target->time = now;
++      target->forward_start_timestamp = dnsmasq_milliseconds();
+       target->forward_delay = daemon->fast_retry_time;
+ #ifdef HAVE_DNSSEC
+       target->uid = next_uid++;
+--- a/src/option.c
++++ b/src/option.c
+@@ -3550,7 +3550,7 @@
+       }
+ 
+     case LOPT_FAST_RETRY: /* --fast-dns-retry */
+-      daemon->fast_retry_timeout = TIMEOUT;
++      daemon->fast_retry_timeout = TIMEOUT * 1000;
+       
+       if (!arg)
+ 	daemon->fast_retry_time = DEFAULT_FAST_RETRY;
+@@ -3565,9 +3565,9 @@
+ 	  
+ 	  if (comma)
+ 	    {
+-	      if (!atoi_check(comma, &retry))
++	      if (!atoi_check(comma, &retry) || retry < 0)
+ 		ret_err(gen_err);
+-	      daemon->fast_retry_timeout = retry/1000;
++	      daemon->fast_retry_timeout = retry;
+ 	    }
+ 	}
+       break;
+@@ -6116,7 +6116,7 @@
+   /* Default fast retry on when doing DNSSEC */
+   if (option_bool(OPT_DNSSEC_VALID) && daemon->fast_retry_time == 0)
+     {
+-      daemon->fast_retry_timeout = TIMEOUT;
++      daemon->fast_retry_timeout = TIMEOUT * 1000;
+       daemon->fast_retry_time = DEFAULT_FAST_RETRY;
+     }
+ #endif
+--- a/src/util.c
++++ b/src/util.c
+@@ -486,6 +486,12 @@
+ 
+ u32 dnsmasq_milliseconds(void)
+ {
++#ifdef CLOCK_MONOTONIC
++  struct timespec ts;
++
++  if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
++    return (u32)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++#endif
+   struct timeval tv;
+ 
+   gettimeofday(&tv, NULL);

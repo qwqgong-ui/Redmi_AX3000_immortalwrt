@@ -331,6 +331,8 @@ define KernelPackage/ipt-ipopt
   FILES:=$(foreach mod,$(IPT_IPOPT-m),$(LINUX_DIR)/net/$(mod).ko)
   AUTOLOAD:=$(call AutoProbe,$(notdir $(IPT_IPOPT-m)))
   $(call AddDepends/ipt)
+  # NSS DSCP remarking adds conntrack symbols to xt_DSCP.
+  DEPENDS+=+PACKAGE_kmod-qca-nss-drv-igs:kmod-nf-conntrack
 endef
 
 define KernelPackage/ipt-ipopt/description

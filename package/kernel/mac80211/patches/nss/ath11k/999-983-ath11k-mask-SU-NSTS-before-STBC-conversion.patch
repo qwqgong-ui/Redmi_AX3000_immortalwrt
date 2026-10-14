@@ -1,0 +1,22 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ath11k: exclude VHT SU Partial AID before STBC NSS conversion
+
+Bits 21:13 of the VHT SU SIG-A field carry Partial AID. Dividing the full
+12-bit field before masking moves an AID bit into the spatial stream count,
+turning a one-stream STBC sample into NSS 5. Keep the existing MU branch.
+
+--- a/drivers/net/wireless/ath/ath11k/hal_rx.c
++++ b/drivers/net/wireless/ath/ath11k/hal_rx.c
+@@ -1101,6 +1101,13 @@
+ 
+ 		ppdu_info->is_stbc = info0 & HAL_RX_VHT_SIG_A_INFO_INFO0_STBC;
+ 		nsts = FIELD_GET(HAL_RX_VHT_SIG_A_INFO_INFO0_NSTS, info0);
++		group_id = FIELD_GET(HAL_RX_VHT_SIG_A_INFO_INFO0_GROUP_ID,
++				     info0);
++		/* SU bits 21:13 contain Partial AID, not NSTS. Mask them before
++		 * STBC division so an AID bit cannot become a spatial stream bit.
++		 */
++		if (group_id == 0 || group_id == 63)
++			nsts &= VHT_SIG_SU_NSS_MASK;
+ 		if (ppdu_info->is_stbc && nsts > 0)
+ 			nsts = ((nsts + 1) >> 1) - 1;

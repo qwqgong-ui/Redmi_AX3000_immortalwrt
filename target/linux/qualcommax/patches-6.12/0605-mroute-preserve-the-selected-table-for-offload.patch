@@ -1,0 +1,141 @@
+diff --git a/include/net/ip.h b/include/net/ip.h
+index 39c6a40..c548b1d 100644
+--- a/include/net/ip.h
++++ b/include/net/ip.h
+@@ -59,6 +59,7 @@ struct inet_skb_parm {
+ #define IPSKB_L3SLAVE		BIT(7)
+ #define IPSKB_NOPOLICY		BIT(8)
+ #define IPSKB_MULTIPATH		BIT(9)
++#define IPSKB_MROUTE_OFFLOAD_DEFAULT BIT(10)
+ 
+ 	u16			frag_max_size;
+ };
+diff --git a/include/linux/ipv6.h b/include/linux/ipv6.h
+index 5aeeed2..731012f 100644
+--- a/include/linux/ipv6.h
++++ b/include/linux/ipv6.h
+@@ -156,6 +156,7 @@ struct inet6_skb_parm {
+ #define IP6SKB_SEG6	      256
+ #define IP6SKB_FAKEJUMBO      512
+ #define IP6SKB_MULTIPATH      1024
++#define IP6SKB_MROUTE_OFFLOAD_DEFAULT 2048
+ };
+ 
+ #if defined(CONFIG_NET_L3_MASTER_DEV)
+diff --git a/include/linux/mroute.h b/include/linux/mroute.h
+index fc1f6f1..3c5fa19 100644
+--- a/include/linux/mroute.h
++++ b/include/linux/mroute.h
+@@ -35,6 +35,9 @@ typedef void (*ipmr_mfc_event_offload_callback_t)(__be32 group, __be32 origin,
+ 					       u32 count, u32 ifindexes[], u8 op);
+ bool ipmr_register_mfc_event_offload_callback(ipmr_mfc_event_offload_callback_t cb);
+ void ipmr_unregister_mfc_event_offload_callback(void);
++struct sk_buff;
++/* Only native INET postrouting may read the preserved protocol cb. */
++bool ipmr_mfc_offload_eligible(struct net *net, const struct sk_buff *skb);
+ int ipmr_find_mfc_entry(struct net *net, __be32 origin, __be32 group,
+ 		       u32 capacity, u32 ifindexes[], u64 *cookie);
+ int ipmr_mfc_stats_update(struct net *net, __be32 origin, __be32 group,
+diff --git a/include/linux/mroute6.h b/include/linux/mroute6.h
+index bfc36a3..235ca85 100644
+--- a/include/linux/mroute6.h
++++ b/include/linux/mroute6.h
+@@ -43,6 +43,9 @@ typedef void (*ip6mr_mfc_event_offload_callback_t)(struct in6_addr *group,
+ 						u32 count, u32 ifindexes[], u8 op);
+ bool ip6mr_register_mfc_event_offload_callback(ip6mr_mfc_event_offload_callback_t cb);
+ void ip6mr_unregister_mfc_event_offload_callback(void);
++struct sk_buff;
++/* Only native INET6 postrouting may read the preserved protocol cb. */
++bool ip6mr_mfc_offload_eligible(struct net *net, const struct sk_buff *skb);
+ int ip6mr_find_mfc_entry(struct net *net, const struct in6_addr *origin,
+ 			const struct in6_addr *group, u32 capacity, u32 ifindexes[],
+ 			u64 *cookie);
+diff --git a/net/ipv4/ipmr.c b/net/ipv4/ipmr.c
+index f53971f..21087cd 100644
+--- a/net/ipv4/ipmr.c
++++ b/net/ipv4/ipmr.c
+@@ -2360,6 +2360,25 @@ static struct mr_table *ipmr_rt_fib_lookup(struct net *net, struct sk_buff *skb)
+ /* Multicast packets for forwarding arrive here
+  * Called with rcu_read_lock();
+  */
++/* Preserve the actual input selection across clone and FORWARD mark changes.
++ * This bit is protocol metadata, not a replacement for skb->mark or iif.
++ */
++static void ipmr_mfc_offload_mark(struct net *net, struct sk_buff *skb, u32 table)
++{
++	IPCB(skb)->flags &= ~IPSKB_MROUTE_OFFLOAD_DEFAULT;
++	if (net_eq(net, &init_net) && table == RT_TABLE_DEFAULT)
++		IPCB(skb)->flags |= IPSKB_MROUTE_OFFLOAD_DEFAULT;
++}
++
++bool ipmr_mfc_offload_eligible(struct net *net, const struct sk_buff *skb)
++{
++	u16 required = IPSKB_FORWARDED | IPSKB_MROUTE_OFFLOAD_DEFAULT;
++
++	return skb && net_eq(net, &init_net) &&
++		(IPCB(skb)->flags & required) == required;
++}
++EXPORT_SYMBOL_GPL(ipmr_mfc_offload_eligible);
++
+ int ip_mr_input(struct sk_buff *skb)
+ {
+ 	struct mfc_cache *cache;
+@@ -2368,6 +2387,7 @@ int ip_mr_input(struct sk_buff *skb)
+ 	struct mr_table *mrt;
+ 	struct net_device *dev;
+ 
++	IPCB(skb)->flags &= ~IPSKB_MROUTE_OFFLOAD_DEFAULT;
+ 	/* skb->dev passed in is the loX master dev for vrfs.
+ 	 * As there are no vifs associated with loopback devices,
+ 	 * get the proper interface that does have a vif associated with it.
+@@ -2392,6 +2412,7 @@ int ip_mr_input(struct sk_buff *skb)
+ 		kfree_skb(skb);
+ 		return PTR_ERR(mrt);
+ 	}
++	ipmr_mfc_offload_mark(net, skb, mrt->id);
+ 	if (!local) {
+ 		if (IPCB(skb)->opt.router_alert) {
+ 			if (ip_call_ra_chain(skb))
+diff --git a/net/ipv6/ip6mr.c b/net/ipv6/ip6mr.c
+index fe41eff..68e9426 100644
+--- a/net/ipv6/ip6mr.c
++++ b/net/ipv6/ip6mr.c
+@@ -2466,6 +2466,22 @@ dont_forward:
+  *	Multicast packets for forwarding arrive here
+  */
+ 
++static void ip6mr_mfc_offload_mark(struct net *net, struct sk_buff *skb, u32 table)
++{
++	IP6CB(skb)->flags &= ~IP6SKB_MROUTE_OFFLOAD_DEFAULT;
++	if (net_eq(net, &init_net) && table == RT6_TABLE_DFLT)
++		IP6CB(skb)->flags |= IP6SKB_MROUTE_OFFLOAD_DEFAULT;
++}
++
++bool ip6mr_mfc_offload_eligible(struct net *net, const struct sk_buff *skb)
++{
++	u16 required = IP6SKB_FORWARDED | IP6SKB_MROUTE_OFFLOAD_DEFAULT;
++
++	return skb && net_eq(net, &init_net) &&
++		(IP6CB(skb)->flags & required) == required;
++}
++EXPORT_SYMBOL_GPL(ip6mr_mfc_offload_eligible);
++
+ int ip6_mr_input(struct sk_buff *skb)
+ {
+ 	struct mfc6_cache *cache;
+@@ -2478,6 +2494,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 	int err;
+ 	struct net_device *dev;
+ 
++	IP6CB(skb)->flags &= ~IP6SKB_MROUTE_OFFLOAD_DEFAULT;
+ 	/* skb->dev passed in is the master dev for vrfs.
+ 	 * Get the proper interface that does have a vif associated with it.
+ 	 */
+@@ -2495,6 +2512,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 		kfree_skb(skb);
+ 		return err;
+ 	}
++	ip6mr_mfc_offload_mark(net, skb, mrt->id);
+ 
+ 	cache = ip6mr_cache_find(mrt,
+ 				 &ipv6_hdr(skb)->saddr, &ipv6_hdr(skb)->daddr);

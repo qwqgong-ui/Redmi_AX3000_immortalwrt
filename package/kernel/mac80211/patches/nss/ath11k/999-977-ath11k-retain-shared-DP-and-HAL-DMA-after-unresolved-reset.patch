@@ -1,0 +1,194 @@
+Subject: [PATCH] ath11k: retain shared DP and HAL metadata after unresolved RESET
+
+Stop the host timers/debugfs while retaining shared rings, descriptor
+banks and their ab/ar owners when NSS DMA ownership is unresolved.
+Do not clear HAL shared pointer pages or reuse the affected datapath.
+CE/QMI, lower deferred owners and re-probe quarantine remain to be closed.
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2883,8 +2883,21 @@
+ 
+ void ath11k_core_free(struct ath11k_base *ab)
+ {
++	if (READ_ONCE(ab->nss.dma_metadata_retained))
++		return;
++
+ 	destroy_workqueue(ab->workqueue_aux);
+ 	destroy_workqueue(ab->workqueue);
++
++	if (READ_ONCE(ab->nss.ownership_uncertain)) {
++		/* Keep the DMA device and all ab/ar metadata with the retained pages.
++		 * This is retention, not proof that any hardware DMA has stopped.
++		 */
++		get_device(ab->dev);
++		ab->nss.dma_metadata_retained = true;
++		ath11k_warn(ab, "NSS shared DMA ownership unresolved; retaining SOC metadata\n");
++		return;
++	}
+ 
+ 	kfree(ab);
+ }
+--- a/drivers/net/wireless/ath/ath11k/dp.c
++++ b/drivers/net/wireless/ath/ath11k/dp.c
+@@ -108,6 +108,8 @@
+ 
+ void ath11k_dp_srng_cleanup(struct ath11k_base *ab, struct dp_srng *ring)
+ {
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 	if (!ring->vaddr_unaligned)
+ 		return;
+ 
+@@ -373,6 +375,8 @@
+ 	int i;
+ 
+ 	ath11k_dp_stop_shadow_timers(ab);
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 	ath11k_dp_srng_cleanup(ab, &dp->wbm_desc_rel_ring);
+ 	ath11k_dp_srng_cleanup(ab, &dp->tcl_cmd_ring);
+ 	ath11k_dp_srng_cleanup(ab, &dp->tcl_status_ring);
+@@ -528,6 +532,9 @@
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	struct hal_wbm_idle_scatter_list *slist = dp->scatter_list;
+ 	int i;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 
+ 	for (i = 0; i < DP_IDLE_SCATTER_BUFS_MAX; i++) {
+ 		if (!slist[i].vaddr)
+@@ -620,6 +627,9 @@
+ {
+ 	int i;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	for (i = 0; i < DP_LINK_DESC_BANKS_MAX; i++) {
+ 		if (link_desc_banks[i].vaddr_unaligned) {
+ 			dma_free_coherent(ab->dev,
+@@ -819,6 +829,9 @@
+ 	int tot_work_done = 0;
+ 	bool nss_offload;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return 0;
++
+ 	nss_offload = ab->nss.enabled;
+ 
+ 	if (!nss_offload && ab->hw_params.ring_mask->tx[grp_id]) {
+@@ -919,8 +932,12 @@
+ 
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		ar = ab->pdevs[i].ar;
++		if (!ar)
++			continue;
++		ath11k_debugfs_unregister(ar);
++		if (READ_ONCE(ab->nss.ownership_uncertain))
++			continue;
+ 		ath11k_dp_rx_pdev_free(ab, i);
+-		ath11k_debugfs_unregister(ar);
+ 		ath11k_dp_rx_pdev_mon_detach(ar);
+ 	}
+ }
+@@ -1065,6 +1082,11 @@
+ 	struct ath11k_dp *dp = &ab->dp;
+ 	int i, j;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain)) {
++		ath11k_dp_stop_shadow_timers(ab);
++		return;
++	}
++
+ 	ath11k_dp_link_desc_cleanup(ab, dp->link_desc_banks,
+ 				    HAL_WBM_IDLE_LINK, &dp->wbm_idle_ring);
+ 
+@@ -1100,6 +1122,9 @@
+ 	u32 n_link_desc = 0;
+ 	int ret;
+ 	int i;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return -ESHUTDOWN;
+ 
+ 	dp->ab = ab;
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -757,6 +757,9 @@
+ 	struct dp_reo_cache_flush_elem *cmd_cache, *tmp_cache;
+ 	struct dp_reo_update_rx_queue_elem *cmd_queue, *tmp_queue;
+ 	struct dp_rx_tid *rx_tid;
++
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
+ 
+ 	spin_lock_bh(&dp->reo_cmd_update_queue_lock);
+ 	list_for_each_entry_safe(cmd_queue, tmp_queue,
+@@ -5379,6 +5382,9 @@
+ 	u16 tag;
+ 	struct hal_reo_status reo_status;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	srng = &ab->hal.srng_list[dp->reo_status_ring.ring_id];
+ 
+ 	memset(&reo_status, 0, sizeof(reo_status));
+@@ -5452,6 +5458,9 @@
+ {
+ 	struct ath11k *ar = ab->pdevs[mac_id].ar;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	ath11k_dp_rx_pdev_srng_free(ar);
+ 	ath11k_dp_rxdma_pdev_buf_free(ar);
+ }
+--- a/drivers/net/wireless/ath/ath11k/hal.c
++++ b/drivers/net/wireless/ath/ath11k/hal.c
+@@ -1426,6 +1426,9 @@
+ 	struct ath11k_hal *hal = &ab->hal;
+ 	int i;
+ 
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	for (i = 0; i < HAL_SRNG_RING_ID_MAX; i++)
+ 		ab->hal.srng_list[i].initialized = 0;
+ 
+@@ -1439,6 +1442,9 @@
+ 
+ void ath11k_hal_srng_clear(struct ath11k_base *ab)
+ {
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	/*
+ 	 * Preserve the shared pointer buffers, but clear the previous
+ 	 * firmware instance's hp/tp state before handing them back to FW.
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -11354,6 +11354,10 @@
+ 	struct ath11k_pdev *pdev;
+ 	int i;
+ 
++	/* ar owns PDEV ring metadata still referenced by firmware. */
++	if (READ_ONCE(ab->nss.ownership_uncertain))
++		return;
++
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		pdev = &ab->pdevs[i];
+ 		ar = pdev->ar;
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -280,6 +280,7 @@
+ 	struct list_head peers;
+ 	bool peers_initialized;
+ 	bool ownership_uncertain;
++	bool dma_metadata_retained;
+ 	bool quiescing;
+ 	bool registered;
+ 	bool init_submitted;

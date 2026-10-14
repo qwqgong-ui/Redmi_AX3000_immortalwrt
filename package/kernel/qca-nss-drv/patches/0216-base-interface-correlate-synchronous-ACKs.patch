@@ -1,0 +1,122 @@
+NSS IPQ5018 control-plane and lifetime fixes for Linux 6.12.
+
+--- a/nss_if.c
++++ b/nss_if.c
+@@ -26,13 +26,17 @@
+  * nss_if_pvt
+  *	NSS private structure to handle the completion of NSS -> HLOS messages.
+  */
+-static struct nss_if_pvt {
+-	struct semaphore sem;
+-	struct completion complete;
+-	int response;
++static DEFINE_MUTEX(nss_if_sync_mutex);
++static DEFINE_SPINLOCK(nss_if_sync_lock);
++static DECLARE_COMPLETION(nss_if_sync_complete);
++static struct {
++	nss_ptr_t sequence;
++	nss_ptr_t cookie;
++	u16 interface;
++	u16 type;
++	nss_tx_status_t response;
++	bool pending;
+ } nss_if;
+-
+-static bool nss_if_sem_init_done;
+ 
+ /*
+  * nss_if_callback
+@@ -40,15 +44,17 @@
+  */
+ static void nss_if_callback(void *app_data, struct nss_if_msg *nim)
+ {
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("nss_if Error response %d\n", nim->cm.response);
+-		nss_if.response = NSS_TX_FAILURE;
+-		complete(&nss_if.complete);
+-		return;
+-	}
+-
+-	nss_if.response = NSS_TX_SUCCESS;
+-	complete(&nss_if.complete);
++	nss_ptr_t cookie = (nss_ptr_t)app_data;
++
++	spin_lock_bh(&nss_if_sync_lock);
++	if (nss_if.pending && cookie == nss_if.cookie &&
++	    nim->cm.interface == nss_if.interface && nim->cm.type == nss_if.type) {
++		nss_if.response = nim->cm.response == NSS_CMN_RESPONSE_ACK ?
++			NSS_TX_SUCCESS : NSS_TX_FAILURE;
++		nss_if.pending = false;
++		complete(&nss_if_sync_complete);
++	}
++	spin_unlock_bh(&nss_if_sync_lock);
+ }
+ 
+ /*
+@@ -57,34 +63,42 @@
+  */
+ nss_tx_status_t nss_if_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_if_msg *nim)
+ {
++	struct nss_if_msg request = *nim;
+ 	nss_tx_status_t status;
+-	int ret = 0;
+-
+-	if (!nss_if_sem_init_done) {
+-		sema_init(&nss_if.sem, 1);
+-		init_completion(&nss_if.complete);
+-		nss_if_sem_init_done = 1;
+-	}
+-
+-	down(&nss_if.sem);
+-
+-	status = nss_if_tx_msg(nss_ctx, nim);
++	unsigned long waited;
++
++	mutex_lock(&nss_if_sync_mutex);
++	reinit_completion(&nss_if_sync_complete);
++	spin_lock_bh(&nss_if_sync_lock);
++	if (!++nss_if.sequence)
++		++nss_if.sequence;
++	nss_if.cookie = nss_if.sequence;
++	nss_if.interface = request.cm.interface;
++	nss_if.type = request.cm.type;
++	nss_if.response = NSS_TX_FAILURE;
++	nss_if.pending = true;
++	request.cm.cb = (nss_ptr_t)nss_if_callback;
++	request.cm.app_data = nss_if.cookie;
++	spin_unlock_bh(&nss_if_sync_lock);
++
++	status = nss_if_tx_msg(nss_ctx, &request);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_warning("%px: nss_if_msg failed\n", nss_ctx);
+-		up(&nss_if.sem);
+-		return status;
+-	}
+-
+-	ret = wait_for_completion_timeout(&nss_if.complete, msecs_to_jiffies(NSS_IF_TX_TIMEOUT));
+-
+-	if (!ret) {
++		goto retire;
++	}
++
++	waited = wait_for_completion_timeout(&nss_if_sync_complete,
++					     msecs_to_jiffies(NSS_IF_TX_TIMEOUT));
++	if (!waited)
+ 		nss_warning("%px: nss_if tx failed due to timeout\n", nss_ctx);
+-		nss_if.response = NSS_TX_FAILURE;
+-	}
+-
+-	status = nss_if.response;
+-	up(&nss_if.sem);
+-
++retire:
++	spin_lock_bh(&nss_if_sync_lock);
++	if (status == NSS_TX_SUCCESS)
++		status = nss_if.response;
++	nss_if.pending = false;
++	nss_if.cookie = 0;
++	spin_unlock_bh(&nss_if_sync_lock);
++	mutex_unlock(&nss_if_sync_mutex);
+ 	return status;
+ }
+ EXPORT_SYMBOL(nss_if_msg_sync);

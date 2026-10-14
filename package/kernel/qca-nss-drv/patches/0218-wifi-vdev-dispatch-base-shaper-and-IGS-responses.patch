@@ -1,0 +1,23 @@
+Wi-Fi VAPs also carry NSS_IF base messages. Dispatch their shaper/IGS replies
+through the base handler before Wi-Fi-only size checks and tracked controls.
+Retain the registration gate and the existing private Wi-Fi transaction path.
+
+--- a/nss_wifi_vdev.c
++++ b/nss_wifi_vdev.c
+@@ -32,6 +32,16 @@ static void nss_wifi_vdev_handler(struc
+ 
+ 	BUG_ON(((ncm->interface < NSS_DYNAMIC_IF_START) || (ncm->interface >= (NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES))));
+ 
++	/* Shaper and IGS use their own callback/cookie and base-message layout. */
++	if (ncm->type < NSS_IF_MAX_MSG_TYPES) {
++		if (!nss_ctx->subsys_dp_register[ncm->interface].ndev) {
++			nss_warning("%px: Base message before Wi-Fi VDEV registration", nss_ctx);
++			return;
++		}
++		nss_if_msg_handler(nss_ctx, ncm, app_data);
++		return;
++	}
++
+ 	/*
+ 	 * Is this a valid request/response packet?
+ 	 */

@@ -1,0 +1,326 @@
+Subject: [PATCH] ath11k: retain key-operation peers and preserve surviving key state
+
+Pin the host peer across firmware unmap and unlocked fragment/WMI waits.
+Revalidate that instance before PN updates and host key publication.
+Serialize the final put with DMA quarantine, including unmap-before-RESET.
+Never authorize from DISABLE_KEY or treat a positive NSS error as fallback;
+keep a surviving GTK selected and do not disable PTK PN checks on GTK delete.
+
+--- a/drivers/net/wireless/ath/ath11k/peer.h
++++ b/drivers/net/wireless/ath/ath11k/peer.h
+@@ -6,6 +6,8 @@
+ 
+ #ifndef ATH11K_PEER_H
+ #define ATH11K_PEER_H
++
++#include <linux/refcount.h>
+ 
+ struct ppdu_user_delayba {
+ 	u8 reserved0;
+@@ -60,6 +62,8 @@
+ 
+ struct ath11k_peer {
+ 	struct list_head list;
++	/* A key operation can outlive a firmware peer-unmap event. */
++	refcount_t refs;
+ 	struct ieee80211_sta *sta;
+ 	struct ieee80211_vif *vif;
+ 	int vdev_id;
+@@ -100,6 +104,8 @@
+ 
+ 
+ void ath11k_peer_unmap_event(struct ath11k *ar, u16 peer_id);
++void ath11k_peer_get(struct ath11k_peer *peer);
++void ath11k_peer_put(struct ath11k *ar, struct ath11k_peer *peer);
+ void ath11k_peer_unmap_v2_event(struct ath11k *ar, u16 peer_id, u8 *mac_addr,
+ 			        bool is_wds, u32 free_wds_count);
+ void ath11k_peer_map_event(struct ath11k *ar, u8 vdev_id, u16 peer_id,
+--- a/drivers/net/wireless/ath/ath11k/peer.c
++++ b/drivers/net/wireless/ath/ath11k/peer.c
+@@ -413,6 +413,36 @@
+ }
+ #endif
+ 
++void ath11k_peer_get(struct ath11k_peer *peer)
++{
++	refcount_inc(&peer->refs);
++}
++
++static void ath11k_peer_put_locked(struct ath11k *ar, struct ath11k_peer *peer)
++{
++	lockdep_assert_held(&ar->ab->base_lock);
++	if (!refcount_dec_and_test(&peer->refs))
++		return;
++	/* Unmap may drop the list owner before an unresolved RESET publishes
++	 * quarantine. The last key owner must obey that later publication too.
++	 */
++	if (READ_ONCE(ar->ab->nss.ownership_uncertain)) {
++		refcount_set(&peer->refs, 1);
++		list_add_tail(&peer->list, &ar->ab->nss.retained_host_peers);
++		return;
++	}
++	kfree(peer);
++}
++
++void ath11k_peer_put(struct ath11k *ar, struct ath11k_peer *peer)
++{
++	if (!peer)
++		return;
++	spin_lock_bh(&ar->ab->base_lock);
++	ath11k_peer_put_locked(ar, peer);
++	spin_unlock_bh(&ar->ab->base_lock);
++}
++
+ void ath11k_peer_release(struct ath11k *ar, struct ath11k_peer *peer)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -429,7 +459,7 @@
+ 		list_add_tail(&peer->list, &ab->nss.retained_host_peers);
+ 		return;
+ 	}
+-	kfree(peer);
++	ath11k_peer_put_locked(ar, peer);
+ }
+ 
+ void ath11k_peer_unmap_event(struct ath11k *ar, u16 peer_id)
+@@ -521,6 +551,7 @@
+ 		if (!peer)
+ 			goto exit;
+ 
++		refcount_set(&peer->refs, 1);
+ 		peer->vdev_id = vdev_id;
+ 		peer->peer_id = peer_id;
+ 		peer->ast_hash = ast_hash;
+@@ -564,6 +595,7 @@
+ 			goto exit;
+ 		}
+ 
++		refcount_set(&peer->refs, 1);
+ 		peer->vdev_id = vdev_id;
+ 		peer->peer_id = peer_id;
+ 		peer->ast_hash = ast_hash;
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.h
+@@ -98,7 +98,8 @@
+ int ath11k_dp_peer_rx_pn_replay_config(struct ath11k_vif *arvif,
+ 				       const u8 *peer_addr,
+ 				       enum set_key_cmd key_cmd,
+-				       struct ieee80211_key_conf *key);
++				       struct ieee80211_key_conf *key,
++				       struct ath11k_peer *key_peer);
+ void ath11k_peer_frags_flush(struct ath11k *ar, struct ath11k_peer *peer);
+ void ath11k_peer_rx_tid_cleanup(struct ath11k *ar, struct ath11k_peer *peer);
+ void ath11k_peer_rx_tid_delete(struct ath11k *ar,
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -1372,7 +1372,8 @@
+ int ath11k_dp_peer_rx_pn_replay_config(struct ath11k_vif *arvif,
+ 				       const u8 *peer_addr,
+ 				       enum set_key_cmd key_cmd,
+-				       struct ieee80211_key_conf *key)
++				       struct ieee80211_key_conf *key,
++				       struct ath11k_peer *key_peer)
+ {
+ 	struct ath11k *ar = arvif->ar;
+ 	struct ath11k_base *ab = ar->ab;
+@@ -1414,7 +1415,7 @@
+ 	spin_lock_bh(&ab->base_lock);
+ 
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
+-	if (!peer) {
++	if (!peer || peer != key_peer) {
+ 		ath11k_warn(ab, "failed to find the peer to configure pn replay detection\n");
+ 		spin_unlock_bh(&ab->base_lock);
+ 		return -ENOENT;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4467,6 +4467,36 @@
+ 	return 0;
+ }
+ 
++static void ath11k_mac_peer_key_remove(struct ath11k_peer *peer,
++				       struct ieee80211_key_conf *key)
++{
++	struct ieee80211_key_conf *remaining;
++	int i;
++
++	if (peer->keys[key->keyidx] != key)
++		return;
++	peer->keys[key->keyidx] = NULL;
++	if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
++		if (peer->ucast_keyidx == key->keyidx) {
++			peer->ucast_keyidx = 0;
++			peer->sec_type = HAL_ENCRYPT_TYPE_OPEN;
++		}
++		return;
++	}
++	if (peer->mcast_keyidx != key->keyidx)
++		return;
++	peer->mcast_keyidx = 0;
++	peer->sec_type_grp = HAL_ENCRYPT_TYPE_OPEN;
++	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++		remaining = peer->keys[i];
++		if (!remaining || (remaining->flags & IEEE80211_KEY_FLAG_PAIRWISE))
++			continue;
++		peer->mcast_keyidx = i;
++		peer->sec_type_grp = ath11k_dp_tx_get_encrypt_type(remaining->cipher);
++		break;
++	}
++}
++
+ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
+ 				 struct ieee80211_key_conf *key)
+@@ -4475,8 +4505,10 @@
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_vif *arvif, *ap_vlan_arvif = NULL;
+ 	struct ath11k_peer *peer;
++	struct ath11k_peer *key_peer = NULL;
+ 	struct ath11k_sta *arsta = NULL;
+ 	bool is_ap_with_no_sta;
++	bool change_pn = false;
+ 	const u8 *peer_addr;
+ 	int ret = 0;
+ 	u32 flags = 0;
+@@ -4533,17 +4565,31 @@
+ 		goto exit;
+ 	}
+ 
+-	/* the peer should not disappear in mid-way (unless FW goes awry) since
+-	 * we already hold conf_mutex. we just make sure its there now.
++	/* Firmware peer-unmap is not serialized by conf_mutex. Keep this
++	 * instance alive through fragment timer drains and all unlocked waits.
+ 	 */
+ 	spin_lock_bh(&ab->base_lock);
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
++	if (peer) {
++		/* A late removal of an old GTK must not clear its replacement. */
++		if (cmd == DISABLE_KEY && peer->keys[key->keyidx] != key) {
++			spin_unlock_bh(&ab->base_lock);
++			goto exit;
++		}
++		ath11k_peer_get(peer);
++		key_peer = peer;
++		change_pn = (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
++			(cmd == SET_KEY || peer->ucast_keyidx == key->keyidx);
++	}
+ 
+ 	/* flush the fragments cache during key (re)install to
+ 	 * ensure all frags in the new frag list belong to the same key.
+ 	 */
+ 	if (peer && sta && cmd == SET_KEY)
+ 		ath11k_peer_frags_flush(ar, peer);
++	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
++	if (peer != key_peer)
++		peer = NULL;
+ 	spin_unlock_bh(&ab->base_lock);
+ 
+ 	if (!peer) {
+@@ -4607,7 +4653,9 @@
+ 			goto exit;
+ 		}
+ 
+-		ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
++		ret = change_pn ?
++			ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key,
++							 key_peer) : 0;
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to offload PN replay detection %d\n",
+ 				    ret);
+@@ -4688,24 +4736,32 @@
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
+-
+-	/* TODO: Check if vdev specific security cfg is mandatory */
+-	ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_SECURITY_TYPE_CMD, key->cipher);
+-	if (ret) {
+-		ath11k_warn(ab, "failure to set vdev security type in nss");
++	if (!peer || peer != key_peer) {
++		ret = cmd == SET_KEY ? -ENOENT : 0;
+ 		goto unlock;
+ 	}
+ 
+-	ret = ath11k_nss_set_peer_sec_type(ar, peer, key);
+-	if (ret) {
+-		ath11k_warn(ab, "failure to set peer security type in nss");
+-		goto unlock;
+-	}
+-
+-	ret = ath11k_nss_set_peer_authorize(ar, peer->peer_id);
+-	if (ret) {
+-		ath11k_warn(ab, "failure to authorize peer in nss");
+-		goto unlock;
++	/* DISABLE_KEY must not reinstall the cipher or authorize the peer.
++	 * GTK removal may deliberately retain the firmware key during AP rekey.
++	 */
++	if (cmd == SET_KEY) {
++		ret = ath11k_nss_vdev_set_cmd(arvif, ATH11K_NSS_WIFI_VDEV_SECURITY_TYPE_CMD, key->cipher);
++		if (ret) {
++			ath11k_warn(ab, "failure to set vdev security type in nss");
++			goto unlock;
++		}
++
++		ret = ath11k_nss_set_peer_sec_type(ar, peer, key);
++		if (ret) {
++			ath11k_warn(ab, "failure to set peer security type in nss");
++			goto unlock;
++		}
++
++		ret = ath11k_nss_set_peer_authorize(ar, peer->peer_id);
++		if (ret) {
++			ath11k_warn(ab, "failure to authorize peer in nss");
++			goto unlock;
++		}
+ 	}
+ 
+ 	spin_unlock_bh(&ar->ab->base_lock);
+@@ -4729,6 +4785,11 @@
+ 	}
+ 
+ 	spin_lock_bh(&ar->ab->base_lock);
++	peer = ath11k_peer_find(ar, arvif->vdev_id, peer_addr);
++	if (!peer || peer != key_peer) {
++		ret = cmd == SET_KEY ? -ENOENT : 0;
++		goto unlock;
++	}
+ 	if (peer && cmd == SET_KEY) {
+ 		peer->keys[key->keyidx] = key;
+ 		if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
+@@ -4742,19 +4803,17 @@
+ 		if (key->vlan_id)
+ 			arvif->vlan_keyid_map[key->vlan_id] = key->hw_key_idx;
+ 	} else if (peer && cmd == DISABLE_KEY) {
+-		peer->keys[key->keyidx] = NULL;
+-		if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+-			peer->ucast_keyidx = 0;
+-		else
+-			peer->mcast_keyidx = 0;
+-		if (key->vlan_id)
++		ath11k_mac_peer_key_remove(peer, key);
++		if (key->vlan_id &&
++		    arvif->vlan_keyid_map[key->vlan_id] == key->hw_key_idx)
+ 			arvif->vlan_keyid_map[key->vlan_id] = 0;
+ 	} else if (!peer) {
+ 		/* impossible unless FW goes crazy */
+ 		ath11k_warn(ab, "peer %pM disappeared!\n", peer_addr);
+ 	}
+ 
+-	if (arsta) {
++	/* Removing a GTK must not disable the surviving PTK's replay checks. */
++	if (arsta && change_pn) {
+ 
+ 		switch (key->cipher) {
+ 		case WLAN_CIPHER_SUITE_TKIP:
+@@ -4775,7 +4834,11 @@
+ unlock:
+ 	spin_unlock_bh(&ab->base_lock);
+ exit:
++	ath11k_peer_put(ar, key_peer);
+ 	mutex_unlock(&ar->conf_mutex);
++	/* Positive NSS transport statuses are errors, not software-crypto fallback. */
++	if (ret > 0)
++		ret = -EIO;
+ 	return ret;
+ }
+ 

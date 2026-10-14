@@ -1,0 +1,38 @@
+NSS IPQ5018 control-plane and lifetime fixes for Linux 6.12.
+
+--- a/nss_qdisc/nss_qdisc.c
++++ b/nss_qdisc/nss_qdisc.c
+@@ -359,6 +359,9 @@
+ 	struct nss_qdisc *nq;
+ 	struct nss_qdisc_bridge_update br_update;
+ 	int i;
++	bool attach_failed = false;
++
++	ASSERT_RTNL();
+ 
+ 	if ((br_qdisc->parent != TC_H_ROOT) && (br_qdisc->parent != TC_H_UNSPEC)) {
+ 		nss_qdisc_error("Qdisc not root qdisc for the bridge interface: "
+@@ -419,6 +422,10 @@
+ 
+ 		nss_qdisc_info("Will be linking/unlinking %s to/from bridge %s\n",
+ 						dev->name, br_dev->name);
++		if (br_update.port_list_count == ARRAY_SIZE(br_update.port_list)) {
++			nss_qdisc_error("Bridge shaper port list is full\n");
++			return -E2BIG;
++		}
+ 		br_update.port_list[br_update.port_list_count++] = nss_if_num;
+ nextdev:
+ 		dev = next_net_device(dev);
+@@ -444,10 +451,11 @@
+ 				"to interface if_num: %d\n", nq->shaper_id,
+ 				br_update.port_list[i]);
+ 			br_update.unassign_count = i;
++			attach_failed = true;
+ 			break;
+ 		}
+ 		nss_qdisc_info("Unassign count %d\n", br_update.unassign_count);
+-		if (br_update.unassign_count == 0) {
++		if (!attach_failed) {
+ 			return 0;
+ 		}
+ 

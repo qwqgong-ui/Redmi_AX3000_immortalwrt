@@ -1,0 +1,343 @@
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -1081,6 +1081,109 @@
+ 	if (ret < 0)
+ 		kfree(entry);
+ 	return ret > 0 ? 0 : ret;
++}
++
++static void ath11k_dp_reo_aging_read_locked(struct ath11k_base *ab, u32 raw[4])
++{
++	lockdep_assert_held(&ab->base_lock);
++	lockdep_assert_held(&ab->dp.reo_cmd_lock);
++	raw[0] = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_REO_REG +
++				 ab->hw_params.regs->hal_reo1_aging_thresh_ix_0);
++	raw[1] = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_REO_REG +
++				 ab->hw_params.regs->hal_reo1_aging_thresh_ix_1);
++	raw[2] = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_REO_REG +
++				 ab->hw_params.regs->hal_reo1_aging_thresh_ix_2);
++	raw[3] = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_REO_REG +
++				 ab->hw_params.regs->hal_reo1_aging_thresh_ix_3);
++}
++
++int ath11k_dp_reo_aging_read(struct ath11k *ar, u64 *epoch, u32 raw[4])
++{
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_dp *dp = &ab->dp;
++	int ret = 0;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	/* This diagnostic has no low-power entry/exit contract. */
++	if (IS_ENABLED(CONFIG_SUSPEND) || ab->hw_params.supports_suspend)
++		return -EOPNOTSUPP;
++	if (ar->state != ATH11K_STATE_ON)
++		return -ENETDOWN;
++	spin_lock_bh(&ab->base_lock);
++	spin_lock_bh(&dp->reo_cmd_lock);
++	/* The command close path holds this lock before disabling HIF/IRQs.
++	 * This is the existing REO MMIO admission gate, not a DMA halt fence.
++	 */
++	if (!dp->reo_cmd_accepting ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags) ||
++	    READ_ONCE(ab->nss.ownership_uncertain)) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	*epoch = dp->reo_cmd_epoch;
++	ath11k_dp_reo_aging_read_locked(ab, raw);
++unlock:
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	spin_unlock_bh(&ab->base_lock);
++	return ret;
++}
++
++int ath11k_dp_reo_aging_replace(struct ath11k *ar, u64 epoch,
++			      const u32 expected[4], const u32 desired[4])
++{
++	struct ath11k_base *ab = ar->ab;
++	struct ath11k_dp *dp = &ab->dp;
++	u32 offsets[4];
++	u32 observed[4];
++	int i, ret = 0;
++
++	lockdep_assert_held(&ar->conf_mutex);
++	if (IS_ENABLED(CONFIG_SUSPEND) || ab->hw_params.supports_suspend)
++		return -EOPNOTSUPP;
++	/* A bounded experiment around the driver's 40000 default; do not
++	 * accept zero, disable aging, or persist a different boot default.
++	 */
++	for (i = 0; i < 4; i++)
++		if (desired[i] < HAL_DEFAULT_REO_TIMEOUT_USEC || desired[i] > 200000)
++			return -EINVAL;
++	if (ar->state != ATH11K_STATE_ON)
++		return -ENETDOWN;
++	spin_lock_bh(&ab->base_lock);
++	spin_lock_bh(&dp->reo_cmd_lock);
++	if (!dp->reo_cmd_accepting || epoch != dp->reo_cmd_epoch ||
++	    test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags) ||
++	    READ_ONCE(ab->nss.ownership_uncertain)) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	ath11k_dp_reo_aging_read_locked(ab, observed);
++	if (memcmp(observed, expected, sizeof(observed))) {
++		ret = -EAGAIN;
++		goto unlock;
++	}
++	/* Global per-SOC AC thresholds, not a per-peer change. Four writes
++	 * would not be an atomic hardware transaction; leave unchanged ACs
++	 * untouched and report any readback mismatch instead of success.
++	 */
++	offsets[0] = ab->hw_params.regs->hal_reo1_aging_thresh_ix_0;
++	offsets[1] = ab->hw_params.regs->hal_reo1_aging_thresh_ix_1;
++	offsets[2] = ab->hw_params.regs->hal_reo1_aging_thresh_ix_2;
++	offsets[3] = ab->hw_params.regs->hal_reo1_aging_thresh_ix_3;
++	for (i = 0; i < 4; i++)
++		if (observed[i] != desired[i])
++			ath11k_hif_write32(ab, HAL_SEQ_WCSS_UMAC_REO_REG + offsets[i],
++					   desired[i]);
++	ath11k_dp_reo_aging_read_locked(ab, observed);
++	if (memcmp(observed, desired, sizeof(observed)))
++		ret = -EIO;
++unlock:
++	spin_unlock_bh(&dp->reo_cmd_lock);
++	spin_unlock_bh(&ab->base_lock);
++	return ret;
+ }
+ 
+ static int
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.h
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.h
+@@ -221,6 +221,9 @@
+ 		 struct ath11k_sta *arsta, struct sk_buff *skb);
+ void ath11k_dp_tx_completion_handler(struct ath11k_base *ab, int ring_id);
+ int ath11k_dp_tx_reo_query(struct ath11k_base *ab, struct ath11k_reo_query *query);
++int ath11k_dp_reo_aging_read(struct ath11k *ar, u64 *epoch, u32 raw[4]);
++int ath11k_dp_reo_aging_replace(struct ath11k *ar, u64 epoch,
++			      const u32 expected[4], const u32 desired[4]);
+ int ath11k_dp_tx_send_reo_cmd(struct ath11k_base *ab, struct dp_rx_tid *rx_tid,
+ 			      enum hal_reo_cmd_type type,
+ 			      struct ath11k_hal_reo_cmd *cmd,
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -1993,6 +1993,82 @@
+ 	.llseek = default_llseek,
+ };
+ 
++static ssize_t ath11k_debugfs_reo_aging_read(struct file *file,
++					  char __user *user_buf,
++					  size_t count, loff_t *ppos)
++{
++	struct ath11k *ar = file->private_data;
++	u32 raw[4];
++	u64 epoch;
++	char buf[128];
++	int ret, len;
++
++	mutex_lock(&ar->conf_mutex);
++	ret = ath11k_dp_reo_aging_read(ar, &epoch, raw);
++	mutex_unlock(&ar->conf_mutex);
++	if (ret)
++		return ret;
++	len = scnprintf(buf, sizeof(buf), "epoch: %llu\nthresholds_raw: %u %u %u %u\n",
++			(unsigned long long)epoch, raw[0], raw[1], raw[2], raw[3]);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static ssize_t ath11k_debugfs_reo_aging_write(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	struct ath11k *ar = file->private_data;
++	char *buf, *cursor, *token;
++	u32 raw[8];
++	u64 epoch;
++	int n = 0, ret = -EINVAL;
++
++	/* epoch, four expected raw values, then four desired raw values.
++	 * One complete request per write; a stale epoch/value cannot restore
++	 * an earlier device instance's settings after recovery.
++	 */
++	if (!count || count > 192)
++		return -EINVAL;
++	buf = memdup_user_nul(user_buf, count);
++	if (IS_ERR(buf))
++		return PTR_ERR(buf);
++	if (memchr(buf, '\0', count)) {
++		ret = -EINVAL;
++		goto out;
++	}
++	cursor = buf;
++	while ((token = strsep(&cursor, " \t\r\n"))) {
++		if (!*token)
++			continue;
++		if (n == 9) {
++			ret = -EINVAL;
++			goto out;
++		}
++		ret = n ? kstrtou32(token, 0, &raw[n - 1]) : kstrtou64(token, 0, &epoch);
++		if (ret)
++			goto out;
++		n++;
++	}
++	if (n != 9) {
++		ret = -EINVAL;
++		goto out;
++	}
++	mutex_lock(&ar->conf_mutex);
++	ret = ath11k_dp_reo_aging_replace(ar, epoch, raw, raw + 4);
++	mutex_unlock(&ar->conf_mutex);
++out:
++	kfree(buf);
++	return ret ? ret : count;
++}
++
++static const struct file_operations fops_reo_aging = {
++	.read = ath11k_debugfs_reo_aging_read,
++	.write = ath11k_debugfs_reo_aging_write,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ int ath11k_debugfs_register(struct ath11k *ar)
+ {
+ 	struct ath11k_base *ab = ar->ab;
+@@ -2024,6 +2100,8 @@
+ 	debugfs_create_file("ext_rx_stats", 0644,
+ 			    ar->debug.debugfs_pdev, ar,
+ 			    &fops_extd_rx_stats);
++	debugfs_create_file("reo_aging_thresholds", 0600,
++			    ar->debug.debugfs_pdev, ar, &fops_reo_aging);
+ 	debugfs_create_file("pktlog_filter", 0644,
+ 			    ar->debug.debugfs_pdev, ar,
+ 			    &fops_pktlog_filter);
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -16,6 +16,7 @@
+ #include "debug.h"
+ #include "hif.h"
+ #include "qmi.h"
++#include "nss.h"
+ #include <linux/remoteproc.h>
+ #include "pcic.h"
+ #include <linux/soc/qcom/smem.h>
+@@ -1422,9 +1423,11 @@
+ 	}
+ 
+ 	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
+-	cancel_work_sync(&ab->restart_work);
+ 	if (ab->qmi.event_work_initialized)
+ 		cancel_work_sync(&ab->qmi.event_work);
++	cancel_work_sync(&ab->reset_work);
++	cancel_work_sync(&ab->dump_work);
++	cancel_work_sync(&ab->restart_work);
+ 	cancel_work_sync(&ab->wmi_ast_work);
+ }
+ 
+@@ -1452,14 +1455,16 @@
+ {
+ 	struct ath11k_base *ab = platform_get_drvdata(pdev);
+ 
++	ath11k_ahb_remove_prepare(ab);
+ 	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
++		ath11k_nss_reoq_stop(ab);
++		ath11k_dp_reo_cmd_close(&ab->dp);
+ 		ath11k_ahb_power_down(ab, false);
+ 		ath11k_debugfs_soc_destroy(ab);
+ 		ath11k_qmi_deinit_service(ab);
+ 		goto qmi_fail;
+ 	}
+ 
+-	ath11k_ahb_remove_prepare(ab);
+ 	ath11k_core_deinit(ab);
+ 
+ qmi_fail:
+@@ -1477,8 +1482,11 @@
+ 	 */
+ 	ath11k_ahb_remove_prepare(ab);
+ 
+-	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags)))
++	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
++		ath11k_nss_reoq_stop(ab);
++		ath11k_dp_reo_cmd_close(&ab->dp);
+ 		goto free_resources;
++	}
+ 
+ 	ath11k_core_deinit(ab);
+ 
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -18,6 +18,7 @@
+ #include "debug.h"
+ #include "pcic.h"
+ #include "qmi.h"
++#include "nss.h"
+ 
+ #define ATH11K_PCI_BAR_NUM		0
+ #define ATH11K_PCI_DMA_MASK		36
+@@ -1195,14 +1196,27 @@
+ 	return ret;
+ }
+ 
++static void ath11k_pci_remove_prepare(struct ath11k_base *ab)
++{
++	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
++	if (ab->qmi.event_work_initialized)
++		cancel_work_sync(&ab->qmi.event_work);
++	cancel_work_sync(&ab->wmi_ast_work);
++	cancel_work_sync(&ab->reset_work);
++	cancel_work_sync(&ab->dump_work);
++	cancel_work_sync(&ab->restart_work);
++}
++
+ static void ath11k_pci_remove(struct pci_dev *pdev)
+ {
+ 	struct ath11k_base *ab = pci_get_drvdata(pdev);
+ 	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 
+ 	ath11k_pci_set_irq_affinity_hint(ab_pci, NULL);
+-
++	ath11k_pci_remove_prepare(ab);
+ 	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
++		ath11k_nss_reoq_stop(ab);
++		ath11k_dp_reo_cmd_close(&ab->dp);
+ 		ath11k_pci_power_down(ab, false);
+ 		ath11k_debugfs_soc_destroy(ab);
+ 		ath11k_qmi_deinit_service(ab);
+@@ -1210,11 +1224,6 @@
+ 		goto qmi_fail;
+ 	}
+ 
+-	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
+-	cancel_work_sync(&ab->wmi_ast_work);
+-
+-	cancel_work_sync(&ab->reset_work);
+-	cancel_work_sync(&ab->dump_work);
+ 	ath11k_core_deinit(ab);
+ 
+ qmi_fail:
+@@ -1236,6 +1245,9 @@
+ 	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 
+ 	ath11k_pci_set_irq_affinity_hint(ab_pci, NULL);
++	ath11k_pci_remove_prepare(ab);
++	ath11k_nss_reoq_stop(ab);
++	ath11k_dp_reo_cmd_close(&ab->dp);
+ 	ath11k_pci_power_down(ab, false);
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -717,6 +717,7 @@
+ 		ath11k_nss_reoq_job_put(&job);
+ 	}
+ }
++EXPORT_SYMBOL_GPL(ath11k_nss_reoq_stop);
+ 
+ static int ath11k_nss_reoq_enqueue(struct ath11k_base *ab, u32 peer_id,
+ 				 u32 tid, bool injected)
