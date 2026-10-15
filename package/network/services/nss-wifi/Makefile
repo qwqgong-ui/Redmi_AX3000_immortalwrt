@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nss-wifi
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -27,6 +27,8 @@ endef
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/nss-relay-wait ./files/nss-relay-wait.c
+	$(TARGET_CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/nss-relay-neighbor ./files/nss-relay-neighbor.c
 endef
 
 define Package/nss-wifi/install
@@ -39,6 +41,9 @@ define Package/nss-wifi/install
 	$(INSTALL_BIN) ./files/nss-relay-watch $(1)/usr/sbin/nss-relay-watch
 	$(INSTALL_DATA) ./files/nss-relay-state.sh $(1)/usr/lib/nss-relay-state.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nss-relay-wait $(1)/usr/lib/nss-relay-wait
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nss-relay-neighbor $(1)/usr/lib/nss-relay-neighbor
+	$(INSTALL_BIN) ./files/nss-relay-neighbor-watch $(1)/usr/sbin/nss-relay-neighbor-watch
+	$(INSTALL_BIN) ./files/nss-neighbor.init $(1)/etc/init.d/nss-neighbor
 endef
 
 $(eval $(call BuildPackage,nss-wifi))

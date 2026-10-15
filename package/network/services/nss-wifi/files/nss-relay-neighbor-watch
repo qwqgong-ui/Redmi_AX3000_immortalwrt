@@ -1,0 +1,74 @@
+#!/bin/sh
+# Keep the upstream's learned STA neighbor fresh without changing routes or Wi-Fi state.
+umask 077
+. /usr/share/libubox/jshn.sh
+
+ng_dir=/var/run/nss-neighbor
+mkdir -p "$ng_dir" || exit 1
+chmod 700 "$ng_dir"
+trap 'rm -f "$ng_dir"/*.tmp."$$"; exit 0' TERM INT
+
+ng_status() {
+	local request
+	json_init
+	json_add_string command STATUS
+	request="$(json_dump)"
+	ubus -t 2 call "$1" control "$request" 2>/dev/null | jsonfilter -e '@.result'
+}
+
+ng_field() {
+	printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1
+}
+
+while :; do
+	if [ "$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null)" != 1 ] ||
+	   [ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" != 1 ]; then
+		sleep 5
+		continue
+	fi
+	ng_objects="$(ubus -t 2 list 'wpa_supplicant.*' 2>/dev/null)"
+	for ng_object in $ng_objects; do
+		ng_iface=${ng_object#wpa_supplicant.}
+		case "$ng_iface" in ''|*[!a-zA-Z0-9_.-]*) continue ;; esac
+		ng_state="$(ng_status "$ng_object")"
+		if [ "$(ng_field "$ng_state" mode)" != station ] ||
+		   [ "$(ng_field "$ng_state" wpa_state)" != COMPLETED ]; then
+			rm -f "$ng_dir/$ng_iface.state"
+			continue
+		fi
+		ng_freq="$(ng_field "$ng_state" freq)"
+		case "$ng_freq" in ''|*[!0-9]*) continue ;; esac
+		[ "$ng_freq" -ge 5000 ] && [ "$ng_freq" -lt 6000 ] || continue
+		ng_index="$(cat "/sys/class/net/$ng_iface/ifindex" 2>/dev/null)"
+		case "$ng_index" in ''|*[!0-9]*) continue ;; esac
+		ng_bssid="$(ng_field "$ng_state" bssid)"
+		case "$ng_bssid" in ''|*[!0-9a-fA-F:]*) continue ;; esac
+		ng_last=-1 ng_attempt=-30 ng_old_index=- ng_old_bssid=-
+		if [ -r "$ng_dir/$ng_iface.state" ]; then
+			read -r ng_last ng_attempt ng_old_index ng_old_bssid < "$ng_dir/$ng_iface.state" || ng_last=-1
+		fi
+		case "$ng_last" in -1) ;; ''|*[!0-9]*) ng_last=-1 ;; esac
+		case "$ng_attempt" in -30) ;; ''|*[!0-9]*) ng_attempt=-30 ;; esac
+		if [ "$ng_old_index" != "$ng_index" ] || [ "$ng_old_bssid" != "$ng_bssid" ]; then
+			ng_last=-1 ng_attempt=-30
+		fi
+		read -r ng_now ng_rest < /proc/uptime
+		ng_now=${ng_now%%.*}
+		if { [ "$ng_last" -lt 0 ] || [ "$((ng_now - ng_last))" -ge 300 ]; } &&
+		   [ "$((ng_now - ng_attempt))" -ge 30 ]; then
+			/usr/lib/nss-relay-neighbor "$ng_iface"
+			ng_result=$?
+			case "$ng_result" in
+				0)
+					[ "$ng_last" -ge 0 ] || logger -t nss-neighbor "if=$ng_iface connected relay neighbor refresh active"
+					ng_last=$ng_now ng_attempt=$ng_now
+					;;
+				2) ;; # No current on-link route/neighbor; wait for normal DHCP/ARP.
+				*) ng_attempt=$ng_now ;;
+			esac
+		fi
+		printf '%s %s %s %s\n' "$ng_last" "$ng_attempt" "$ng_index" "$ng_bssid" > "$ng_dir/$ng_iface.tmp.$$" &&
+			mv "$ng_dir/$ng_iface.tmp.$$" "$ng_dir/$ng_iface.state"
+	done
+	sleep 5
+done
