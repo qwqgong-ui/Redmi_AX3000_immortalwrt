@@ -1,0 +1,33 @@
+#!/bin/sh
+
+[ "$(cat /tmp/sysinfo/board_name)" = "redmi,ax3000" ] || exit 0
+
+. /lib/functions.sh
+
+changed=0
+cache_service_records() {
+	local section="$1" size records type
+
+	config_get size "$section" cachesize
+	[ "$size" = "0" ] && return
+	config_get records "$section" cache_rr
+
+	# Cache capacity alone does not enable SVCB/HTTPS caching. Repeated
+	# browser lookups otherwise depend on upstream replies and TCP fallback.
+	for type in 64 65; do
+		case " $records " in
+			*" ANY "*|*" 255 "*|*" $type "*) continue ;;
+		esac
+		case "$type:$records" in
+			64:*SVCB*|65:*HTTPS*) continue ;;
+		esac
+		uci -q add_list "dhcp.$section.cache_rr=$type" || return 1
+		changed=1
+	done
+}
+
+config_load dhcp
+config_foreach cache_service_records dnsmasq
+[ "$changed" = "0" ] || uci -q commit dhcp
+
+exit 0
