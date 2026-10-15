@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=qca-nss-clients
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 PKG_SOURCE_DATE:=2024-09-11
 PKG_SOURCE_VERSION:=51be82d
 QSDK_VERSION:=12.5
@@ -14,7 +14,7 @@ PKG_FLAGS:=nonshared
 PKG_CONFIG_DEPENDS:=CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr \
   CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc CONFIG_PACKAGE_kmod-qca-nss-drv-igs \
   CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe CONFIG_NSS_FIRMWARE_VERSION_11_4 \
-  CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE
+  CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE CONFIG_PACKAGE_kmod-qca-nss-drv-mirror
 
 # Qualcomm nss-clients 51be82d, with the non-PPE Linux 6.12 compatibility
 # changes from qosmio/nss-packages 0d970dbf0185e3f53709bd803e8a466598023c57.
@@ -81,6 +81,28 @@ define KernelPackage/qca-nss-drv-pppoe/description
   Publish PPPoE sessions and their lower interfaces to the NSS firmware.
 endef
 
+define KernelPackage/qca-nss-drv-mirror
+  SECTION:=kernel
+  CATEGORY:=Kernel modules
+  SUBMENU:=Network Devices
+  TITLE:=NSS packet mirror interface manager
+  DEPENDS:=@TARGET_qualcommax_ipq50xx +kmod-qca-nss-drv +@NSS_DRV_MIRROR_ENABLE
+  FILES:=$(PKG_BUILD_DIR)/mirror/qca-nss-mirror.ko
+  # Loaded on demand; loading the manager creates no mirror rules or devices.
+endef
+
+define KernelPackage/qca-nss-drv-mirror/description
+  Manage NSS mirror devices for packet copies delivered to the host.
+  Selecting this package enables the ECM PCC interface when ECM is built.
+  No classifier registrant or mirror policy is installed automatically.
+  Whole-port ingress PMC is unavailable without shared next-hop ownership.
+endef
+
+define Build/InstallDev
+	$(INSTALL_DIR) $(1)/usr/include/qca-nss-clients
+	$(CP) $(PKG_BUILD_DIR)/exports/nss_mirror_public.h $(1)/usr/include/qca-nss-clients/
+endef
+
 NSS_CLIENTS_MAKE_OPTS:=NSS_QDISC_PPE_ENABLE=n
 ifneq ($(CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr),)
 NSS_CLIENTS_MAKE_OPTS+=bridge-mgr=y
@@ -93,6 +115,9 @@ NSS_CLIENTS_MAKE_OPTS+=igs=y
 endif
 ifneq ($(CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe),)
 NSS_CLIENTS_MAKE_OPTS+=pppoe=y
+endif
+ifneq ($(CONFIG_PACKAGE_kmod-qca-nss-drv-mirror),)
+NSS_CLIENTS_MAKE_OPTS+=mirror=y
 endif
 NSS_CLIENTS_CFLAGS:=-I$(STAGING_DIR)/usr/include/qca-nss-drv
 ifneq ($(CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE),)
@@ -113,3 +138,4 @@ $(eval $(call KernelPackage,qca-nss-drv-bridge-mgr))
 $(eval $(call KernelPackage,qca-nss-drv-qdisc))
 $(eval $(call KernelPackage,qca-nss-drv-igs))
 $(eval $(call KernelPackage,qca-nss-drv-pppoe))
+$(eval $(call KernelPackage,qca-nss-drv-mirror))

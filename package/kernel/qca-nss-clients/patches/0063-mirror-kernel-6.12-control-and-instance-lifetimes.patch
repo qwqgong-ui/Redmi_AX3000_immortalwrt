@@ -1,0 +1,968 @@
+mirror: support kernel 6.12 and serialize owned instance lifetimes
+
+--- a/mirror/Makefile
++++ b/mirror/Makefile
+@@ -2,7 +2,7 @@
+ 
+ ccflags-y += $(NSS_CCFLAGS) -I$(obj)/../exports
+ ccflags-y += -DNSS_MIRROR_DEBUG_LEVEL=2
+-ccflags-y += -Wall -Werror
++ccflags-y += -Wall
+ 
+ obj-m += qca-nss-mirror.o
+ qca-nss-mirror-objs := \
+--- a/mirror/nss_mirror.c
++++ b/mirror/nss_mirror.c
+@@ -31,7 +31,13 @@
+ /*
+  * Mirror netdevice count for naming convension.
+  */
+-static u8 nss_mirror_netdev_count = 0;
++DEFINE_MUTEX(nss_mirror_control_mutex);
++static const struct net_device_ops nss_mirror_netdev_ops;
++
++bool nss_mirror_is_dev(const struct net_device *dev)
++{
++	return dev && dev->netdev_ops == &nss_mirror_netdev_ops;
++}
+ 
+ /*
+  * Mirror device statistics lock.
+@@ -235,7 +241,7 @@
+ 	uint64_t dropped = 0;
+ 
+ 	spin_lock_bh(&nss_mirror_stats_lock);
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		spin_unlock_bh(&nss_mirror_stats_lock);
+ 		nss_mirror_warn("Invalid mirror interface\n");
+ 		return;
+@@ -321,10 +327,10 @@
+ }
+ 
+ /*
+- * nss_mirror_disable()
++ * nss_mirror_disable_locked()
+  *	API to send disable message to mirror interface in NSS firmware.
+  */
+-int nss_mirror_disable(struct net_device *mirror_dev)
++int nss_mirror_disable_locked(struct net_device *mirror_dev)
+ {
+ 	struct nss_mirror_msg nmm = {0};
+ 	struct nss_ctx_instance *nss_ctx;
+@@ -332,7 +338,7 @@
+ 	nss_tx_status_t status;
+ 	int32_t if_num, ret;
+ 
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
+@@ -371,16 +377,17 @@
+ 		}
+ 		mirror_dev->flags &= ~IFF_UP;
+ 	}
++	((struct nss_mirror_instance_priv *)netdev_priv(mirror_dev))->firmware_enabled = false;
+ 
+ 	return 0;
+ }
+ EXPORT_SYMBOL(nss_mirror_disable);
+ 
+ /*
+- * nss_mirror_enable()
++ * nss_mirror_enable_locked()
+  *	API to send enable message to mirror interface in NSS firmware.
+  */
+-int nss_mirror_enable(struct net_device *mirror_dev)
++int nss_mirror_enable_locked(struct net_device *mirror_dev)
+ {
+ 	struct nss_mirror_msg nmm = {0};
+ 	struct nss_ctx_instance *nss_ctx;
+@@ -388,7 +395,7 @@
+ 	nss_tx_status_t status;
+ 	int32_t if_num, ret;
+ 
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
+@@ -427,16 +434,17 @@
+ 		}
+ 		mirror_dev->flags |= IFF_UP;
+ 	}
++	((struct nss_mirror_instance_priv *)netdev_priv(mirror_dev))->firmware_enabled = true;
+ 
+ 	return 0;
+ }
+ EXPORT_SYMBOL(nss_mirror_enable);
+ 
+ /*
+- * nss_mirror_set_nexthop()
++ * nss_mirror_set_nexthop_locked()
+  *	API to send set nexthop message to mirror interface in NSS firmware.
+  */
+-int nss_mirror_set_nexthop(struct net_device *mirror_dev, int32_t mirror_next_hop)
++int nss_mirror_set_nexthop_locked(struct net_device *mirror_dev, int32_t mirror_next_hop)
+ {
+ 	struct nss_mirror_msg nmm = {0};
+ 	struct nss_ctx_instance *nss_ctx;
+@@ -444,7 +452,7 @@
+ 	int32_t mirror_if_num;
+ 	nss_tx_status_t status;
+ 
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
+@@ -505,10 +513,10 @@
+ EXPORT_SYMBOL(nss_mirror_set_nexthop);
+ 
+ /*
+- * nss_mirror_reset_nexthop()
++ * nss_mirror_reset_nexthop_locked()
+  *	API to send reset nexthop message to mirror interface in NSS firmware.
+  */
+-int nss_mirror_reset_nexthop(struct net_device *mirror_dev)
++int nss_mirror_reset_nexthop_locked(struct net_device *mirror_dev)
+ {
+ 	struct nss_mirror_msg nmm = {0};
+ 	struct nss_ctx_instance *nss_ctx;
+@@ -516,7 +524,7 @@
+ 	nss_tx_status_t status;
+ 	int32_t if_num;
+ 
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
+@@ -559,10 +567,10 @@
+ EXPORT_SYMBOL(nss_mirror_reset_nexthop);
+ 
+ /*
+- * nss_mirror_configure()
++ * nss_mirror_configure_locked()
+  *	API to send configure message to mirror interface in NSS firmware.
+  */
+-int nss_mirror_configure(struct net_device *mirror_dev, enum nss_mirror_pkt_clone_point pkt_clone_point,
++int nss_mirror_configure_locked(struct net_device *mirror_dev, enum nss_mirror_pkt_clone_point pkt_clone_point,
+ 		 uint16_t pkt_clone_size, uint16_t pkt_clone_offset)
+ {
+ 	struct nss_mirror_msg nmm = {0};
+@@ -571,7 +579,7 @@
+ 	nss_tx_status_t status;
+ 	int32_t if_num;
+ 
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
+@@ -663,22 +671,28 @@
+  */
+ static int nss_mirror_destroy_if(struct net_device *mirror_dev)
+ {
+-	int32_t if_num;
+-
+-	/*
+-	 * Fetch the mirror netdevice.
+-	 */
+-	if ((if_num = nss_cmn_get_interface_number_by_dev_and_type(mirror_dev, NSS_DYNAMIC_INTERFACE_TYPE_MIRROR)) < 0) {
+-		nss_mirror_warn("No valid NSS FW interface for %s device\n", mirror_dev->name);
+-		return -1;
+-	}
+-
+-	nss_mirror_unregister_if(if_num);
++	struct nss_mirror_instance_priv *priv = netdev_priv(mirror_dev);
++	struct nss_ctx_instance *ctx = nss_mirror_get_context();
++	int32_t if_num = priv->mirror_instance_if_num;
++	if (if_num < 0)
++		return 0;
++	if (!ctx)
++		return -1;
++	if (priv->callbacks_registered) {
++		nss_mirror_unregister_if(if_num);
++		priv->callbacks_registered = false;
++	}
++	/* A reused foreign type is not ours to deallocate. */
++	if (nss_dynamic_interface_get_type(ctx, if_num) != NSS_DYNAMIC_INTERFACE_TYPE_MIRROR) {
++		priv->mirror_instance_if_num = -1;
++		return 0;
++	}
+ 	if (nss_dynamic_interface_dealloc_node(if_num, NSS_DYNAMIC_INTERFACE_TYPE_MIRROR)
+ 			!= NSS_TX_SUCCESS) {
+ 		nss_mirror_warn("Failed to dealloc mirror interface instance\n");
+ 		return -1;
+ 	}
++	priv->mirror_instance_if_num = -1;
+ 
+ 	return 0;
+ }
+@@ -689,7 +703,7 @@
+  */
+ static void nss_mirror_netdev_destroy(struct net_device *mirror_dev)
+ {
+-	if (!mirror_dev) {
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid mirror device pointer\n");
+ 		return;
+ 	}
+@@ -702,15 +716,21 @@
+ }
+ 
+ /*
+- * nss_mirror_destroy()
++ * nss_mirror_destroy_locked()
+  *	API to de-register and delete mirror interface.
+  */
+-int nss_mirror_destroy(struct net_device *mirror_dev)
+-{
+-	if (!mirror_dev) {
++int nss_mirror_destroy_locked(struct net_device *mirror_dev)
++{
++	struct nss_mirror_instance_priv *priv;
++	if (!nss_mirror_is_dev(mirror_dev)) {
+ 		nss_mirror_warn("Invalid input mirror interface\n");
+ 		return -1;
+ 	}
++	priv = netdev_priv(mirror_dev);
++	if (nss_mirror_deconfigure_mirror_locked(mirror_dev))
++		return -1;
++	if (priv->firmware_enabled && nss_mirror_disable_locked(mirror_dev))
++		return -1;
+ 
+ 	/*
+ 	 * Destroy mirror instance in NSS firmware.
+@@ -730,6 +750,7 @@
+ 	 * Destroy the mirror device.
+ 	 */
+ 	nss_mirror_netdev_destroy(mirror_dev);
++	module_put(THIS_MODULE);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(nss_mirror_destroy);
+@@ -750,6 +771,8 @@
+ 		nss_mirror_warn("Mirror interface creation failed - alloc node failed\n");
+ 		return -1;
+ 	}
++	mirror_priv = netdev_priv(dev);
++	mirror_priv->mirror_instance_if_num = if_num;
+ 
+ 	nss_ctx = nss_mirror_register_if(if_num,
+ 			data_callback,
+@@ -761,6 +784,8 @@
+ 		ret = nss_dynamic_interface_dealloc_node(if_num, NSS_DYNAMIC_INTERFACE_TYPE_MIRROR);
+ 		if (ret != NSS_TX_SUCCESS) {
+ 			nss_mirror_warn("%d interface dealloc failed\n", if_num);
++		} else {
++			mirror_priv->mirror_instance_if_num = -1;
+ 		}
+ 		return -1;
+ 	}
+@@ -772,109 +797,80 @@
+ 	 */
+ 	mirror_priv = netdev_priv(dev);
+ 	mirror_priv->mirror_instance_if_num = if_num;
++	mirror_priv->callbacks_registered = true;
+ 
+ 	return if_num;
+ }
+ 
+ /*
+- * nss_mirror_create()
++ * nss_mirror_create_locked()
+  *	API to create and register mirror interface.
+  */
+-struct net_device *nss_mirror_create(void)
++struct net_device *nss_mirror_create_locked(void)
+ {
+ 	struct net_device *dev;
+-	char *devname;
+-	int32_t mirror_if_num;
+-	int ret;
+-
+-	devname = vzalloc(strlen(NSS_MIRROR_NETDEV_NAME)+3+1);
+-	if (!devname) {
+-		nss_mirror_warn("memory allocation failed\n");
++	struct nss_mirror_instance_priv *priv;
++	int i;
++	/* Do not reuse a possibly retired firmware lease before cleanup completes. */
++	for (i = 0; i < NSS_MAX_MIRROR_DYNAMIC_INTERFACES; i++) {
++		if (!nss_mirror_arr[i])
++			continue;
++		priv = netdev_priv(nss_mirror_arr[i]);
++		if (priv->mirror_instance_if_num >= 0 && !priv->callbacks_registered)
++			return NULL;
++	}
++	if (!try_module_get(THIS_MODULE))
+ 		return NULL;
+-	}
+-
+-	snprintf(devname, strlen(NSS_MIRROR_NETDEV_NAME)+3, "%s%d", NSS_MIRROR_NETDEV_NAME, nss_mirror_netdev_count);
+-
+-	dev = alloc_netdev(sizeof(struct nss_mirror_instance_priv), devname, NET_NAME_UNKNOWN, nss_mirror_netdev_setup);
+-	if (!dev) {
+-		nss_mirror_warn("netdev allocation failed\n");
+-		vfree(devname);
+-		return NULL;
+-	}
+-
+-	mirror_if_num = nss_mirror_create_if(dev, nss_mirror_data_cb);
+-	if (mirror_if_num < 0) {
+-		nss_mirror_warn("mirror interface instance creation failed\n");
++	dev = alloc_netdev(sizeof(*priv), NSS_MIRROR_NETDEV_NAME "%d",
++			NET_NAME_ENUM, nss_mirror_netdev_setup);
++	if (!dev)
++		goto fail_ref;
++	priv = netdev_priv(dev);
++	priv->mirror_instance_if_num = -1;
++	if (register_netdev(dev)) {
+ 		free_netdev(dev);
+-		vfree(devname);
+-		return NULL;
+-	}
+-
+-	ret = register_netdev(dev);
+-	if (ret) {
+-		nss_mirror_warn("netdev registration failed\n");
+-		if (nss_mirror_destroy_if(dev)) {
+-			nss_mirror_warn("Error in destroying %s mirror device from"
+-					" NSS firmware\n", dev->name);
++		goto fail_ref;
++	}
++	if (nss_mirror_arr_add(dev)) {
++		nss_mirror_netdev_destroy(dev);
++		goto fail_ref;
++	}
++	if (nss_mirror_create_if(dev, nss_mirror_data_cb) < 0) {
++		if (priv->mirror_instance_if_num >= 0) {
++			pr_err("%s: firmware cleanup unconfirmed; destroy this retained device before creating another\n", dev->name);
++			return NULL;
+ 		}
+-		free_netdev(dev);
+-		vfree(devname);
+-		return NULL;
+-	}
+-
+-	/*
+-	 * Add the mirror netdev to mirror array.
+-	 */
+-	if (nss_mirror_arr_add(dev)) {
+-		nss_mirror_warn("Error in adding %s mirror device in mirror array\n", dev->name);
+-		if (nss_mirror_destroy_if(dev)) {
+-			nss_mirror_warn("Error in destroying %s mirror device from"
+-					" NSS firmware\n", dev->name);
+-		}
++		nss_mirror_arr_del(dev);
+ 		nss_mirror_netdev_destroy(dev);
+-		vfree(devname);
+-		return NULL;
+-	}
+-
+-	nss_mirror_netdev_count++;
++		goto fail_ref;
++	}
+ 	return dev;
++fail_ref:
++	module_put(THIS_MODULE);
++	return NULL;
+ }
+ EXPORT_SYMBOL(nss_mirror_create);
+ 
+ /*
+- * nss_mirror_deconfigure_mirror()
++ * nss_mirror_deconfigure_mirror_locked()
+  *	API to deconfigure mirror device.
+  */
+-int nss_mirror_deconfigure_mirror(struct net_device *mirror_dev)
+-{
+-	struct nss_mirror_instance_priv *mirror_priv = netdev_priv(mirror_dev);
+-
+-	if (mirror_priv->rule_config_mode == NSS_MIRROR_MODE_NONE) {
+-		return 0;
+-	}
+-
+-	if (mirror_priv->rule_config_mode == NSS_MIRROR_MODE_INGRESS_PMC) {
+-		if (nss_mirror_reset_nexthop(mirror_dev)) {
+-			nss_mirror_warn("Error in sending reset nexthop config to mirror interface: %d\n",
+-					mirror_priv->mirror_instance_if_num);
+-			return -1;
+-		}
+-	}
+-
+-	/*
+-	 * Reset the mirror mode.
+-	 */
+-	mirror_priv->rule_config_mode = NSS_MIRROR_MODE_NONE;
+-	return 0;
+-}
+-
+-/*
+- * nss_mirror_destroy_all()
++int nss_mirror_deconfigure_mirror_locked(struct net_device *mirror_dev)
++{
++	struct nss_mirror_instance_priv *priv;
++	if (!nss_mirror_is_dev(mirror_dev))
++		return -EINVAL;
++	priv = netdev_priv(mirror_dev);
++	return priv->rule_config_mode == NSS_MIRROR_MODE_NONE ? 0 : -EOPNOTSUPP;
++}
++
++/*
++ * nss_mirror_destroy_all_locked()
+  *	API to destroy all the configured mirror devices.
+  */
+-int nss_mirror_destroy_all(void)
+-{
+-	int i;
++int nss_mirror_destroy_all_locked(void)
++{
++	int i, error = 0;
+ 
+ 	for (i = 0; i < NSS_MAX_MIRROR_DYNAMIC_INTERFACES; i++) {
+ 		struct net_device *mirror_dev;
+@@ -891,15 +887,44 @@
+ 		/*
+ 		 * Deconfigure mirror interface.
+ 		 */
+-		if (nss_mirror_deconfigure_mirror(mirror_dev) < 0) {
++		if (nss_mirror_deconfigure_mirror_locked(mirror_dev) < 0) {
+ 			nss_mirror_warn("Error in deconfiguring mirror interface: %s\n", mirror_dev->name);
+-			return -1;
++			error = -1;
++			continue;
+ 		}
+ 
+-		if (nss_mirror_destroy(mirror_dev)) {
++		if (nss_mirror_destroy_locked(mirror_dev)) {
+ 			nss_mirror_warn("Error in sending delete config to mirror interface: %s\n", mirror_dev->name);
+-			return -1;
++			error = -1;
+ 		}
+ 	}
+-	return 0;
+-}
++	return error;
++}
++
++/* Public callers and sysctl transactions serialize against the same lifetime. */
++#define NSS_MIRROR_WRAP_INT(name, params, args) \
++int name params \
++{ \
++	int ret; \
++	mutex_lock(&nss_mirror_control_mutex); \
++	ret = name##_locked args; \
++	mutex_unlock(&nss_mirror_control_mutex); \
++	return ret; \
++}
++NSS_MIRROR_WRAP_INT(nss_mirror_disable, (struct net_device *dev), (dev))
++NSS_MIRROR_WRAP_INT(nss_mirror_enable, (struct net_device *dev), (dev))
++NSS_MIRROR_WRAP_INT(nss_mirror_set_nexthop, (struct net_device *dev, int32_t ifnum), (dev, ifnum))
++NSS_MIRROR_WRAP_INT(nss_mirror_reset_nexthop, (struct net_device *dev), (dev))
++NSS_MIRROR_WRAP_INT(nss_mirror_configure, (struct net_device *dev, enum nss_mirror_pkt_clone_point point, uint16_t size, uint16_t offset), (dev, point, size, offset))
++NSS_MIRROR_WRAP_INT(nss_mirror_destroy, (struct net_device *dev), (dev))
++NSS_MIRROR_WRAP_INT(nss_mirror_deconfigure_mirror, (struct net_device *dev), (dev))
++NSS_MIRROR_WRAP_INT(nss_mirror_destroy_all, (void), ())
++
++struct net_device *nss_mirror_create(void)
++{
++	struct net_device *dev;
++	mutex_lock(&nss_mirror_control_mutex);
++	dev = nss_mirror_create_locked();
++	mutex_unlock(&nss_mirror_control_mutex);
++	return dev;
++}
+--- a/mirror/nss_mirror_ctl.c
++++ b/mirror/nss_mirror_ctl.c
+@@ -18,6 +18,7 @@
+ 
+ #include <linux/sysctl.h>
+ #include <linux/string.h>
++#include <linux/slab.h>
+ 
+ #include "nss_mirror_public.h"
+ #include "nss_mirror.h"
+@@ -132,10 +133,13 @@
+ {
+ 	char dev_name[IFNAMSIZ] = {0};
+ 
+-	strlcpy(dev_name, name, IFNAMSIZ);
++	if (!name || !*name || strscpy(dev_name, name, sizeof(dev_name)) < 0)
++		return -EINVAL;
+ 	if (dev_name[strlen(dev_name) - 1] == '\n') {
+ 		dev_name[strlen(dev_name) - 1] = '\0';
+ 	}
++	if (!*dev_name)
++		return -EINVAL;
+ 	nss_mirror_info("Device name: %s\n", dev_name);
+ 	*dev = dev_get_by_name(&init_net, dev_name);
+ 	if (!*dev) {
+@@ -159,8 +163,7 @@
+ 		"echo disable mirrordev=<mirror dev name> > <REDIRECT PATH>\n"
+ 		"echo set_nexthop mirrordev=<mirror dev name> mirror_next_hop=n2h/eth_rx\n > <REDIRECT PATH>"
+ 		"echo reset_nexthop mirrordev=<mirror dev name> > <REDIRECT PATH>\n"
+-		"echo ingress_pmc_enable devname=<eth/ath dev name> mirrordev=<mirror dev name> > <REDIRECT PATH>\n"
+-		"echo ingress_pmc_disable devname=<eth/ath dev name> > <REDIRECT PATH>\n"
++		"Whole-port ingress PMC is unavailable; use PCC flow-copy rules.\n"
+ 		"echo display [mirrordev=<dev name> / all] > <REDIRECT PATH>\n"
+ 		"echo destroy mirrordev=<mirror dev name> > <REDIRECT PATH>\n"
+ 		"Where,\n"
+@@ -192,7 +195,7 @@
+ 		return -1;
+ 	}
+ 
+-	if (nss_mirror_reset_nexthop(mirror_dev)) {
++	if (nss_mirror_reset_nexthop_locked(mirror_dev)) {
+ 		nss_mirror_warn("Error in sending reset nexthop config to mirror interface: %s\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+ 		return -1;
+@@ -259,7 +262,7 @@
+ 		return -1;
+ 	}
+ 
+-	if (nss_mirror_set_nexthop(mirror_dev, nexthop_if_num)) {
++	if (nss_mirror_set_nexthop_locked(mirror_dev, nexthop_if_num)) {
+ 		nss_mirror_warn("Error in sending set nexthop config to mirror interface: %s\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+ 		return -1;
+@@ -293,7 +296,7 @@
+ 		return -1;
+ 	}
+ 
+-	if (nss_mirror_disable(mirror_dev)) {
++	if (nss_mirror_disable_locked(mirror_dev)) {
+ 		nss_mirror_warn("Error in sending disable config to mirror interface: %s\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+ 		return -1;
+@@ -327,7 +330,7 @@
+ 		return -1;
+ 	}
+ 
+-	if (nss_mirror_enable(mirror_dev)) {
++	if (nss_mirror_enable_locked(mirror_dev)) {
+ 		nss_mirror_warn("Error in sending enable config to mirror interface: %s\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+ 		return -1;
+@@ -357,7 +360,8 @@
+ 		return -1;
+ 	}
+ 
+-	strlcpy(dev_name, value, IFNAMSIZ);
++	if (!*value || strscpy(dev_name, value, sizeof(dev_name)) < 0)
++		return -EINVAL;
+ 	if (dev_name[strlen(dev_name) - 1] == '\n') {
+ 		dev_name[strlen(dev_name) - 1] = '\0';
+ 	}
+@@ -395,105 +399,8 @@
+  */
+ static int nss_mirror_ctl_parse_enable_ingress_pmc_cmd(char *buffer)
+ {
+-	char *param, *value;
+-	struct nss_ctx_instance *nss_ctx;
+-	struct net_device *dev, *mirror_dev = NULL;
+-	nss_tx_status_t status;
+-	int32_t if_num = -1, type = 0, mirror_if_num = -1;
+-	uint8_t param_num = NSS_MIRROR_ENABLE_INGRESS_PMC_NUM;
+-
+-	do {
+-		param = nss_mirror_ctl_read_value(&buffer, &value, "=");
+-		if (!param || !value) {
+-			return -1;
+-		}
+-
+-		if (!strcmp(param, "devname")) {
+-			if (nss_mirror_ctl_get_netdev_by_name(value, &dev) < 0) {
+-				nss_mirror_warn("Error in getting devname net device.\n");
+-				if (mirror_dev) {
+-					dev_put(mirror_dev);
+-				}
+-				return -1;
+-			}
+-
+-			if ((if_num = nss_cmn_get_interface_number_by_dev(dev)) < 0) {
+-				nss_mirror_warn("No valid NSS FW interface for %s device\n", dev->name);
+-				if (mirror_dev) {
+-					dev_put(mirror_dev);
+-				}
+-				dev_put(dev);
+-				return -1;
+-			}
+-			dev_put(dev);
+-		} else if (!strcmp(param, "mirrordev")) {
+-			if (nss_mirror_ctl_get_netdev_by_name(value, &mirror_dev) < 0) {
+-				nss_mirror_warn("Error in getting mirror net device.\n");
+-				return -1;
+-			}
+-
+-			/*
+-			 * Verify the mirror netdevice.
+-			 */
+-			if ((mirror_if_num = nss_cmn_get_interface_number_by_dev_and_type(mirror_dev, NSS_DYNAMIC_INTERFACE_TYPE_MIRROR)) < 0) {
+-				nss_mirror_warn("No valid NSS FW interface for %s device\n", mirror_dev->name);
+-				dev_put(mirror_dev);
+-				return -1;
+-			}
+-		} else {
+-			if (mirror_dev) {
+-				dev_put(mirror_dev);
+-			}
+-			nss_mirror_warn("Invalid param: %s in promiscuous enable cmd\n", value);
+-			return -1;
+-		}
+-	} while (--param_num);
+-
+-	if (!mirror_dev) {
+-		nss_mirror_warn("Mirror device is NULL\n");
+-		return -1;
+-	}
+-
+-	if ((if_num < 0) || (mirror_if_num < 0)) {
+-		nss_mirror_warn("Invalid interface number\n");
+-		dev_put(mirror_dev);
+-		return -1;
+-	}
+-
+-	/*
+-	 * Return if the mirror interface is in open state.
+-	 */
+-	if (mirror_dev->flags & IFF_UP) {
+-		nss_mirror_warn("%s mirror interface is in open state\n", mirror_dev->name);
+-		dev_put(mirror_dev);
+-		return -1;
+-	}
+-
+-	dev_put(mirror_dev);
+-
+-	nss_ctx = nss_mirror_get_context();
+-	if (!nss_ctx) {
+-		nss_mirror_warn("Invalid NSS context\n");
+-		return -1;
+-	}
+-
+-	type = nss_dynamic_interface_get_type(nss_ctx, if_num);
+-
+-	if (type == NSS_DYNAMIC_INTERFACE_TYPE_VAP) {
+-		status = nss_wifi_vdev_set_next_hop(nss_wifi_get_context(), if_num, mirror_if_num);
+-	} else if (if_num < NSS_MAX_PHYSICAL_INTERFACES) {
+-		status = nss_phys_if_set_nexthop(nss_ctx, if_num, mirror_if_num);
+-	} else {
+-		nss_mirror_warn("Invalid nexthop interface:%d type:%d\n", if_num, type);
+-		return -1;
+-	}
+-
+-	if (status != NSS_TX_SUCCESS) {
+-		nss_mirror_warn("Setting nexthop failed. if_num: %u, nexthop: %u\n", if_num, mirror_if_num);
+-		return -1;
+-	}
+-
+-	return 0;
++	nss_mirror_warn("Whole-port PMC lacks source next-hop ownership; use PCC flow copies\n");
++	return -EOPNOTSUPP;
+ }
+ 
+ /*
+@@ -502,58 +409,8 @@
+  */
+ static int nss_mirror_ctl_parse_disable_ingress_pmc_cmd(char *buffer)
+ {
+-	char *param, *value;
+-	struct nss_ctx_instance *nss_ctx;
+-	struct net_device *dev;
+-	nss_tx_status_t status;
+-	int32_t if_num, type = 0;
+-
+-	param = nss_mirror_ctl_read_value(&buffer, &value, "=");
+-	if (!param || !value) {
+-		return -1;
+-	}
+-
+-	if (strcmp(param, "devname")) {
+-		nss_mirror_warn("Invalid param: %s in promiscuous enable cmd\n", value);
+-		return -1;
+-	}
+-
+-	if (nss_mirror_ctl_get_netdev_by_name(value, &dev) < 0) {
+-		nss_mirror_warn("Error in getting devname net device.\n");
+-		return -1;
+-	}
+-
+-	if ((if_num = nss_cmn_get_interface_number_by_dev(dev)) < 0) {
+-		nss_mirror_warn("No valid NSS FW interface for %s device\n", dev->name);
+-		dev_put(dev);
+-		return -1;
+-	}
+-
+-	dev_put(dev);
+-
+-	nss_ctx = nss_mirror_get_context();
+-	if (!nss_ctx) {
+-		nss_mirror_warn("Invalid NSS context\n");
+-		return -1;
+-	}
+-
+-	type = nss_dynamic_interface_get_type(nss_ctx, if_num);
+-
+-	if (type == NSS_DYNAMIC_INTERFACE_TYPE_VAP) {
+-		status = nss_mirror_reset_if_nexthop(if_num);
+-	} else if (if_num < NSS_MAX_PHYSICAL_INTERFACES) {
+-		status = nss_phys_if_reset_nexthop(nss_ctx, if_num);
+-	} else {
+-		nss_mirror_warn("Reset nexthop failed for %d interface, type:%d\n", if_num, type);
+-		return -1;
+-	}
+-
+-	if (status != NSS_TX_SUCCESS) {
+-		nss_mirror_warn("Re-setting nexthop failed for if_num: %u\n", if_num);
+-		return -1;
+-	}
+-
+-	return 0;
++	nss_mirror_warn("Whole-port PMC lacks source next-hop ownership; use PCC flow copies\n");
++	return -EOPNOTSUPP;
+ }
+ 
+ /*
+@@ -583,7 +440,7 @@
+ 	/*
+ 	 * Deconfigure mirror interface.
+ 	 */
+-	if (nss_mirror_deconfigure_mirror(mirror_dev) < 0) {
++	if (nss_mirror_deconfigure_mirror_locked(mirror_dev) < 0) {
+ 		nss_mirror_warn("Error in deconfiguring mirror interface: %s\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+ 		return -1;
+@@ -591,9 +448,8 @@
+ 
+ 	dev_put(mirror_dev);
+ 
+-	if (nss_mirror_destroy(mirror_dev)) {
++	if (nss_mirror_destroy_locked(mirror_dev)) {
+ 		nss_mirror_warn("Error in sending delete config to mirror interface: %s\n", mirror_dev->name);
+-		dev_put(mirror_dev);
+ 		return -1;
+ 	}
+ 
+@@ -681,7 +537,7 @@
+ 	nss_mirror_info("Mirror size: %d, mirror point: %d, mirror offset: %d\n",
+ 			mirror_size, mirror_point, mirror_offset);
+ 
+-	if (nss_mirror_configure(mirror_dev, mirror_point,
++	if (nss_mirror_configure_locked(mirror_dev, mirror_point,
+ 			mirror_size, mirror_offset)) {
+ 		nss_mirror_warn("Error in sending config message to %s mirror interface\n", mirror_dev->name);
+ 		dev_put(mirror_dev);
+@@ -754,13 +610,15 @@
+  * nss_mirror_ctl_config_handler()
+  *	Mirror sysctl config handler.
+  */
+-static int nss_mirror_ctl_config_handler(struct ctl_table *ctl, int write,
+-		 void __user *buf, size_t *lenp, loff_t *ppos)
++static int nss_mirror_ctl_config_handler_locked(const struct ctl_table *ctl, int write,
++		 void *buf, size_t *lenp, loff_t *ppos)
+ {
+ 	char *buffer, *pfree;
+ 	char * nextarg;
+ 	int command, ret;
+ 	size_t count = *lenp;
++	if (write && (!count || count >= sizeof(nss_mirror_config_data)))
++		return -E2BIG;
+ 
+ 	/*
+ 	 * Find the string, return an error if not found
+@@ -770,7 +628,7 @@
+ 		return ret;
+ 	}
+ 
+-	buffer = vzalloc(count + 1);
++	buffer = kmemdup_nul(buf, count, GFP_KERNEL);
+ 	if (!buffer) {
+ 		nss_mirror_warn("%px: Dynamic allocation failed for input buffer\n", ctl);
+ 		return -ENOMEM;
+@@ -778,10 +636,6 @@
+ 
+ 	pfree = buffer;
+ 
+-	if (copy_from_user(buffer, buf, count)) {
+-		vfree(pfree);
+-		return -EFAULT;
+-	}
+ 
+ 	nextarg = nss_mirror_ctl_read_nextarg(&buffer);
+ 	if (!nextarg) {
+@@ -798,7 +652,7 @@
+ 	case NSS_MIRROR_CMD_CREATE:
+ 	{
+ 		struct net_device *mirror_dev;
+-		if (!(mirror_dev = nss_mirror_create())) {
++		if (!(mirror_dev = nss_mirror_create_locked())) {
+ 			nss_mirror_warn("%s Error in create cmd\n", __func__);
+ 			goto err;
+ 		}
+@@ -897,16 +751,24 @@
+ 		goto err;
+ 	}
+ 
+-	vfree(pfree);
++	kfree(pfree);
+ 	return ret;
+ err:
+-	vfree(pfree);
++	kfree(pfree);
+ 	return -EINVAL;
+ }
+ 
+-/*
+- * nss mirror sysctl table
+- */
++static int nss_mirror_ctl_config_handler(const struct ctl_table *ctl, int write,
++		void *buf, size_t *lenp, loff_t *ppos)
++{
++	int ret;
++	mutex_lock(&nss_mirror_control_mutex);
++	ret = nss_mirror_ctl_config_handler_locked(ctl, write, buf, lenp, ppos);
++	mutex_unlock(&nss_mirror_control_mutex);
++	return ret;
++}
++
++/* nss mirror sysctl table */
+ static struct ctl_table nss_mirror_table[] = {
+ 	{
+ 		.procname	= "config",
+@@ -915,43 +777,6 @@
+ 		.mode		= 0644,
+ 		.proc_handler	= &nss_mirror_ctl_config_handler,
+ 	},
+-	{ }
+-};
+-
+-/*
+- * nss mirror dir
+- */
+-static struct ctl_table nss_mirror_root_dir[] = {
+-	{
+-		.procname		= "mirror",
+-		.mode			= 0555,
+-		.child			= nss_mirror_table,
+-	},
+-	{ }
+-};
+-
+-/*
+- * nss mirror sysctl nss root dir
+- */
+-static struct ctl_table nss_mirror_nss_root_dir[] = {
+-	{
+-		.procname		= "nss",
+-		.mode			= 0555,
+-		.child			= nss_mirror_root_dir,
+-	},
+-	{ }
+-};
+-
+-/*
+- * nss mirror sysctl root dir
+- */
+-static struct ctl_table nss_mirror_root[] = {
+-	{
+-		.procname		= "dev",
+-		.mode			= 0555,
+-		.child			= nss_mirror_nss_root_dir,
+-	},
+-	{ }
+ };
+ 
+ /*
+@@ -960,7 +785,7 @@
+  */
+ int nss_mirror_ctl_register(void)
+ {
+-	nss_mirror_ctl_header = register_sysctl_table(nss_mirror_root);
++	nss_mirror_ctl_header = register_sysctl("dev/nss/mirror", nss_mirror_table);
+ 	if (!nss_mirror_ctl_header) {
+ 		nss_mirror_warn("Creating sysctl directory table header for mirror failed\n");
+ 		return -1;
+@@ -976,5 +801,6 @@
+ {
+ 	if (nss_mirror_ctl_header) {
+ 		unregister_sysctl_table(nss_mirror_ctl_header);
+-	}
+-}
++		nss_mirror_ctl_header = NULL;
++	}
++}
+--- a/mirror/nss_mirror.h
++++ b/mirror/nss_mirror.h
+@@ -17,9 +17,11 @@
+  */
+ 
+ #include <linux/etherdevice.h>
++#include <linux/mutex.h>
+ 
+ #include <nss_api_if.h>
+ #include <nss_cmn.h>
++#include <nss_mirror_public.h>
+ 
+ #if (NSS_MIRROR_DEBUG_LEVEL < 1)
+ #define nss_mirror_assert(fmt, args...)
+@@ -69,13 +71,29 @@
+  */
+ struct nss_mirror_instance_priv {
+ 	struct rtnl_link_stats64 stats;			/* Netdev stats. */
+-	uint32_t mirror_instance_if_num;		/* NSS interface number for this mirror device. */
++	int32_t mirror_instance_if_num;		/* Cached through failed firmware cleanup. */
+ 	enum nss_mirror_pkt_clone_point mirror_point;	/* Point in the packet to copy from. */
+ 	uint16_t mirror_size;				/* Number of bytes to copy. */
+ 	uint16_t mirror_offset;				/* Copy offset. */
+ 	uint8_t rule_config_mode;			/* Configure mode. */
+ 	uint8_t mirror_arr_index;			/* Netdev index in mirror array. */
++	bool callbacks_registered;
++	bool firmware_enabled;
+ };
++
++/* Sysctl dispatch and public APIs use one process-context control lock. */
++extern struct mutex nss_mirror_control_mutex;
++bool nss_mirror_is_dev(const struct net_device *dev);
++int nss_mirror_disable_locked(struct net_device *dev);
++int nss_mirror_enable_locked(struct net_device *dev);
++int nss_mirror_set_nexthop_locked(struct net_device *dev, int32_t ifnum);
++int nss_mirror_reset_nexthop_locked(struct net_device *dev);
++int nss_mirror_configure_locked(struct net_device *dev,
++		enum nss_mirror_pkt_clone_point point, uint16_t size, uint16_t offset);
++int nss_mirror_destroy_locked(struct net_device *dev);
++struct net_device *nss_mirror_create_locked(void);
++int nss_mirror_deconfigure_mirror_locked(struct net_device *dev);
++int nss_mirror_destroy_all_locked(void);
+ 
+ /*
+  * nss_mirror_display_info()
+--- a/mirror/nss_mirror_init.c
++++ b/mirror/nss_mirror_init.c
+@@ -31,6 +31,11 @@
+ {
+ 	int ret = 0;
+ 
++	if (!nss_mirror_get_context()) {
++		pr_err("NSS mirror driver/DT capability is unavailable\n");
++		return -ENODEV;
++	}
++
+ 	ret = nss_mirror_ctl_register();
+ 	if (ret) {
+ 		nss_mirror_warn("Mirror ctl registration failed\n");
+@@ -47,10 +52,11 @@
+  */
+ static void __exit nss_mirror_module_exit(void)
+ {
++	/* Stop and drain sysctl callers before touching instance state. */
++	nss_mirror_ctl_unregister();
+ 	if (nss_mirror_destroy_all() < 0) {
+ 		nss_mirror_warn("Error in destroying all the configured mirror devices\n");
+ 	}
+-	nss_mirror_ctl_unregister();
+ 	nss_mirror_info("Mirror module unloaded.\n");
+ }
+ 
+

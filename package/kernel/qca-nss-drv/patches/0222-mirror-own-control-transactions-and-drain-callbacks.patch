@@ -1,0 +1,226 @@
+mirror: correlate requests and drain instance callbacks before teardown
+
+--- a/nss_control.h
++++ b/nss_control.h
+@@ -7,6 +7,7 @@
+ 	NSS_CONTROL_WIFI_VDEV,
+ 	NSS_CONTROL_PROJECT,
+ 	NSS_CONTROL_BASE_IF,
++	NSS_CONTROL_MIRROR,
+ 	NSS_CONTROL_FAMILY_MAX,
+ };
+ 
+--- a/nss_mirror.c
++++ b/nss_mirror.c
+@@ -20,17 +20,18 @@
+ #include "nss_mirror_stats.h"
+ #include "nss_mirror_strings.h"
+ #include "nss_mirror_log.h"
++#include "nss_control.h"
+ 
+ #define NSS_MIRROR_TX_TIMEOUT 3000 /* 3 Seconds */
+ 
+ /*
+  * Private data structure
+  */
+-static struct {
+-	struct semaphore sem;
++struct nss_mirror_wait {
+ 	struct completion complete;
+-	int response;
+-} nss_mirror_pvt;
++	nss_tx_status_t response;
++};
++static bool nss_mirror_ready;
+ 
+ atomic_t nss_mirror_num_instances;		/* Number of active mirror stats instances. */
+ 
+@@ -41,8 +42,11 @@
+ bool nss_mirror_verify_if_num(uint32_t if_num)
+ {
+ 	enum nss_dynamic_interface_type if_type;
+-
+-	if_type = nss_dynamic_interface_get_type(nss_mirror_get_context(), if_num);
++	struct nss_ctx_instance *ctx = nss_mirror_get_context();
++	if (!ctx)
++		return false;
++
++	if_type = nss_dynamic_interface_get_type(ctx, if_num);
+ 	if (if_type == NSS_DYNAMIC_INTERFACE_TYPE_MIRROR) {
+ 		return true;
+ 	}
+@@ -83,6 +87,10 @@
+ 	 */
+ 	nss_core_log_msg_failures(nss_ctx, ncm);
+ 	nss_mirror_log_rx_msg(nmm);
++	if (ncm->response != NSS_CMN_RESPONSE_NOTIFY) {
++		nss_control_receive(nss_ctx, ncm, NSS_CONTROL_MIRROR, NULL);
++		return;
++	}
+ 
+ 	switch (ncm->type) {
+ 	case NSS_MIRROR_MSG_SYNC_STATS:
+@@ -126,25 +134,18 @@
+  */
+ static void nss_mirror_callback(void *app_data, struct nss_cmn_msg *ncm)
+ {
+-	nss_mirror_pvt.response = NSS_TX_SUCCESS;
+-
+-	if (ncm->response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("mirror interface error response %d\n", ncm->response);
+-		nss_mirror_pvt.response = NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * Write memory barrier.
+-	 */
+-	smp_wmb();
+-	complete(&nss_mirror_pvt.complete);
++	struct nss_mirror_wait *wait = app_data;
++	wait->response = ncm->response == NSS_CMN_RESPONSE_ACK && !ncm->error ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	complete(&wait->complete);
+ }
+ 
+ /*
+  * nss_mirror_tx_msg()
+  *	Transmit a mirror interface message to NSS firmware.
+  */
+-nss_tx_status_t nss_mirror_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_mirror_msg *msg)
++static nss_tx_status_t nss_mirror_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++		struct nss_mirror_msg *msg, uint32_t *cookie)
+ {
+ 	struct nss_cmn_msg *ncm = &msg->cm;
+ 
+@@ -156,7 +157,7 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	if (ncm->type > NSS_MIRROR_MSG_MAX) {
++	if (ncm->type >= NSS_MIRROR_MSG_MAX) {
+ 		nss_warning("%px: message type out of range: %d", nss_ctx, ncm->type);
+ 		return NSS_TX_FAILURE;
+ 	}
+@@ -166,7 +167,13 @@
+ 	 */
+ 	nss_mirror_log_tx_msg(msg);
+ 
+-	return nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	return nss_control_send(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++			NSS_CONTROL_MIRROR, cookie);
++}
++
++nss_tx_status_t nss_mirror_tx_msg(struct nss_ctx_instance *ctx, struct nss_mirror_msg *msg)
++{
++	return nss_mirror_tx_msg_tracked(ctx, msg, NULL);
+ }
+ EXPORT_SYMBOL(nss_mirror_tx_msg);
+ 
+@@ -177,27 +184,23 @@
+ nss_tx_status_t nss_mirror_tx_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_mirror_msg *msg)
+ {
+ 	nss_tx_status_t status;
+-	int ret = 0;
+-
+-	down(&nss_mirror_pvt.sem);
++	struct nss_mirror_wait wait;
++	uint32_t cookie = 0;
++	bool replied = false;
++
++	init_completion(&wait.complete);
++	wait.response = NSS_TX_FAILURE;
+ 	msg->cm.cb = (nss_ptr_t)nss_mirror_callback;
+-	msg->cm.app_data = (nss_ptr_t)NULL;
+-
+-	status = nss_mirror_tx_msg(nss_ctx, msg);
+-	if (status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: mirror_tx_msg failed\n", nss_ctx);
+-		up(&nss_mirror_pvt.sem);
+-		return status;
+-	}
+-
+-	ret = wait_for_completion_timeout(&nss_mirror_pvt.complete, msecs_to_jiffies(NSS_MIRROR_TX_TIMEOUT));
+-	if (!ret) {
+-		nss_warning("%px: Mirror interface tx sync failed due to timeout\n", nss_ctx);
+-		nss_mirror_pvt.response = NSS_TX_FAILURE;
+-	}
+-
+-	status = nss_mirror_pvt.response;
+-	up(&nss_mirror_pvt.sem);
++	msg->cm.app_data = (nss_ptr_t)&wait;
++	status = nss_mirror_tx_msg_tracked(nss_ctx, msg, &cookie);
++	if (status == NSS_TX_SUCCESS)
++		replied = wait_for_completion_timeout(&wait.complete,
++				msecs_to_jiffies(NSS_MIRROR_TX_TIMEOUT)) != 0;
++	/* Remove pending replies and drain callbacks before this stack expires. */
++	if (cookie)
++		nss_control_cancel(cookie);
++	if (status == NSS_TX_SUCCESS)
++		status = (replied || completion_done(&wait.complete)) ? wait.response : NSS_TX_FAILURE;
+ 	return status;
+ }
+ EXPORT_SYMBOL(nss_mirror_tx_msg_sync);
+@@ -214,14 +217,14 @@
+ 	nss_assert(nss_ctx);
+ 	nss_assert(nss_mirror_verify_if_num(if_num));
+ 
+-	nss_core_unregister_subsys_dp(nss_ctx, if_num);
+-
+-	nss_core_unregister_handler(nss_ctx, if_num);
+-
++	nss_control_close(nss_ctx, NSS_CONTROL_MIRROR, if_num);
+ 	status = nss_core_unregister_msg_handler(nss_ctx, if_num);
+ 	if (status != NSS_CORE_STATUS_SUCCESS) {
+ 		nss_warning("%px: Not able to unregister handler for interface %d with NSS core\n", nss_ctx, if_num);
+ 	}
++	nss_core_unregister_handler(nss_ctx, if_num);
++	/* Final synchronize_net() barrier covers message and datapath callbacks. */
++	nss_core_unregister_subsys_dp(nss_ctx, if_num);
+ 
+ 	atomic_dec(&nss_mirror_num_instances);
+ 	nss_mirror_stats_reset(if_num);
+@@ -255,10 +258,22 @@
+ 		return NULL;
+ 	}
+ 
+-	nss_core_register_handler(nss_ctx, if_num, nss_mirror_handler, netdev);
++	if (!nss_control_open(nss_ctx, NSS_CONTROL_MIRROR, if_num)) {
++		nss_mirror_stats_reset(if_num);
++		return NULL;
++	}
++	ret = nss_core_register_handler(nss_ctx, if_num, nss_mirror_handler, netdev);
++	if (ret != NSS_CORE_STATUS_SUCCESS) {
++		nss_control_close(nss_ctx, NSS_CONTROL_MIRROR, if_num);
++		nss_mirror_stats_reset(if_num);
++		return NULL;
++	}
+ 	ret = nss_core_register_msg_handler(nss_ctx, if_num, event_callback);
+ 	if (ret != NSS_CORE_STATUS_SUCCESS) {
++		nss_control_close(nss_ctx, NSS_CONTROL_MIRROR, if_num);
+ 		nss_core_unregister_handler(nss_ctx, if_num);
++		synchronize_net();
++		nss_mirror_stats_reset(if_num);
+ 		nss_warning("%px: Not able to register handler for mirror interface %d with NSS core\n", nss_ctx, if_num);
+ 		return NULL;
+ 	}
+@@ -277,6 +292,8 @@
+  */
+ struct nss_ctx_instance *nss_mirror_get_context(void)
+ {
++	if (!READ_ONCE(nss_mirror_ready))
++		return NULL;
+ 	return (struct nss_ctx_instance *)&nss_top_main.nss[nss_top_main.mirror_handler_id];
+ }
+ EXPORT_SYMBOL(nss_mirror_get_context);
+@@ -288,9 +305,8 @@
+ void nss_mirror_register_handler(void)
+ {
+ 	nss_info("nss_mirror_register_handler");
+-	sema_init(&nss_mirror_pvt.sem, 1);
+-	init_completion(&nss_mirror_pvt.complete);
+ 
+ 	nss_mirror_stats_dentry_create();
+ 	nss_mirror_strings_dentry_create();
+-}
++	WRITE_ONCE(nss_mirror_ready, true);
++}

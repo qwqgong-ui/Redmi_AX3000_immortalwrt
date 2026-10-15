@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=qca-nss-ecm
-PKG_RELEASE:=11
+PKG_RELEASE:=12
 PKG_SOURCE_DATE:=2026-09-06
 PKG_SOURCE_VERSION:=7894b769eeb64f1c44fde547a107a8b866997590
 QSDK_VERSION:=14.0
@@ -12,7 +12,8 @@ PKG_HASH:=a4d5f4c4a6c4bfac3ded4af993c88249f7afc4444ed78368f367eda4ef231886
 PKG_BUILD_PARALLEL:=1
 PKG_FLAGS:=nonshared
 PKG_CONFIG_DEPENDS:=CONFIG_IPV6 CONFIG_BRIDGE_VLAN_FILTERING CONFIG_NSS_FIRMWARE_VERSION_12_2 CONFIG_ATH11K_MEM_PROFILE_256M \
-  CONFIG_PACKAGE_kmod-qca-nss-drv-igs CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe
+  CONFIG_PACKAGE_kmod-qca-nss-drv-igs CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe \
+  CONFIG_PACKAGE_kmod-qca-nss-drv-mirror
 
 # Qualcomm QSDK 14.0 ECM, win.nss.1.0.r39. Kernel/connection-sync compatibility
 # patches are pinned to kuncy7/nss-packages 94f44cc3bd4259b9b49f186f157e90e06b5ab003.
@@ -27,6 +28,11 @@ define KernelPackage/qca-nss-ecm
   DEPENDS:=@TARGET_qualcommax_ipq50xx +kmod-qca-nss-drv +kmod-qca-nss-drv-bridge-mgr +kmod-qca-dsa-nss +kmod-nf-conntrack +@NSS_DRV_IPV6_ENABLE +@NSS_DRV_VIRT_IF_ENABLE +PACKAGE_kmod-qca-nss-drv-pppoe:kmod-pppoe
   FILES:=$(PKG_BUILD_DIR)/ecm.ko $(LINUX_DIR)/net/bridge/netfilter/nf_conntrack_bridge.ko
   KCONFIG:=CONFIG_NF_CONNTRACK_EVENTS=y CONFIG_NF_CONNTRACK_EVENTS_OBSERVER=y CONFIG_NF_CONNTRACK_BRIDGE=m
+endef
+
+define Build/InstallDev
+	$(INSTALL_DIR) $(1)/usr/include/qca-nss-ecm
+	$(CP) $(PKG_BUILD_DIR)/ecm_classifier_pcc_public.h $(1)/usr/include/qca-nss-ecm/
 endef
 
 define KernelPackage/qca-nss-ecm/description
@@ -62,7 +68,7 @@ ECM_MAKE_OPTS:= \
   ECM_INTERFACE_VXLAN_ENABLE=n \
   ECM_CLASSIFIER_DSCP_ENABLE=$(if $(CONFIG_PACKAGE_kmod-qca-nss-drv-igs),y,n) \
   ECM_CLASSIFIER_DSCP_IGS=$(if $(CONFIG_PACKAGE_kmod-qca-nss-drv-igs),y,n) \
-  ECM_CLASSIFIER_MARK_ENABLE=y ECM_CLASSIFIER_PCC_ENABLE=n \
+  ECM_CLASSIFIER_MARK_ENABLE=y ECM_CLASSIFIER_PCC_ENABLE=$(if $(CONFIG_PACKAGE_kmod-qca-nss-drv-mirror),y,n) \
   ECM_256M_PROFILE=$(if $(CONFIG_ATH11K_MEM_PROFILE_256M),y,n)
 
 ifneq ($(CONFIG_IPV6),)

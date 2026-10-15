@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute real dynamic/VDEV request identities, private waits and callback drains."""
+"""Execute real dynamic/VDEV/mirror identities, private waits and callback drains."""
 import argparse
 import importlib.util
 import os
@@ -65,6 +65,15 @@ typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
 #define NSS_NBUF_PAYLOAD_SIZE 2048
 #define NSS_DYNAMIC_INTERFACE_COMP_TIMEOUT 1000
 #define ATH11K_NSS_MSG_TIMEOUT_MS 1000
+#define NSS_MIRROR_TX_TIMEOUT 1000
+#define NSS_MIRROR_MSG_MAX 6
+#define NSS_MIRROR_MSG_SYNC_STATS 5
+#define NSS_VERIFY_CTX_MAGIC(ctx) assert(ctx)
+#define nss_assert(value) assert(value)
+#define nss_mirror_log_rx_msg(msg) ((void)(msg))
+#define nss_mirror_log_tx_msg(msg) ((void)(msg))
+#define nss_mirror_stats_sync(ctx,msg,ifnum) ((void)(ctx),(void)(msg),(void)(ifnum))
+#define nss_mirror_stats_notify(ctx,ifnum) ((void)(ctx),(void)(ifnum))
 #define U32_MAX UINT32_MAX
 #define GFP_ATOMIC 0
 #define GFP_KERNEL 1
@@ -122,6 +131,9 @@ struct nss_dynamic_interface_dealloc_node_msg { enum nss_dynamic_interface_type 
 struct nss_dynamic_interface_msg { struct nss_cmn_msg cm;union { struct nss_dynamic_interface_alloc_node_msg alloc_node;struct nss_dynamic_interface_dealloc_node_msg dealloc_node; } msg; };
 struct nss_wifi_vdev_config_msg { u32 radio_ifnum,vdev_id,opmode,vap_ext_mode;unsigned char mac_addr[6]; };
 struct nss_wifi_vdev_msg { struct nss_cmn_msg cm;union { struct nss_wifi_vdev_config_msg vdev_config; } msg; };
+struct nss_mirror_msg { struct nss_cmn_msg cm;unsigned payload[2]; };
+typedef void (*nss_mirror_msg_callback_t)(void *,struct nss_cmn_msg *);
+static bool nss_mirror_verify_if_num(unsigned ifnum) { return ifnum==7; }
 typedef void (*nss_wifi_vdev_msg_callback_t)(void *,struct nss_cmn_msg *);
 struct nss_ctx_instance { unsigned id;struct { void *ndev; } subsys_dp_register[NSS_MAX_NET_INTERFACES]; };
 static struct { unsigned wifi_handler_id;struct nss_ctx_instance nss[NSS_CORE_MAX];unsigned dynamic_interface_table[NSS_DYNAMIC_INTERFACE_TYPE_MAX]; } nss_top_main;
@@ -167,15 +179,19 @@ static struct nss_wifi_vdev_msg request(void) { return (struct nss_wifi_vdev_msg
 static void deliver(struct wire_copy copy,unsigned response,bool bad) {
  struct nss_cmn_msg *cm=(void *)copy.payload.data;cm->response=response;
  if(cm->interface==NSS_DYNAMIC_INTERFACE){struct nss_dynamic_interface_msg *msg=(void *)cm;if(cm->type==NSS_DYNAMIC_INTERFACE_ALLOC_NODE)msg->msg.alloc_node.if_num=6;if(bad)msg->msg.alloc_node.type=NSS_DYNAMIC_INTERFACE_TYPE_RADIO;nss_dynamic_interface_handler(copy.ctx,cm,NULL);}
+ else if(cm->interface==7)nss_mirror_handler(copy.ctx,cm,&nss_top_main);
  else nss_wifi_vdev_handler(copy.ctx,cm,NULL);
 }
 static void acknowledge(void) { deliver(wire,NSS_CMN_RESPONSE_ACK,false); }
 static void reject(void) { deliver(wire,NSS_CMN_RESPONSE_EMSG,false); }
 static void invalid_node(void) { deliver(wire,NSS_CMN_RESPONSE_ACK,true); }
 static void truncated_node(void) { struct wire_copy copy=wire;((struct nss_cmn_msg *)(void *)copy.payload.data)->len=0;deliver(copy,NSS_CMN_RESPONSE_ACK,false); }
+static struct wire_copy mirror_old;
+static void old_mirror_reply(void) { deliver(mirror_old,NSS_CMN_RESPONSE_ACK,false); }
 static void fresh(void) {
  for(unsigned i=0;i<2;i++){nss_top_main.nss[i].id=i;nss_control_close_core(&nss_top_main.nss[i]);nss_control_init_core(&nss_top_main.nss[i]);nss_dynamic_interface_register_handler(&nss_top_main.nss[i]);assert(nss_control_open(&nss_top_main.nss[i],NSS_CONTROL_WIFI_VDEV,6));nss_top_main.nss[i].subsys_dp_register[6].ndev=&nss_top_main;}
  assert(!live_allocations);memset(nss_dynamic_interface_assigned_types,0,sizeof(nss_dynamic_interface_assigned_types));memset(nss_dynamic_interface_assigned_generations,0,sizeof(nss_dynamic_interface_assigned_generations));allocations=fail_allocation=submissions=callback_count=notify_callbacks=dealloc_notifications=0;wait_hook=NULL;force_wait_timeout=send_failure=send_block=send_entered=send_release=false;callback_block=callback_entered=callback_release=false;atomic_store(&close_finished,false);atomic_store(&close_started,false);
+ for(unsigned i=0;i<2;i++)assert(nss_control_open(&nss_top_main.nss[i],NSS_CONTROL_MIRROR,7));
 }
 static void *receiver(void *unused) { (void)unused;acknowledge();return NULL; }
 static void *canceller(void *cookie) { nss_control_cancel((uintptr_t)cookie);atomic_store(&close_finished,true);return NULL; }
@@ -272,8 +288,20 @@ int main(void) {
  for(unsigned failure=1;failure<=3;failure++){fresh();fail_allocation=failure;assert(ath11k_nss_vdev_configure(&arvif)<0&&!live_allocations);}
  fresh();msg=request();assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==0);nss_control_close_core(ctx);assert(!live_allocations&&!nss_control_open(ctx,NSS_CONTROL_WIFI_VDEV,6));
  before=submissions;assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==NSS_TX_FAILURE_NOT_READY&&submissions==before);
+ fresh();struct nss_mirror_msg mirror={.cm={.interface=7,.type=0,.len=0}};
+ wait_hook=acknowledge;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_SUCCESS&&!live_allocations);
+ assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE&&!live_allocations);mirror_old=wire;
+ wait_hook=old_mirror_reply;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE&&!live_allocations);
+ wait_hook=acknowledge;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_SUCCESS&&!live_allocations);
+ wait_hook=reject;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE&&!live_allocations);
+ force_wait_timeout=true;wait_hook=acknowledge;
+ assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_SUCCESS&&!live_allocations);force_wait_timeout=false;
+ send_failure=true;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE&&!live_allocations);send_failure=false;
+ for(unsigned failure=1;failure<=2;failure++){fresh();fail_allocation=failure;assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE&&!live_allocations);}
+ fresh();nss_control_close(ctx,NSS_CONTROL_MIRROR,7);before=submissions;
+ assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE_NOT_READY&&submissions==before&&!live_allocations);
  fresh();atomic_store(&nss_control_sequence.value,U32_MAX);msg=request();assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==NSS_TX_FAILURE&&!cookie&&!live_allocations);
- puts("NSS control: identity, stale/duplicate rejection, callback drains, enqueue closure, shadow generations, timeout-edge ACK results and private waits passed");
+ puts("NSS control: dynamic/VDEV/mirror identities, stale/duplicate rejection, callback drains, enqueue closure, shadow generations, timeout-edge ACK results and private waits passed");
  return 0;
 }
 '''
@@ -290,6 +318,7 @@ def main():
     header = read(args.drv / 'nss_control.h')
     dynamic = read(args.drv / 'nss_dynamic_interface.c')
     vdev = read(args.drv / 'nss_wifi_vdev.c')
+    mirror = read(args.drv / 'nss_mirror.c')
     ath = read(args.backports / 'drivers/net/wireless/ath/ath11k/nss.c')
     definitions = structures.structure(dynamic, 'nss_dynamic_interface_msg_data')
     definitions += '\nstatic nss_dynamic_interface_assigned nss_dynamic_interface_assigned_types[NSS_CORE_MAX][NSS_MAX_DYNAMIC_INTERFACES];\n'
@@ -307,6 +336,11 @@ def main():
     bodies += structures.structure(ath, 'ath11k_nss_vdev_request')
     bodies += '\n'.join(function(ath, name) for name in
                         ['ath11k_nss_vdev_cfg_cb', 'ath11k_nss_vdev_configure'])
+    bodies += structures.structure(mirror, 'nss_mirror_wait')
+    bodies += '\n'.join(function(mirror, name) for name in
+                        ['nss_mirror_handler', 'nss_mirror_callback',
+                         'nss_mirror_tx_msg_tracked', 'nss_mirror_tx_msg',
+                         'nss_mirror_tx_msg_sync'])
     with tempfile.TemporaryDirectory(prefix='nss-control-') as tmp:
         source = Path(tmp) / 'control.c'
         source.write_text(SHIM + header + core + definitions + bodies + CASES)

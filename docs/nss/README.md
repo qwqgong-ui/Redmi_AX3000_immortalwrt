@@ -2,7 +2,12 @@
 
 ## 当前发行状态
 
-最新候选为 **opt56**，基于 Linux 6.12.108、NSS 12.2；ath11k release43、
+已保存 **opt58 诊断发行**及完整回退，全部卡顿的根治仍未确认。
+当前源码增量补齐按需加载的 MIRROR manager、驱动/DT 入口与条件编译的
+ECM PCC 接口，版本为 NSS driver release39、clients release10、ECM release12。
+镜像规则不会自动创建，模块运行验证以对应发行附件为准。
+
+此前完成队列验收的候选为 **opt56**，基于 Linux 6.12.108、NSS 12.2；ath11k release43、
 NSS driver release38、clients release8、ECM release10、nss-wifi release12。
 STA/AP/LAN 使用 NSS 硬件 `nssfq_codel`，128 packets / target 5 ms，
 上下行 rate=0，没有固定带宽上限。配置工具默认 preview，运行设置及验收
@@ -179,9 +184,19 @@ opt32确认实际MAC偏移及PPDU高16位；opt33允许校验已存储MAC头，
 | Ethernet bridge/VLAN | qca8k 802.1Q tagger、VLAN manager、物理数据面与 Bridge Manager 已接入 | opt9 真机纯桥接 TCP 为 758–931 Mbit/s；600 秒双向 328 / 847 Mbit/s、整体平均 CPU 3.70%、ICMP 丢 1/3005，见[对照](performance-2026-10-10.md#opt9-同条件复测)；IPv6 待验证 |
 | PPPoE | opt43 接入 manager、channel/addressing hooks、DTS 和 ECM PPP/PPPoE 后端，补齐引用及通知顺序 | 全模块/镜像构建通过；真实 PPPoE 会话加速尚未验收，见[qdisc 与常用组件记录](qdisc-opt43.md) |
 | QoS/IGS | 接入全套 NSS qdisc、IGS/IFB、tc/SQM、DSCP/ingress QoS metadata；opt44 修正 QoS pool 的 MB 单位 | 控制 C 回归及完整构建通过；本地基线 896 Mbit/s，8 Mbit/s 配置下 egress/IGS 实测 6.83/6.75 Mbit/s，原配置恢复，有线 ACCEL=2，见[qdisc 记录](qdisc-opt43.md) |
+| MIRROR / PCC 复制 | profile 选择 `kmod-qca-nss-drv-mirror`；接入 core/DT、6.12 manager 及 ECM PCC，无自动 registrant 或规则 | 按需创建镜像目标，普通加速保持原分类；固件能力及运行验收见发行附件。整端口 ingress PMC 缺少跨客户端 next-hop 所有权恢复合同，当前不开放 |
 | 隧道、安全和管理扩展 | 44 项入口完整列表见 [feature-options.md](feature-options.md) | 未纳入本次默认 profile；需要独立 manager、hook 和固件 ABI 验证 |
 
 `IGS` 是 ingress shaping，与 IGMP snooping 不同。`VIRT_IF` 虽在 profile 显式选中，固定上游驱动对 generic dataplane 无条件构建 `nss_virt_if.o`，该开关并非一个已经实现独立裁剪的模块开关。PPPoE/GRE/IPsec 等部分对象还受对应内核软件包选择影响；不能仅依据 profile 中没有显式 `=y` 就认定编译产物必然不含该对象。
+
+MIRROR manager 按需用 `modprobe qca-nss-mirror` 加载，控制入口为
+`/proc/sys/dev/nss/mirror/config`。写入 `create` 后，以实际生成的
+`mirror.N` 名称依次执行 `configure mirrordev=mirror.N mirror_size=128`、
+`set_nexthop mirrordev=mirror.N mirror_next_hop=n2h` 和
+`enable mirrordev=mirror.N`。这些命令只准备复制目标；选流需要另行注册
+ECM PCC classifier。停止时先撤销 classifier 并排空其设备引用，再执行
+`disable mirrordev=mirror.N`、`destroy mirrordev=mirror.N`，最后卸载模块。
+仍有镜像实例时模块保留引用，固件释放未确认时保留实例供重试，避免悬空回调。
 
 此前测试从已打补丁源码中提取实际 C 函数做错误注入。SDK 是此仓库发布的 Linux `6.12.108` / GCC `14.3.0` / AArch64 SDK。ath11k 严格 modpost 通过，修改后的 `nss_wifi_vdev.o` 也交叉编译通过；当时 NSS 全模块探索性构建没有提供 qca-nss-dp 的外部 symbol CRC，曾允许其依赖符号 unresolved。那一轮不构成完整 profile 固件构建或可加载固件的证明，设备树也仅做了 NSS 片段 dtc 验证。
 

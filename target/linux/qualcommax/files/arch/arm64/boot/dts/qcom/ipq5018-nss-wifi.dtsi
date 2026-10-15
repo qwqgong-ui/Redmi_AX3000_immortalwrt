@@ -60,6 +60,7 @@
 		qcom,shaping-enabled;
 		qcom,igs-enabled;
 		qcom,bridge-enabled;
+		qcom,mirror-enabled;
 		qcom,vlan-enabled;
 		qcom,wlanredirect-enabled;
 		qcom,wlan-dataplane-offload-enabled;

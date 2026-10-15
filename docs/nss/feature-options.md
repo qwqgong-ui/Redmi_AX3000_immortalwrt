@@ -24,7 +24,7 @@
 | `LAG_ENABLE` | 未指定 | `n` | `TARGET_qualcommax_ipq807x || TARGET_qualcommax_ipq60xx` |
 | `MAPT_ENABLE` | 未指定 | `n` | `无平台限制` |
 | `MATCH_ENABLE` | 未指定 | `n` | `无平台限制` |
-| `MIRROR_ENABLE` | 未指定 | `n` | `无平台限制` |
+| `MIRROR_ENABLE` | `y` | `n` | `无平台限制` |
 | `OAM_ENABLE` | 未指定 | `n` | `TARGET_ipq806x` |
 | `PORTID_ENABLE` | 未指定 | `n` | `TARGET_ipq806x` |
 | `LSO_RX_ENABLE` | 未指定 | `n` | `无平台限制` |
