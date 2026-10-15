@@ -2,10 +2,13 @@
 
 ## 当前发行状态
 
-已保存 **opt58 诊断发行**及完整回退，全部卡顿的根治仍未确认。
-当前源码增量补齐按需加载的 MIRROR manager、驱动/DT 入口与条件编译的
-ECM PCC 接口，版本为 NSS driver release39、clients release10、ECM release12。
-镜像规则不会自动创建，模块运行验证以对应发行附件为准。
+当前真机为 **opt59 模块补齐预发行**，源码 `c27415c429`，保留完整 opt58 UBI 回退。
+补齐按需加载的 MIRROR manager、驱动/DT 入口与条件编译的 ECM PCC 接口，
+版本为 NSS driver release39、clients release10、ECM release12。
+真实固件三轮镜像生命周期、指定 IPv4 TCP 流的双向宿主副本与 2 MiB TLS
+传输通过；测试实例和规则已清理，默认不加载模块或创建复制规则。
+完整 NSS、三路硬件队列、零带宽上限和八项配置已核对，验收及限制见发行附件。
+此前报告的间歇性卡顿仍未确认根治，不能按稳定版结论发布。
 
 此前完成队列验收的候选为 **opt56**，基于 Linux 6.12.108、NSS 12.2；ath11k release43、
 NSS driver release38、clients release8、ECM release10、nss-wifi release12。
@@ -184,7 +187,7 @@ opt32确认实际MAC偏移及PPDU高16位；opt33允许校验已存储MAC头，
 | Ethernet bridge/VLAN | qca8k 802.1Q tagger、VLAN manager、物理数据面与 Bridge Manager 已接入 | opt9 真机纯桥接 TCP 为 758–931 Mbit/s；600 秒双向 328 / 847 Mbit/s、整体平均 CPU 3.70%、ICMP 丢 1/3005，见[对照](performance-2026-10-10.md#opt9-同条件复测)；IPv6 待验证 |
 | PPPoE | opt43 接入 manager、channel/addressing hooks、DTS 和 ECM PPP/PPPoE 后端，补齐引用及通知顺序 | 全模块/镜像构建通过；真实 PPPoE 会话加速尚未验收，见[qdisc 与常用组件记录](qdisc-opt43.md) |
 | QoS/IGS | 接入全套 NSS qdisc、IGS/IFB、tc/SQM、DSCP/ingress QoS metadata；opt44 修正 QoS pool 的 MB 单位 | 控制 C 回归及完整构建通过；本地基线 896 Mbit/s，8 Mbit/s 配置下 egress/IGS 实测 6.83/6.75 Mbit/s，原配置恢复，有线 ACCEL=2，见[qdisc 记录](qdisc-opt43.md) |
-| MIRROR / PCC 复制 | profile 选择 `kmod-qca-nss-drv-mirror`；接入 core/DT、6.12 manager 及 ECM PCC，无自动 registrant 或规则 | 按需创建镜像目标，普通加速保持原分类；固件能力及运行验收见发行附件。整端口 ingress PMC 缺少跨客户端 next-hop 所有权恢复合同，当前不开放 |
+| MIRROR / PCC 复制 | profile 选择 `kmod-qca-nss-drv-mirror`；接入 core/DT、6.12 manager 及 ECM PCC，无自动 registrant 或规则 | opt59 真机三轮生命周期与指定 IPv4 TCP 流双向复制通过，清理后完整 NSS/三路硬件队列及直接有线 TLS 通过。IPv6 复制未验收；整端口 ingress PMC 缺少跨客户端 next-hop 所有权恢复合同，当前不开放 |
 | 隧道、安全和管理扩展 | 44 项入口完整列表见 [feature-options.md](feature-options.md) | 未纳入本次默认 profile；需要独立 manager、hook 和固件 ABI 验证 |
 
 `IGS` 是 ingress shaping，与 IGMP snooping 不同。`VIRT_IF` 虽在 profile 显式选中，固定上游驱动对 generic dataplane 无条件构建 `nss_virt_if.o`，该开关并非一个已经实现独立裁剪的模块开关。PPPoE/GRE/IPsec 等部分对象还受对应内核软件包选择影响；不能仅依据 profile 中没有显式 `=y` 就认定编译产物必然不含该对象。
