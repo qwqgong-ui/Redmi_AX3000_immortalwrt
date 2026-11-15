@@ -23,6 +23,7 @@ SHIM = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 typedef uint64_t u64, atomic64_t;
 typedef uintptr_t ecm_ptr_t;
 typedef uint32_t ip_addr_t[4];
@@ -67,7 +68,7 @@ struct ecm_front_end_connection_instance {
  int lock, refs, accel_mode, accel_engine;
  bool is_defunct;
  u64 multicast_generation, multicast_route_cookie, multicast_rule_generation;
- unsigned long multicast_stats_request;
+ unsigned long multicast_stats_after;
  u64 multicast_stats_rule_generation, multicast_stats_route_cookie;
  void (*decelerate)(struct ecm_front_end_connection_instance *);
 };
@@ -86,6 +87,9 @@ struct nss_ipv@V@_msg {
           struct nss_ipv@V@_rule_destroy_msg rule_destroy; } msg;
 };
 static int ecm_nss_ipv@V@_lock, ecm_interface_lock;
+static unsigned long ecm_nss_ipv@V@_sync_req_seq;
+#define lockdep_assert_held(lock) assert(*(lock))
+static bool ecm_interface_connection_accel_allowed(struct ecm_db_connection_instance *c) { (void)c;return true; }
 static int ecm_nss_ipv@V@_accelerated_count;
 static int ecm_nss_multicast_ipv@V@_accelerated_count;
 static int ecm_nss_ipv@V@_pending_accel_count, ecm_nss_ipv@V@_pending_decel_count;
@@ -168,6 +172,7 @@ static void reset(void) {
  memset(ci,0,sizeof(ci)); memset(fe,0,sizeof(fe));
  ecm_interface_multicast_generation=1; ecm_interface_terminate_pending=false;
  ecm_nss_ipv@V@_lock=ecm_interface_lock=0;
+ ecm_nss_ipv@V@_sync_req_seq=0;
  ecm_nss_ipv@V@_pending_accel_count=ecm_nss_ipv@V@_pending_decel_count=0;
  ecm_nss_ipv@V@_accelerated_count=ecm_nss_multicast_ipv@V@_accelerated_count=0;
  ecm_nss_ipv@V@_decel_unknown_count=queued=cancelled=defuncts=decels=0;
@@ -188,12 +193,21 @@ static void balanced(void) {
  for(int i=0;i<3;i++) { assert(ci[i].refs==1 && fe[i].refs==1); assert(!fe[i].lock); }
  assert(!ecm_nss_ipv@V@_lock && !ecm_interface_lock);
 }
+static void arm(int index,unsigned long after) {
+ ecm_nss_ipv@V@_sync_req_seq=after;
+ spin_lock_bh(&fe[index].lock);spin_lock_bh(&ecm_nss_ipv@V@_lock);
+ ecm_nss_ipv@V@_multicast_stats_arm(&fe[index]);
+ spin_unlock_bh(&ecm_nss_ipv@V@_lock);spin_unlock_bh(&fe[index].lock);
+}
 int main(void) {
  u64 cookie;
- reset(); ecm_interface_multicast_stats_snapshot(@V@,77);
+ reset(); arm(0,76);
+ assert(fe[0].multicast_stats_after==76&&fe[0].multicast_stats_rule_generation==1&&fe[0].multicast_stats_route_cookie==100);
  cookie=999; assert(ecm_interface_multicast_stats_valid(&fe[0],77,&cookie) && cookie==100);
  cookie=999; assert(!ecm_interface_multicast_stats_valid(&fe[0],0,&cookie) && cookie==999);
  assert(!ecm_interface_multicast_stats_valid(&fe[0],76,&cookie));
+ assert(!ecm_interface_multicast_stats_valid(&fe[0],75,&cookie)&&cookie==999);
+ assert(ecm_interface_multicast_stats_valid(&fe[0],78,&cookie));
  fe[0].multicast_rule_generation++;
  assert(!ecm_interface_multicast_stats_valid(&fe[0],77,&cookie));
  fe[0].multicast_rule_generation--;
@@ -220,6 +234,13 @@ int main(void) {
  assert(defuncts==1 && !fe[0].is_defunct && fe[1].is_defunct); balanced();
  ecm_interface_multicast_quiesce(); ecm_interface_multicast_invalidate();
  assert(cancelled==1 && queued==1);
+ reset();arm(0,76);assert(ecm_interface_multicast_stats_valid(&fe[0],77,&cookie));
+ fe[0].multicast_rule_generation++;assert(!ecm_interface_multicast_stats_valid(&fe[0],77,&cookie));
+ arm(0,77);assert(!ecm_interface_multicast_stats_valid(&fe[0],77,&cookie));
+ assert(ecm_interface_multicast_stats_valid(&fe[0],78,&cookie));balanced();
+ arm(0,ULONG_MAX);assert(!ecm_interface_multicast_stats_valid(&fe[0],ULONG_MAX,&cookie));
+ assert(!ecm_interface_multicast_stats_valid(&fe[0],0,&cookie));
+ assert(ecm_interface_multicast_stats_valid(&fe[0],1,&cookie));balanced();
  reset(); fe[0].accel_mode=ECM_FRONT_END_ACCELERATION_MODE_DECEL;
  ecm_nss_ipv@V@_decel_unknown_count=1;
  assert(!ecm_nss_ipv@V@_accel_pending_set(&fe[0]));
@@ -242,6 +263,8 @@ int main(void) {
   msg.cm.type=NSS_IPV@V@_TX_CREATE_MC_RULE_MSG; msg.cm.response=NSS_CMN_RESPONSE_ACK;
   fe[0].accel_mode=ECM_FRONT_END_ACCELERATION_MODE_ACCEL_PENDING;
   ecm_nss_ipv@V@_pending_accel_count=1; ci[0].refs++;
+  ecm_nss_ipv@V@_sync_req_seq=77;fe[0].multicast_stats_after=17;
+  fe[0].multicast_stats_rule_generation=111;fe[0].multicast_stats_route_cookie=222;
   if(kind==1) msg.cm.response=1;
   if(kind==2) fe[0].stats.flush_happened=true;
   if(kind==3) ecm_interface_multicast_generation=2;
@@ -249,6 +272,10 @@ int main(void) {
   ecm_nss_multicast_ipv@V@_connection_create_callback((void *)(uintptr_t)10,&msg);
   assert(!ecm_nss_ipv@V@_pending_accel_count); balanced();
   assert(ecm_nss_ipv@V@_accelerated_count==((kind==0||kind==3)?1:0));
+  if(kind==0||kind==3)assert(fe[0].multicast_stats_after==77&&fe[0].multicast_stats_rule_generation==1&&fe[0].multicast_stats_route_cookie==100);
+  else assert(fe[0].multicast_stats_after==17&&fe[0].multicast_stats_rule_generation==111&&fe[0].multicast_stats_route_cookie==222);
+  assert(!ecm_interface_multicast_stats_valid(&fe[0],77,&cookie));
+  assert(ecm_interface_multicast_stats_valid(&fe[0],78,&cookie)==(kind==0));
   if(kind==3) { assert(decels==1 && defuncts==1); assert(fe[0].accel_mode==ECM_FRONT_END_ACCELERATION_MODE_DECEL_PENDING); }
   if(kind==4) { assert(fe[0].accel_mode==ECM_FRONT_END_ACCELERATION_MODE_FAIL_DEFUNCT); assert(defuncts==1); }
  }
@@ -449,7 +476,6 @@ def main():
     names = ['ecm_interface_multicast_generation_get',
              'ecm_interface_multicast_invalidate',
              'ecm_interface_multicast_quiesce',
-             'ecm_interface_multicast_stats_snapshot',
              'ecm_interface_multicast_stats_valid',
              'ecm_interface_multicast_invalidate_work']
     with tempfile.TemporaryDirectory(prefix='nss-ecm-mcast-') as temporary:
@@ -459,6 +485,8 @@ def main():
             body += '\n\n' + function(classifier, 'ecm_classifier_default_ready_for_accel')
             header = (args.ecm / f'frontends/nss/ecm_nss_ipv{version}.h').read_text()
             body += '\n\n' + function(header, f'ecm_nss_ipv{version}_accel_pending_set')
+            stats = (args.ecm / f'frontends/nss/ecm_nss_ipv{version}.c').read_text()
+            body += '\n\n' + function(stats, f'ecm_nss_ipv{version}_multicast_stats_arm')
             body += '\n\n' + '\n\n'.join(function(source,
                 f'ecm_nss_multicast_ipv{version}_' + suffix) for suffix in
                 ['accel_abort', 'connection_create_callback', 'connection_destroy_callback'])

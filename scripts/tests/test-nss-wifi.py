@@ -33,6 +33,7 @@ def test_boot():
         ("rx-irq-write-failure", 1, True, False, "", 0),
         ("single-cpu", 1, True, False, "", 0),
         ("missing-rx-irq", 1, True, False, "", 0),
+        ("relay-trace", 1, True, False, "", 0),
     ]
     for name, enabled, ready, loaded, fail, expected in cases:
         with tempfile.TemporaryDirectory(prefix="nss-boot-test-") as tmp:
@@ -72,6 +73,7 @@ config_get_bool() {
     case "$1" in
         enabled) enabled="$TEST_ENABLED" ;;
         monitor_test) monitor_test="$TEST_MONITOR" ;;
+        relay_trace) relay_trace="$TEST_TRACE" ;;
         *) return 1 ;;
     esac
 }
@@ -94,6 +96,7 @@ insmod() {
 }
 '''
             env = dict(os.environ, TEST_ENABLED=str(enabled), TEST_MONITOR=str(int(name == "monitor-validation")),
+                       TEST_TRACE=str(int(name == "relay-trace")),
                        READY=str(int(ready)), FAIL=fail, MODULES=str(modules),
                        CALLS=str(base / "calls"))
             result = subprocess.run(["sh"], input=harness + script + "\nstart\n",
@@ -102,7 +105,8 @@ insmod() {
             calls = (base / "calls").read_text().splitlines()
             if not fail:
                 mode = int(enabled and ready)
-                suffix = f" nss_monitor_test={int(name == 'monitor-validation')}" if mode else ""
+                suffix = (f" nss_relay_trace={int(name == 'relay-trace')}"
+                          f" nss_monitor_test={int(name == 'monitor-validation')}") if mode else ""
                 assert f"insmod ath11k nss_offload={mode} frame_mode=2" + suffix in calls, name
             if loaded:
                 assert "insmod qca-nss-drv wifi_only=1" not in calls, name
@@ -115,7 +119,7 @@ insmod() {
             if name == "ahb-failure":
                 assert "modprobe ath11k_pci" in calls, name
             if name == "bridge-failure":
-                assert "insmod ath11k nss_offload=1 frame_mode=2 nss_monitor_test=0" in calls, name
+                assert "insmod ath11k nss_offload=1 frame_mode=2 nss_relay_trace=0 nss_monitor_test=0" in calls, name
                 assert "modprobe ath11k_ahb" in calls, name
             steered = enabled and ready and name not in ("core-load-failure", "dependency-failure",
                 "rx-config-failure", "rx-irq-write-failure", "single-cpu", "missing-rx-irq")
@@ -341,25 +345,31 @@ struct nss_ctx_instance { int unused; };
 struct nss_top_instance { struct nss_ctx_instance nss[2]; int num_nss; };
 static struct nss_top_instance nss_top_main={.num_nss=1};
 static int nss_rps_config, nss_rps_hash_bitmap=3;
+static int nss_rps_mutex,nss_rps_uncertain;
+#define NSS_RPS_UNCERTAIN_ENABLE 1
+#define NSS_RPS_UNCERTAIN_HASH 2
+#define NSS_RPS_UNCERTAIN_PRI 4
+static void mutex_lock(int *lock) { assert(!*lock);*lock=1; }
+static void mutex_unlock(int *lock) { assert(*lock);*lock=0; }
 static int nss_rps_pri_map[4]={-1,-1,-1,-1};
 static int cfg_result,cfg_calls,v4_result,v6_result,v4_calls,v6_calls,v4_values[4],pri_result;
 static int proc_dointvec(const struct ctl_table *c,int write,void *buf,size_t *len,loff_t *pos) {
  if(write) *c->data=*(int *)buf;
  return 0;
 }
-static int nss_rps_cfg(struct nss_ctx_instance *c,int enable) { assert(enable==1); ++cfg_calls; return cfg_result; }
+static int nss_rps_cfg(struct nss_ctx_instance *c,int enable) { assert(nss_rps_mutex&&enable==1); ++cfg_calls; return cfg_result; }
 static int nss_rps_ipv4_hash_bitmap_cfg(struct nss_ctx_instance *c,int bitmap) {
- assert(v4_calls<4); v4_values[v4_calls++]=bitmap; return v4_result;
+ assert(nss_rps_mutex&&v4_calls<4); v4_values[v4_calls++]=bitmap; return v4_result;
 }
-static int nss_rps_ipv6_hash_bitmap_cfg(struct nss_ctx_instance *c,int bitmap) { ++v6_calls; return v6_result; }
-static int nss_rps_pri_map_cfg(struct nss_ctx_instance *c,int *map) { return pri_result; }
+static int nss_rps_ipv6_hash_bitmap_cfg(struct nss_ctx_instance *c,int bitmap) { assert(nss_rps_mutex);++v6_calls; return v6_result; }
+static int nss_rps_pri_map_cfg(struct nss_ctx_instance *c,int *map) { assert(nss_rps_mutex);return pri_result; }
 static void nss_rps_pri_map_usage(void) {}
 static int nss_rps_pri_map_print(void *b,size_t *l,loff_t *p,int *map) { return 0; }
 '''
     main = r'''
 static int configure(int (*handler)(const struct ctl_table *,int,void *,size_t *,loff_t *),int *value,int next) {
  struct ctl_table ctl={.data=value}; size_t len=sizeof(next); loff_t pos=0;
- return handler(&ctl,1,&next,&len,&pos);
+ int result=handler(&ctl,1,&next,&len,&pos);assert(!nss_rps_mutex);return result;
 }
 int main(void) {
  assert(!configure(nss_rps_cfg_handler,&nss_rps_config,0) && !cfg_calls && !nss_rps_config);
@@ -367,19 +377,24 @@ int main(void) {
  assert(configure(nss_rps_cfg_handler,&nss_rps_config,0)==-EOPNOTSUPP && nss_rps_config==1 && cfg_calls==1);
  assert(configure(nss_rps_cfg_handler,&nss_rps_config,2)==-EINVAL && nss_rps_config==1 && cfg_calls==1);
  assert(configure(nss_rps_cfg_handler,&nss_rps_config,-1)==-EINVAL && nss_rps_config==1 && cfg_calls==1);
- nss_rps_config=0; cfg_result=1;
+ nss_rps_config=0; cfg_result=-EIO;
  assert(configure(nss_rps_cfg_handler,&nss_rps_config,1)==-EIO && !nss_rps_config);
- cfg_result=0;
+ cfg_result=-ETIMEDOUT;
+ assert(configure(nss_rps_cfg_handler,&nss_rps_config,1)==-ETIMEDOUT&&!nss_rps_config);
+ assert(nss_rps_uncertain==NSS_RPS_UNCERTAIN_ENABLE);
+ nss_rps_uncertain|=NSS_RPS_UNCERTAIN_PRI;cfg_result=0;
+ assert(!configure(nss_rps_cfg_handler,&nss_rps_config,1));
+ assert(nss_rps_uncertain==NSS_RPS_UNCERTAIN_PRI);
 #if defined(NSS_DRV_IPV4_ENABLE) && defined(NSS_DRV_IPV6_ENABLE)
  assert(!configure(nss_rps_hash_bitmap_cfg_handler,&nss_rps_hash_bitmap,0));
  assert(!nss_rps_hash_bitmap && v4_values[0]==0 && v6_calls==1);
  v4_calls=v6_calls=0;
  assert(!configure(nss_rps_hash_bitmap_cfg_handler,&nss_rps_hash_bitmap,2));
  assert(nss_rps_hash_bitmap==2 && v4_values[0]==2 && v6_calls==1);
- nss_rps_hash_bitmap=3; v4_calls=v6_calls=0; v4_result=1;
+ nss_rps_hash_bitmap=3; v4_calls=v6_calls=0; v4_result=-EIO;
  assert(configure(nss_rps_hash_bitmap_cfg_handler,&nss_rps_hash_bitmap,2)==-EIO);
  assert(nss_rps_hash_bitmap==3 && v4_calls==1 && !v6_calls);
- v4_result=0; v6_result=1; v4_calls=v6_calls=0;
+ v4_result=0; v6_result=-EIO; v4_calls=v6_calls=0;
  assert(configure(nss_rps_hash_bitmap_cfg_handler,&nss_rps_hash_bitmap,2)==-EIO);
  assert(nss_rps_hash_bitmap==3 && v4_calls==2 && v4_values[0]==2 && v4_values[1]==3);
  v6_result=0; v4_calls=v6_calls=0;
@@ -400,9 +415,11 @@ int main(void) {
  char bad_pri[]="4 1\n"; len=sizeof(bad_pri)-1; assert(nss_rps_pri_map_parse(bad_pri,&len,&out)!=0);
  char bad_cpu[]="0 2\n"; len=sizeof(bad_cpu)-1; assert(nss_rps_pri_map_parse(bad_cpu,&len,&out)!=0);
  struct ctl_table ctl={0}; loff_t pos=0; char value[]="0 1\n"; len=sizeof(value)-1;
- pri_result=1; assert(nss_rps_pri_map_cfg_handler(&ctl,1,value,&len,&pos)==-EIO && nss_rps_pri_map[0]==-1);
+ pri_result=-EIO; assert(nss_rps_pri_map_cfg_handler(&ctl,1,value,&len,&pos)==-EIO && nss_rps_pri_map[0]==-1);
+ assert(!nss_rps_mutex);
  pri_result=0; pos=0; len=sizeof(value)-1;
  assert(!nss_rps_pri_map_cfg_handler(&ctl,1,value,&len,&pos) && nss_rps_pri_map[0]==1);
+ assert(!nss_rps_uncertain&&!nss_rps_mutex);
  return 0;
 }
 '''

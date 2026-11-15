@@ -16,3 +16,7 @@ start_service() {
 service_triggers() {
 	procd_add_reload_trigger sqm wireless
 }
+
+reload_service() {
+	procd_send_signal nss-sqm '*' HUP
+}

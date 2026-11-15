@@ -1,0 +1,71 @@
+Subject: [PATCH] dnsmasq: preserve TCP query framing and restore rejected replies
+
+--- a/src/forward.c
++++ b/src/forward.c
+@@ -2082,7 +2082,8 @@
+ 			struct iovec *recvbuff, int have_mark, unsigned int mark, struct server **servp)
+ {
+   int firstsendto = -1;
+-  u16 length;
++  u16 query_length, reply_length;
++  u16 query_id = header->id;
+   unsigned int rsize = 0;
+   int class, rclass, type, rtype;
+   unsigned char *p;
+@@ -2101,9 +2102,9 @@
+   GETSHORT(type, p); 
+   GETSHORT(class, p);
+ 
+-  length = htons(qsize);
+-  sendio[0].iov_base = &length;
+-  sendio[0].iov_len = sizeof(length);
++  query_length = htons(qsize);
++  sendio[0].iov_base = &query_length;
++  sendio[0].iov_len = sizeof(query_length);
+   sendio[1].iov_base = header;
+   sendio[1].iov_len = qsize;
+ 
+@@ -2194,8 +2195,8 @@
+       /* We use the _ONCE variant of read_write() here because we've set a timeout on the tcp socket
+ 	 and wish to abort if the whole data is not read/written within the timeout. */      
+       if ((!data_sent && !read_writev(serv->tcpfd, sendio, 2, RW_WRITE_ONCE)) ||
+-	  !read_write(serv->tcpfd, (unsigned char *)&length, sizeof(length), RW_READ_ONCE) ||
+-	  !expand_buf(recvbuff, (rsize = ntohs(length))) ||
++	  !read_write(serv->tcpfd, (unsigned char *)&reply_length, sizeof(reply_length), RW_READ_ONCE) ||
++	  !expand_buf(recvbuff, (rsize = ntohs(reply_length))) ||
+ 	  !read_write(serv->tcpfd, recvbuff->iov_base, rsize, RW_READ_ONCE))
+       {
+ 	  /* We get data then EOF, reopen connection to same server,
+@@ -2218,7 +2219,8 @@
+ 	     Try another server, or give up */
+ 	  struct dns_header *header = (struct dns_header *)recvbuff->iov_base;
+ 	  p = (unsigned char *)(header+1);
+-	  if (rsize < (unsigned int)sizeof(struct dns_header) || !(header->hb3 & HB3_QR) || ntohs(header->qdcount) != 1 ||
++	  if (rsize < (unsigned int)sizeof(struct dns_header) || header->id != query_id ||
++	      !(header->hb3 & HB3_QR) || ntohs(header->qdcount) != 1 ||
+ 	      extract_name(header, rsize, &p, daemon->namebuff, EXTR_NAME_COMPARE, 4) != 1)
+ 	    continue;
+ 	  
+@@ -2672,7 +2674,21 @@
+ 		  
+ 		  /* Loop round available servers until we succeed in connecting to one. */
+ 		  if ((m = tcp_talk(first, last, start, header, size, bigbuff, have_mark, mark, &serv)) == 0)
+-		    ede = EDE_NETERR;
++		    {
++		      /* Rejected or partial upstream replies may have overwritten and
++		       * resized bigbuff. A local error must describe the original query.
++		       * DNSSEC may also have appended an OPT record to that query.
++		       */
++		      if (!expand_buf(bigbuff, size))
++			break;
++		      out_header = bigbuff->iov_base;
++		      memcpy(out_header, header, size);
++		      if (checking_disabled)
++			out_header->hb4 |= HB4_CD;
++		      else
++			out_header->hb4 &= ~HB4_CD;
++		      ede = EDE_NETERR;
++		    }
+ 		  else
+ 		    {
+ 		      /* just in case tcp_talk() expanded buffer - should never happen */

@@ -2,7 +2,8 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sqm-scripts-nss
 PKG_VERSION:=20261012
-PKG_RELEASE:=3
+PKG_RELEASE:=6
+PKG_FLAGS:=nonshared
 PKG_LICENSE:=GPL-2.0
 
 # Firmware tree/convergence logic from nss-packages
@@ -13,7 +14,8 @@ define Package/sqm-scripts-nss
   SECTION:=net
   CATEGORY:=Base system
   TITLE:=SQM scripts for NSS firmware scheduling
-  DEPENDS:=@TARGET_qualcommax_ipq50xx +sqm-scripts +tc-full +nftables-json +kmod-qca-nss-drv-qdisc +kmod-qca-nss-drv-igs
+  DEPENDS:=@TARGET_qualcommax_ipq50xx +sqm-scripts +tc-full +nftables-json +kmod-qca-nss-drv-qdisc +kmod-qca-nss-drv-igs +ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +ucode-mod-rtnl
+  EXTRA_DEPENDS:=sqm-scripts (>=1.7.2-r4), ucode-mod-rtnl (>=2026.01.16~85922056-r3)
   PKGARCH:=all
 endef
 
@@ -31,6 +33,7 @@ define Package/sqm-scripts-nss/install
 	$(INSTALL_DIR) $(1)/usr/lib/sqm $(1)/etc/hotplug.d/iface $(1)/etc/init.d
 	$(INSTALL_DATA) ./files/nss-edma.qos ./files/nss-edma.qos.help ./files/nss-fq.qos ./files/nss-fq.qos.help $(1)/usr/lib/sqm/
 	$(INSTALL_BIN) ./files/nss-sqm-watch $(1)/usr/lib/sqm/nss-sqm-watch
+	$(INSTALL_DATA) ./files/nss-sqm-watch.uc ./files/nss-sqm-state.uc $(1)/usr/lib/sqm/
 	$(INSTALL_BIN) ./files/nss-sqm.init $(1)/etc/init.d/nss-sqm
 	$(INSTALL_DATA) ./files/nss-sqm-hotplug $(1)/etc/hotplug.d/iface/12-nss-sqm
 endef

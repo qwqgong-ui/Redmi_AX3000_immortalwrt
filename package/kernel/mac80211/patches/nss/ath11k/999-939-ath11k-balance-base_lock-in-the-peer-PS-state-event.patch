@@ -1,0 +1,131 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ath11k: balance base_lock in the peer PS state event
+
+999-900 turned the peer lookup in ath11k_wmi_event_peer_sta_ps_state_chg()
+into a per-radio loop but kept the single unlock at the exit label. Every
+event for a known station therefore releases ab->base_lock twice: once
+after reading peer->sta and again at exit, and a missing station entry
+takes the same double release. The extra spin_unlock_bh() underflows the
+softirq count of the WMI event context.
+
+The events only arrive after debugfs ps_state_enable is set. Writing it on
+the 2.4 GHz radio with a power-saving client attached rebooted the
+Redmi AX3000 within seconds.
+
+Keep the per-radio lookup, stop at the first match, and give every path
+exactly one release, as in the upstream handler.
+
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -7679,65 +7679,67 @@
+ 
+ 	rcu_read_lock();
+ 
+-
++	peer = NULL;
+ 	spin_lock_bh(&ab->base_lock);
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		pdev = &ab->pdevs[i];
+-		ar = pdev->ar;
+-		peer = ath11k_peer_find_by_addr(ar, ev->peer_macaddr.addr);
+-		if (!peer) {
+-			continue;
+-		}
+-
+-		ar = ath11k_mac_get_ar_by_vdev_id(ab, peer->vdev_id);
+-
+-		if (!ar) {
+-			ath11k_warn(ab, "invalid vdev id in peer sta ps state change ev %d", peer->vdev_id);
+-
+-			goto exit;
+-		}
++		peer = ath11k_peer_find_by_addr(pdev->ar, ev->peer_macaddr.addr);
++		if (peer)
++			break;
++	}
+ 
+-		sta = peer->sta;
++	if (!peer) {
++		spin_unlock_bh(&ab->base_lock);
++		ath11k_warn(ab, "peer not found %pM\n", ev->peer_macaddr.addr);
++		goto exit;
++	}
+ 
++	ar = ath11k_mac_get_ar_by_vdev_id(ab, peer->vdev_id);
++	if (!ar) {
+ 		spin_unlock_bh(&ab->base_lock);
++		ath11k_warn(ab, "invalid vdev id in peer sta ps state change ev %d", peer->vdev_id);
++		goto exit;
++	}
+ 
+-		if (!sta) {
+-			ath11k_warn(ab, "failed to find station entry %pM\n", ev->peer_macaddr.addr);
+-			goto exit;
+-		}
++	sta = peer->sta;
++
++	spin_unlock_bh(&ab->base_lock);
+ 
+-		arsta = ath11k_sta_to_arsta(sta);
++	if (!sta) {
++		ath11k_warn(ab, "failed to find station entry %pM\n", ev->peer_macaddr.addr);
++		goto exit;
++	}
+ 
+-		spin_lock_bh(&ar->data_lock);
++	arsta = ath11k_sta_to_arsta(sta);
+ 
+-		peer_previous_ps_state = arsta->peer_ps_state;
+-		arsta->peer_ps_state = ev->peer_ps_state;
+-		arsta->peer_current_ps_valid = !!ev->peer_ps_valid;
+-
+-		if (test_bit(WMI_TLV_SERVICE_PEER_POWER_SAVE_DURATION_SUPPORT, ar->ab->wmi_ab.svc_map)) {
+-			if (!(ev->ps_supported_bitmap & WMI_PEER_PS_VALID) ||
+-			    !(ev->ps_supported_bitmap & WMI_PEER_PS_STATE_TIMESTAMP) || !ev->peer_ps_valid) {
+-				spin_unlock_bh(&ar->data_lock);
+-				goto exit;
+-			}
+-
+-			if (arsta->peer_ps_state == WMI_PEER_PS_STATE_ON) {
+-				arsta->ps_start_time = ev->peer_ps_timestamp;
+-				arsta->ps_start_jiffies = jiffies;
+-			} else if (arsta->peer_ps_state == WMI_PEER_PS_STATE_OFF &&
+-				   peer_previous_ps_state == WMI_PEER_PS_STATE_ON) {
+-				arsta->ps_total_duration =
+-					arsta->ps_total_duration + (ev->peer_ps_timestamp - arsta->ps_start_time);
+-			}
++	spin_lock_bh(&ar->data_lock);
+ 
+-			if (ar->ps_timekeeper_enable)
+-				trace_ath11k_ps_timekeeper(ar, ev->peer_macaddr.addr, ev->peer_ps_timestamp, arsta->peer_ps_state);
++	peer_previous_ps_state = arsta->peer_ps_state;
++	arsta->peer_ps_state = ev->peer_ps_state;
++	arsta->peer_current_ps_valid = !!ev->peer_ps_valid;
++
++	if (test_bit(WMI_TLV_SERVICE_PEER_POWER_SAVE_DURATION_SUPPORT, ar->ab->wmi_ab.svc_map)) {
++		if (!(ev->ps_supported_bitmap & WMI_PEER_PS_VALID) ||
++		    !(ev->ps_supported_bitmap & WMI_PEER_PS_STATE_TIMESTAMP) || !ev->peer_ps_valid)
++			goto out;
++
++		if (arsta->peer_ps_state == WMI_PEER_PS_STATE_ON) {
++			arsta->ps_start_time = ev->peer_ps_timestamp;
++			arsta->ps_start_jiffies = jiffies;
++		} else if (arsta->peer_ps_state == WMI_PEER_PS_STATE_OFF &&
++			   peer_previous_ps_state == WMI_PEER_PS_STATE_ON) {
++			arsta->ps_total_duration =
++				arsta->ps_total_duration + (ev->peer_ps_timestamp - arsta->ps_start_time);
+ 		}
+-		spin_unlock_bh(&ar->data_lock);
++
++		if (ar->ps_timekeeper_enable)
++			trace_ath11k_ps_timekeeper(ar, ev->peer_macaddr.addr, ev->peer_ps_timestamp, arsta->peer_ps_state);
+ 	}
+ 
++out:
++	spin_unlock_bh(&ar->data_lock);
++
+ exit:
+-	spin_unlock_bh(&ab->base_lock);
+ 	rcu_read_unlock();
+ 	kfree(tb);
+ }

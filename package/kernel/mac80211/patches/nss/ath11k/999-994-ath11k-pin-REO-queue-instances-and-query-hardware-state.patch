@@ -1598,7 +1598,7 @@ Subject: [PATCH] ath11k: pin REO queue instances and isolate hardware queries
  	if (!refcount_dec_and_test(&peer->refs))
 --- a/drivers/net/wireless/ath/ath11k/mac.c
 +++ b/drivers/net/wireless/ath/ath11k/mac.c
-@@ -909,18 +909,24 @@
+@@ -925,19 +925,25 @@
  
  void ath11k_mac_peer_cleanup_all(struct ath11k *ar)
  {
@@ -1616,11 +1616,13 @@ Subject: [PATCH] ath11k: pin REO queue instances and isolate hardware queries
 +		ath11k_peer_get(peer);
  		ath11k_peer_rx_tid_cleanup(ar, peer);
 -		ath11k_peer_rhash_delete(ar, peer);
+-		ath11k_mac_station_cleanup(peer->sta);
 -		list_del(&peer->list);
 -		ath11k_peer_release(ar, peer);
 +		/* timer_delete_sync drops base_lock; unmap may have removed this node. */
 +		if (ath11k_peer_find(ar, peer->vdev_id, peer->addr) == peer) {
 +			ath11k_peer_rhash_delete(ar, peer);
++			ath11k_mac_station_cleanup(peer->sta);
 +			list_del(&peer->list);
 +			ath11k_peer_release(ar, peer);
 +		}

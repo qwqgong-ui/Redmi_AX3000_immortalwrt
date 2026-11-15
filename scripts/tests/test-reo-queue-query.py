@@ -128,10 +128,12 @@ struct ath11k {struct ath11k_base *ab;struct list_head peers;spinlock_t conf_mut
 #define mutex_lock(p) spin_lock_bh(p)
 #define mutex_unlock(p) spin_unlock_bh(p)
 #define list_first_entry(h,t,m) container_of((h)->next,t,m)
-struct ieee80211_sta {u8 addr[6];};
+struct ath11k_sta {void *tx_stats,*rx_stats;};
+struct ieee80211_sta {u8 addr[6];struct ath11k_sta drv_priv;};
+static struct ath11k_sta *ath11k_sta_to_arsta(struct ieee80211_sta *sta){return &sta->drv_priv;}
 struct ieee80211_ampdu_params {struct ieee80211_sta *sta;u8 tid;};
 struct ath11k_vif {struct ath11k *ar;int vdev_id;};
-struct ath11k_peer {struct list_head list;refcount_t refs;int vdev_id,peer_id;u8 addr[6];bool dp_setup_done;void *tfm_mmic;struct dp_rx_tid rx_tid[17];};
+struct ath11k_peer {struct list_head list;refcount_t refs;int vdev_id,peer_id;u8 addr[6];bool dp_setup_done;void *tfm_mmic;struct ieee80211_sta *sta;struct dp_rx_tid rx_tid[17];};
 struct hw_regs {u32 hal_reo1_aging_thresh_ix_0,hal_reo1_aging_thresh_ix_1,hal_reo1_aging_thresh_ix_2,hal_reo1_aging_thresh_ix_3;};
 static const struct hw_regs regs={.hal_reo1_aging_thresh_ix_0=0x564,.hal_reo1_aging_thresh_ix_1=0x568,.hal_reo1_aging_thresh_ix_2=0x56c,.hal_reo1_aging_thresh_ix_3=0x570};
 struct ath11k_base {struct device *dev;spinlock_t base_lock;unsigned long dev_flags;struct ath11k_dp dp;struct ath11k_hal hal;struct {const struct hw_regs *regs;} hw_params;struct {bool ownership_uncertain;struct list_head retained_host_peers;} nss;unsigned num_radios;struct {struct ath11k *ar;} pdevs[1];struct {unsigned reo_cmd_update_rx_queue_error,hal_reo_cmd_drain,reo_cmd_cache_error;} soc_stats;};
@@ -275,10 +277,19 @@ static void retirement_callback_cases(void){
 }
 static void cleanup_iteration_case(void){
  struct ath11k_base ab;struct ath11k ar;struct device dev;init(&ab,&ar,&dev);
- peer_new(&ar);struct ath11k_peer *next=peer_new(&ar);next->addr[5]=8;
+ struct ath11k_peer *first=peer_new(&ar);first->sta=(void *)1;
+ struct ath11k_peer *next=peer_new(&ar);next->addr[5]=8;
  unmap_during_cleanup=true;cleanup_rhash_deletes=0;
  spin_lock_bh(&ar.conf_mutex);ath11k_mac_peer_cleanup_all(&ar);spin_unlock_bh(&ar.conf_mutex);
  assert(list_empty(&ar.peers)&&cleanup_rhash_deletes==0);
+#ifdef HAVE_STATION_CLEANUP
+ struct ieee80211_sta sta={.drv_priv={.tx_stats=kzalloc(16,GFP_KERNEL),.rx_stats=kzalloc(16,GFP_KERNEL)}};
+ assert(sta.drv_priv.tx_stats&&sta.drv_priv.rx_stats);first=peer_new(&ar);first->sta=&sta;
+ unsigned before=heap_frees;
+ spin_lock_bh(&ar.conf_mutex);ath11k_mac_peer_cleanup_all(&ar);spin_unlock_bh(&ar.conf_mutex);
+ assert(list_empty(&ar.peers)&&cleanup_rhash_deletes==1&&!sta.drv_priv.tx_stats&&!sta.drv_priv.rx_stats);
+ assert(heap_frees==before+3);
+#endif
 }
 int main(void){
  struct ath11k_base ab;struct ath11k ar;struct device dev;init(&ab,&ar,&dev);struct ath11k_peer *p=peer_new(&ar);
@@ -400,7 +411,9 @@ def build_fixture(source, draft):
     peer = read("peer.c")
     hardware = types.declaration((source / "hw.h").read_text(), "struct", "ath11k_hw_regs")
     structures = re.sub(r"struct hw_regs \{[^}]+\};", lambda _: hardware + "\n#define hw_regs ath11k_hw_regs\n", STRUCTURES, count=1)
-    code = (SHIM + declarations + "\n" + "\n".join(macros) + "\n#define HAL_REO_CMD 1\n" + structures + helpers +
+    station_cleanup = ("\n#define HAVE_STATION_CLEANUP 1\n" + extract.function(read("mac.c"), "ath11k_mac_station_cleanup")
+                       if "ath11k_mac_station_cleanup(" in read("mac.c") else "")
+    code = (SHIM + declarations + "\n" + "\n".join(macros) + "\n#define HAL_REO_CMD 1\n" + structures + helpers + station_cleanup +
             "\n".join(extract.function(peer, name) for name in ("ath11k_peer_get", "ath11k_peer_put_locked", "ath11k_peer_put", "ath11k_peer_release")) +
             extract.function(read("mac.c"), "ath11k_mac_peer_cleanup_all") +
             "\n".join(extract.function(hal_source, name) for name in hal_functions) +

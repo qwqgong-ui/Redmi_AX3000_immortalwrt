@@ -1,0 +1,1055 @@
+stock_patch	result	evidence
+patches/ath11k/009-ath11k-Enable-VHT-for-2G.patch	E	本地983保留VHT 2GHz能力改动。
+patches/ath11k/012-ath11k-add-pktlog-debugfs-support.patch	D	现有filter/trace不包含原厂pktlog环形记录器。
+patches/ath11k/020-ath11k-add-btcoex-config.patch	D	vendor命令、DT PTA及coex配置未移植。
+patches/ath11k/022-ath11k-add-ap-ps-support.patch	D	未移植原厂AP无客户端节能recalc；STA PS不等价。
+patches/ath11k/030-fix-ath11k-compilation-error.patch	N	仅补旧恢复实现使用的FW_RESTART_FOR_HOST枚举。
+patches/ath11k/031-ath11k-print-stats-on-crash.patch	D	未集成跨SoC SSR notifier及dump等待机制。
+patches/ath11k/033-ath11k-fix-for-peer-memory-corruption.patch	E	基础peer修复保留，另强化ACK及DMA生命周期。
+patches/ath11k/035-ath11k-load-appropriate-board-data-from-board-id.patch	E	QMI支持DT board-id并增加文件来源优先级。
+patches/ath11k/037-ath11k-add-wide-band-scan-support.patch	D	现代扫描/ROC不同，未照搬禁用ROC改写。
+patches/ath11k/038-ath11k-Adding-support-for-QDSS.patch	D	QDSS配置下载、内存请求及启动链未完整集成。
+patches/ath11k/068-ath11k-add-rx-histogram-stats.patch	E	packet/byte histogram、MU user及rate table主体保留。
+patches/ath11k/069-ath11k-add-HE-stats-in-peer-stats.patch	E	HE、PPDU delayed BA及peer TX统计保留。
+patches/ath11k/080-ath11k-ethernet-rx-decap-offload.patch	E	Ethernet RX decap默认及能力设置保留。
+patches/ath11k/084-ath11k-fix-ul-ofdma-counter-always-zero-in-peer-stat.patch	E	UL OFDMA计数修复保留。
+patches/ath11k/087-ath11k-fix-ul-ofdma-counter-increamenting-improperly.patch	E	用户数及统计条件保留并适配现代monitor结构。
+patches/ath11k/088-ath11k-add-htt-stats.patch	D	HTT类型25至28扩展解码未完整集成。
+patches/ath11k/105-ath11k-adding-validation-for-tx-stats-and-rx-stats.patch	F	rx_stats判空前被初始化表达式解引用；候选已修。
+patches/ath11k/105-ath11k-fix-monitor-crash-if-tx-offload-is-enabled.patch	E	tx_status_ext识别HW封装；flags组合缺陷另修。
+patches/ath11k/107-ath11k-tid-counter-fix.patch	E	具名info7 TID bitmap和u16 tid替代旧保留字段。
+patches/ath11k/108-ath11k-enable-ul-ofdma-ru-allocation-in-peer-stats.patch	E	RU allocation及MU user统计保留。
+patches/ath11k/112-ath11k-add-btcoex-debugfs-support.patch	D	btcoex、duty-cycle及forced-algo接口未移植。
+patches/ath11k/113-ath11k-add-8023-undecap-support.patch	F	主体已移植；当前SNAP描述符偏移/重复padding及扩容别名另有缺陷，候选已修。
+patches/ath11k/116-ath11k-clean-up-monitor-vdev-del.patch	E	现代monitor生命周期已消除重复删除结构。
+patches/ath11k/118-ath11k-reset-bcc-counter.patch	D	MU LDPC填充及隐藏BCC输出未照搬，统计口径不同。
+patches/ath11k/120-ath11k-enable-ppdu-stats-in-coexist-mode.patch	E	扩展统计开关不会覆盖monitor ring filter。
+patches/ath11k/142-ath11k-adding-support-for-mgmt-frame-stats.patch	E	管理帧TX/RX/completion统计保留。
+patches/ath11k/147-fix-signal-station-dump.patch	F	SU统计仍受fc_valid/ast_index限制；候选已修。
+patches/ath11k/164-ath11k-add-qcn9000-support.patch	N	QCN9074 PCI/MHI及固定DDR扩展不适用于本机。
+patches/ath11k/181-ath11k-remove-error-on-soc-debugfs-fail.patch	E	非致命soc debugfs处理保留并适配当前API。
+patches/ath11k/188-ath11k-m3-ssr-dump-collection.patch	D	M3上传indication、完成应答及enable接口未完整集成。
+patches/ath11k/191-ath11k-add-mgmt-and-data-ack-rssi.patch	E	ACK RSSI及按服务能力转换dBm保留。
+patches/ath11k/193-ath11k-add-htt-stats-30-ext-rx-rate.patch	D	RX_RATE_EXT tag103及formatter未完整集成。
+patches/ath11k/194-ath11k-use-dev_coredumpm-API-to-collect-rddm.patch	E	采用dev_coredumpv转移所有权，格式非逐字相同。
+patches/ath11k/195-ath11k-add-coldboot-calibration-for-qcn9000.patch	E	公共coldboot helper存在；本机明确关闭冷校准。
+patches/ath11k/196-ath11k-add-qdss-support-for-qcn9000.patch	D	trace_qdss、ETR内存及save indication未集成。
+patches/ath11k/196-ath11k-tpc-stats-support.patch	D	TPC stats debugfs和WMI event解码未集成。
+patches/ath11k/197-ath11k-add-support-to-collect-q6mem-dump.patch	D	恢复机制不同，未采用默认关闭recovery后的BUG_ON策略。
+patches/ath11k/199-002-ath11k_nss-add-nss-driver-interface.patch	D	主干保留；ACK绑定、peer所有权和格式事务主动强化。
+patches/ath11k/199-003-ath11k-add-nss-support.patch	D	生命周期和ring ownership保留；key/VDEV时序采用强化实现。
+patches/ath11k/201-ath11k-check-valid-fixed-rate-settings.patch	D	一般MCS/NSS校验存在；缺原厂MU较低NSS覆盖检查。
+patches/ath11k/204-ath11k-support-for-native-160MHz.patch	F	已修HE160 TX/RX map、RX shift、native1:1 VHT EXT_NSS和本机/peer NSS混用；实际函数与五项消融通过，整包已加载；HE160空口仍未验收。详见firmware-contracts.tsv#204
+patches/ath11k/207-ath11k-Add-support-for-dynamic-vlan.patch	E	AP_VLAN、软件加密metadata、对齐及pkt_offset保留。
+patches/ath11k/207-ath11k-Enable-512MB-profile-in-ath11k.patch	D	同时启用256/512 profile并使用本机compact参数。
+patches/ath11k/210-ath11k-full-mon-support-for-qcn9000.patch	N	QCN9074 full-monitor扩展不是当前QCN6122目标实现。
+patches/ath11k/211-001-ath11k-add-WDS-offload-changes-to-NSS-driver-interface.patch	E	WDS learn/MEC及peer add/update/map/delete保留；ACK契约待独立闭环。
+patches/ath11k/211-002-ath11k-add-WDS-offload-support-on-NSS-offload-for-STA-mode.patch	E	STA WDS、HTT map/unmap v2及AST主体保留。
+patches/ath11k/211-ath11k-add-obss-pd-support.patch	E	现代SRG/阈值flags及服务协商替代固定128编码。
+patches/ath11k/211-ath11k-custom-aggregation-size-support-over-WMI.patch	D	per-VIF AMPDU/AMSDU大小debugfs及命令未集成。
+patches/ath11k/211-ath11k-use-reserved-memory-from-bootargs.patch	N	x86 QCN9074 memmap workaround；本机使用DT内存。
+patches/ath11k/214-ath11k-Enable-WMI-based-FW-Logging.patch	D	CE fwlog QMI开启和testmode转发链未集成。
+patches/ath11k/214-ath11k-qos-null-frame-tx-over-wmi.patch	E	NSS QoS NULL经WMI发送和独立completion保留。
+patches/ath11k/215-ath11k-Add-offchannel-scanning-support.patch	E	广告SET_SCAN_DWELL，使用现代扫描API。
+patches/ath11k/218-ath11k-add-support-to-enable-disable-color-collision.patch	D	使用正常BSS color配置，无默认关闭的全局开关。
+patches/ath11k/221-ath11k-add-debugfs-interface-to-read-write-from-memo.patch	D	athdiag/QMI任意内存读写接口未移植。
+patches/ath11k/226-th11k-Update-CE-DP-irq-names-during-registration-fo.patch	D	保留通用IRQ名，差异不在IRQ分配算法。
+patches/ath11k/231-ath11k-add-ATH11K_QMI_TARGET_MEM_MODE_256M-support-f.patch	N	原厂重点是QCN9074 fw_mem_mode，本机固定目标配置。
+patches/ath11k/231-ath11k-add-wmi-ctrl-path-stats.patch	D	control-path统计命令、completion及formatter未集成。
+patches/ath11k/232-ath11k-qcn6122-support.patch	D	芯片支持已移植；采用当前AHB/HIF和MSI API适配。
+patches/ath11k/233-001-ath11k-add-support-memory-stats.patch	D	alloc/free记账及memory_stats未集成。
+patches/ath11k/233-ath11k-Disable-rx_header-tlv-for-2K-SKB.patch	D	compact descriptor保留；buffer长度/monitor布局采用后续修正。
+patches/ath11k/233-ath11k-QDSS-support-for-qcn6122.patch	D	依赖未集成的可选QDSS链。
+patches/ath11k/233-ath11k-add-ce-latency-stats.patch	D	CE IRQ/tasklet延迟直方图和debugfs未集成。
+patches/ath11k/234-001-ath11k-account-tx-rx-packets-flow.patch	D	未集成per-STA逐边界诊断计数；NSS计数口径不同。
+patches/ath11k/234-ath11k-disabling-5-dot-9-channels.patch	F	FCC、硬件频率、国家规则、service247是独立输入；当前未消费247；尚未修。详见firmware-contracts.tsv#234
+patches/ath11k/235-001-ath11k-Add-support-for-beacon-tx-mode.patch	D	固定staggered；无burst/staggered用户切换入口。
+patches/ath11k/235-002-ath11k-add-support-for-ext-vdev-in-NSS-for-AP_VLAN-vif-handling.patch	E	ext VDEV、4addr通知和parent AP联动保留。
+patches/ath11k/235-003-ath11k-add-AP_VLAN-vif-support-for-WDS-offload-in-NSS-offload.patch	E	AP_VLAN WDS/NAWDS/BACKHAUL和parent关系保留。
+patches/ath11k/235-ath11k-add-mod-param-support-to-skip-radio.patch	D	skip_radio_bmap未移植。
+patches/ath11k/235-ath11k-add-provison-to-use-segmentted-memory-on-hk10.patch	N	QCN9074/HK10分段workaround不适用。
+patches/ath11k/235-ath11k-update-arvif-band-info.patch	D	TEST默认日志及band fallback诊断未原样采用。
+patches/ath11k/236-002-ath11k-extend-ext-vdev-in-NSS-for-dynamic-VLAN-handling.patch	E	WDS/VLAN类型区分和VLAN/group-key API保留；ACK另有未闭环项。
+patches/ath11k/236-003-ath11k-add-dynamic-VLAN-support-in-NSS-offload.patch	F	WMI早于VLAN索引选择，正常删除提前归还共享GTK槽；peer keys无VLAN维度且mapping无撤销ACK，完整所有权闭环尚未修。
+patches/ath11k/236-ath11k-add-debugfs-to-disable-dynamic-bandwidth-oper.patch	D	disable_dynamic_bw手工接口未集成。
+patches/ath11k/237-002-ath11k-Add-provision-to-configure-rx-hashmap.patch	D	保留NSS关闭host RX hash策略；无手工覆盖接口。
+patches/ath11k/237-003-ath11k-allocate-dst-ring-descriptors-from-cacheable-.patch	E	cached ring、CPU DMA同步和wrap/prefetch保留。
+patches/ath11k/237-006-ath11k-Allow-fast-rx-by-bypassing-stats-update.patch	F	主体保留但GRO后仍读peer，候选已删除消费后访问。
+patches/ath11k/238-ath11k-add-cfr-support-for-ipq8074.patch	D	整个CFR Kconfig、对象和采集未集成。
+patches/ath11k/239-ath11k-cfr-for-qcn9000.patch	N	QCN9074专用CFR；本机未编译CFR。
+patches/ath11k/244-ath11k-dp-tx-perf.patch	F	组合后TQM stats_disable路径flags未初始化；候选已修。
+patches/ath11k/245-ath11k-Fix-ce-interrupt-count.patch	N	修改IPQ8074/IPQ6018，本机用TARGET_CE_CNT_5018。
+patches/ath11k/245-ath11k-add-new-parameters-for-tx-based-capture.patch	D	扩展CFR metadata/capture；本机CFR未集成。
+patches/ath11k/245-compilation_fix.patch	N	旧内核/MHI/HE兼容片段不适合整体套入6.12/6.18。
+patches/ath11k/300-ath11k-nss-mesh-offload-support.patch	D	主体保留；当前明确关闭ATH11K_NSS_MESH_SUPPORT。
+patches/ath11k/301-ath11k-nss-mcbc-exception.patch	D	主体保留并强化PN/TID及AP MCBC host策略。
+patches/ath11k/301-debugfs-support-for-ani-parameters.patch	D	ANI enable/period/level接口未集成。
+patches/ath11k/302-ath11k-add-177-channel-to-5G-channel-list.patch	E	上游channel177与PPDU识别已覆盖；原厂附带初始reg envelope和5/6GHz互斥改写不等价于当前监管模型；保留当前177及完整实时规则。详见firmware-contracts.tsv#302
+patches/ath11k/303-ath11k-Fix-for-incorrect-PHY-mode-for-Legacy-modes-P.patch	N	仅修CFR输出头；本机无CFR。
+patches/ath11k/304-ath11k-remove-cal_done-check-during-probe.patch	N	冷校准关闭，probe等待不在正常路径。
+patches/ath11k/305-002-ath11k-Add-support-to-handle-AWGN-interference-for-6G.patch	N	6GHz DCS/AWGN不适用于2.4/5GHz目标。
+patches/ath11k/305-ath11k-fix-radar-detection-issue-in-160mhz.patch	E	chanctx radar_enabled传给freq2_radar。
+patches/ath11k/306-ath11k-sta-dbg-level-log.patch	D	per-STA mac_filter和PEER日志过滤未集成。
+patches/ath11k/308-ath11k-poll-reo-status-ipq5018.patch	D	无轮询；原厂各目标默认也关轮询，当前用IRQ。
+patches/ath11k/309-ath11k-support-to-calculate-medium-busy.patch	D	未集成同口径medium_busy和debugfs，survey不保证等价。
+patches/ath11k/310-ath11k-fix-max-peer-count-in-ipq5018-and-qcn6122.patch	E	目标三种profile peer上限均128。
+patches/ath11k/311-ath11k-configure-nss-thread-priority-during-pdev_ini.patch	E	DT radio priority和NSS scheme fallback保留。
+patches/ath11k/312-ath11k-add-ampdu-id-in-802.11-radiotap-header.patch	D	AMPDU reference未完整保留，影响抓包解释。
+patches/ath11k/314-ath11k-Fix-peer-lookup-failure-in-mgmt-tx-completion.patch	E	管理帧completion用保存VIF，避免重查peer。
+patches/ath11k/318-ath11k-add-support-for-tx-completion-stats.patch	D	per-VIF/per-STA WBM分类接口未集成。
+patches/ath11k/318-ath11k-avoid-stack-corrupt-in-nwifi-undecap.patch	E	nwifi临时header保持36字节。
+patches/ath11k/319-ath11k-fix-double-free-of-peer-rx_tid-during-reo-cmd.patch	E	ring-mask修复及后续REO ownership保护保留。
+patches/ath11k/321-001-qgic-api-compile-fix.patch	N	旧qgic分支不适用于6.12 MSI。
+patches/ath11k/321-002-ath11k-use-gic-api-irq-allocation.patch	E	MSI头/CE MSI字段及分配实现已有。
+patches/ath11k/321-ath11k-add-spectral-160mhz.dump	D	真实diff仅补primary标志和CV_UPLOAD；不是完整160支持。
+patches/ath11k/321-ath11k-add-support-to-config-spatial-streams.patch	D	config_nss debugfs及测试配置未集成。
+patches/ath11k/322-ath11k-fix-kernel-null-pointer-dereference.patch	N	CFR/spectral清理依赖在当前不存在。
+patches/ath11k/323-ath11k-add-debug-code-to-dump-peer-assoc-params.patch	D	非法HE flag/phymode参数WARN/dump未集成。
+patches/ath11k/323-ath11k-radio-phy-probe-sequence.patch	D	跨radio probe进度及2秒等待未集成；加载顺序不证明完成顺序。
+patches/ath11k/324-ath11k-Add-module-param-to-specific-caldata-file-loc.patch	D	使用DT/firmware hotplug路径；无指定路径参数。
+patches/ath11k/324-ath11k-add-CFR-capture-support-for-ipq5018-qcn6122.patch	D	芯片适用，但整个CFR可选功能未集成。
+patches/ath11k/324-ath11k-add-debugfs-support-for-tx-power.patch	D	per-chain PPDU功率统计未集成；非正常功率设置缺失。
+patches/ath11k/324-ath11k-ipq9574-support.patch	N	IPQ9574 SoC/CE/寄存器不是当前平台。
+patches/ath11k/325-ath11k-Add-support-to-packet-error-rate.patch	D	50包EWMA PER未集成；tx_failed口径不同。
+patches/ath11k/325-ath11k-Enhance-existing-htt-stats-tlv.patch	D	fw-api htt_stats.h明确新增bit7=scheduler；当前mask0x7f不请求未实现扩展，兼容前缀保留；保留扩展统计未移植差异。详见firmware-contracts.tsv#325
+patches/ath11k/325-ath11k-mon-intrp-changes.patch	D	原厂MSI monitor batch4，当前0+timer；未证实丢包因果。
+patches/ath11k/326-ath11k-Add-support-to-bit-error-rate.patch	D	失败字节EWMA未集成，且非物理逐bit BER。
+patches/ath11k/326-ath11k-add-smart-antenna-APIs.patch	D	smart-ant配置/API及STA/WMI接入未移植。
+patches/ath11k/326-ath11k-add-support-for-new-htt-stats-and-tlv-tags.patch	D	新增HTT统计类型和TLV解析未移植。
+patches/ath11k/327-ath11k-add-smart-antenna-debugfs.patch	N	当前没有smart-ant基础实现和配置。
+patches/ath11k/329-ath11k-add-ftm-responder-support.patch	E	RTT responder已配置并检查固件能力。
+patches/ath11k/330-ath11k-sync-wds_ast_entry-updates.patch	E	AST同步主体保留，peer删除顺序另有生命周期修正。
+patches/ath11k/331-ath11k-add-cbf-support-in-pktlog.patch	D	普通pktlog存在，CBF模式未移植。
+patches/ath11k/332-0002-ath11k-Add-tid-qos-configuration-support.patch	D	TID QoS接口和peer-TID扩展配置未移植。
+patches/ath11k/333-001-ath11k-Add-support-for-awgn-mitigation-in-6Ghz.patch	N	6GHz AWGN；本机无6GHz射频。
+patches/ath11k/333-0010-ath11k-build-6G-regd-based-on-vdev-type-and-6G-power.patch	N	6GHz设备类型/功率模式选择不适用。
+patches/ath11k/333-0011-ath11k-get-6G-power-type-from-HE-operation-element.patch	N	新增处理限定6GHz频道。
+patches/ath11k/333-0012-ath11k-save-power-spectral-density-psd-of-regulatory.patch	E	PSD存储和监管标志保留，签名已演进。
+patches/ath11k/333-0013-ath11k-add-parse-of-transmit-power-envelope-element.patch	N	本机不使用6GHz TPE/TPC链。
+patches/ath11k/333-0014-ath11k-save-max-tx-power-in-vdev-start-response-even.patch	E	WMI最大功率字段、解析和保存存在。
+patches/ath11k/333-0015-ath11k-fill-parameters-for-vdev_set_tpc_power-wmi-co.patch	N	6GHz扩展TPC参数链不适用。
+patches/ath11k/333-0016-ath11k-discard-BSS_CHANGED_TXPOWER-when-EXT_TPC_REG_.patch	N	本机不使用扩展TPC链。
+patches/ath11k/333-0017-ath11k-add-handler-for-WMI_VDEV_SET_TPC_POWER_CMDID.patch	N	6GHz TPC命令链不适用。
+patches/ath11k/333-0018-ath11k-send-TPC-power-to-firmware-for-6G-VDEV.patch	N	发送分支限定6GHz VDEV。
+patches/ath11k/333-0019-ath11k-add-support-to-select-all-6G-regulatory-rules.patch	N	6GHz监管规则集合不适用。
+patches/ath11k/333-0021-ath11k-update-all-6G-reg-rules-in-sband.patch	N	6GHz功率模式和频道布局不适用。
+patches/ath11k/333-0023-ath11k-update-the-eirp-power-based-on-ieee80211_get_.patch	N	6GHz功率模式频道查询不适用。
+patches/ath11k/334-ath11k-Add-support-to-threeway-coex.patch	D	three-way coex配置、入口及统计未移植。
+patches/ath11k/335-0001-ath11k-optimize-tx-completions.patch	E	优化主体保留并适配当前completion/status接口。
+patches/ath11k/335-0002-ath11k-use-DECLARE_BITMAP-for-idr-operations.patch	F	bitmap主体保留；HTT completion helper msdu未初始化，候选已修。
+patches/ath11k/335-0003-ath11k-skip-HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE-con.patch	E	TID_OVERWRITE条件优化保留。
+patches/ath11k/335-0004-ath11k-use-single-TCL-ring-for-tx.patch	E	IPQ5018/QCN6122均单TCL ring。
+patches/ath11k/335-0006-ath11k-add-simple-tx-handler-for-AP-mode.patch	D	保留一般HOST/NSS分流，未采用独立simple-TX函数。
+patches/ath11k/335-ath11-fix-ar-ops-crash.patch	N	使用const共享ops，无原厂mutable ops修改方式。
+patches/ath11k/335-ath11k-Add-Support-to-send-dynamic-pageable-memory-t.patch	D	type9/size由通用DMA allocator响应，现代PCI dump直接收集；453原厂自身在>=6.1禁用私有BHIE接口；保留现代动态分配与dump。详见firmware-contracts.tsv#335
+patches/ath11k/336-0001-ath11k-idr-optimization.patch	E	完整增删一致，包含共享idr.h目标。
+patches/ath11k/336-0002-ath11k-Use-idr_replace.patch	E	主体保留；RX IDR从1起以拒绝零cookie。
+patches/ath11k/336-ath11k-Fix-updating-rx-stats-with-monitor-vif-enable.patch	E	修复保留并调整full-monitor分派。
+patches/ath11k/336-ath11k-skip-status-ring-entry-processing.patch	E	DONE探查、跳过、释放和补充逻辑存在。
+patches/ath11k/338-ath11k-fix-extended-array-buffer-display-in-htt-stat.patch	N	当前没有该补丁处理的扩展MCS数组。
+patches/ath11k/338-ath11k-fix-transmitting-packets-during-recovery.patch	F	原厂eb12d46e6044要求CRASH_FLUSH在统一TX入口关闭；当前WMI/NSS/DP选择前确有窗口；统一入口释放skb后返回。详见firmware-contracts.tsv#338
+patches/ath11k/339-ath11k-Handle-failure-in-qmi-firmware-ready.patch	E	失败设置QMI_FAIL退出，成功后才REGISTERED。
+patches/ath11k/339-ath11k-disable-spectral-scan-during-spectral-deinit.patch	N	当前未启用ATH11K spectral。
+patches/ath11k/340-ath11k-remove-intersection-support-for-regulatory-rules.patch	E	本地905和OpenWrt官方7475321f46b8均移除初始国家与当前FW规则的host交集；当前最新regd直接交cfg80211。详见firmware-contracts.tsv#340
+patches/ath11k/341-ath11k-fix-support-for-ext-vdev-in-NSS-for-AP_VLAN-v.patch	E	恢复时重新启用NSS的完整增删一致。
+patches/ath11k/342-ath11k-provide-access-of-the-dma-buffer-back-to-dma-.patch	E	dbring dma_sync_single_for_device已保留。
+patches/ath11k/342-ath11k-retain-debugfs-during-firmware-recovery.patch	F	恢复删除radio debugfs后快速返回阻止重建；候选已修。
+patches/ath11k/343-ath11k-Add-packet-latency-histogram-support.patch	D	延迟直方图/分桶/更新入口未移植。
+patches/ath11k/346-ath11k-Add-debugfs-entry-to-configure-bss-survey-mod.patch	D	无survey模式切换，固定READ。
+patches/ath11k/346-ath11k-add-pci3-and-pci4-domain-names-to-dp-ce_.patch	N	IPQ9574多卡PCI domain3/4拓扑不适用。
+patches/ath11k/349-ath11k-add-tx-delay-to-tsf.patch	D	TBTT offset解析、TX delay和TSF调整未移植。
+patches/ath11k/350-03-ath11k-add-WMI-resource-config-for-EMA.patch	E	EMA数量、周期及WMI字段存在。
+patches/ath11k/350-05-ath11k-MBSSID-configuration-during-vdev-create-start.patch	E	MBSSID能力和create/start参数存在。
+patches/ath11k/350-06-ath11k-create-a-structure-for-WMI-vdev-up-parameters.patch	E	直接参数传递仍填写TX BSSID和profile。
+patches/ath11k/350-07-ath11k-configure-MBSSID-device-parameters.patch	E	transmit/nontransmit/EMA标志和TX VDEV存在。
+patches/ath11k/350-08-ath11k-move-vif-parameter-setting-in-a-different-fun.patch	E	独立参数解析及EMA/普通beacon调用存在。
+patches/ath11k/350-09-ath11k-EMA-beacon-support.patch	E	遍历EMA模板并发送index/first/last。
+patches/ath11k/350-10-ath11k-configure-WPA-and-RSNE-parameters-for-nontran.patch	E	nontransmitted profile WPA/RSNE继承和解析存在。
+patches/ath11k/350-14-ath11k-6GHz-Add-support-to-send-beacon-in-configured.patch	N	本机没有6GHz beacon模式。
+patches/ath11k/350-ath11k-Revert-clear-the-keys-properly-when-DISABLE_K.patch	U	原厂52393e2ae12f可见请求差异是删除时key_len=0；当前非零长度且NULL数据会发零填充TLV；删除请求设key_len=0，保留NONE、匹配ACK和失败隔离。详见firmware-contracts.tsv#350
+patches/ath11k/351-ath11k-add-qmi-changes-to-fetch-memory-region.patch	F	DT显式BDF/M3可替代相应部分；当前CALDB紧随HOST请求大小不等于原厂per-SoC/profile offset；尚未修布局。详见firmware-contracts.tsv#351
+patches/ath11k/351-ath11k-fix-scheduling-while-atomic-in-tbtt-offset-ha.patch	N	对应TBTT offset事件路径当前不存在。
+patches/ath11k/352-ath11k-Fix-non-removal-of-debugfs-post-firmware-reco.patch	N	对应per-arvif调试文件/helper不存在。
+patches/ath11k/352-ath11k-skip-caldata-fetch.patch	N	仅FTM跳过caldata，正常配置不启用。
+patches/ath11k/353-ath11k-ignore-frags-from-uninitialized-peer-in-dp.patch	E	dp_setup_done清除及未初始化peer拒绝保留。
+patches/ath11k/354-ath11k-Fix-unmapping-allocated-memory.patch	F	FW_MEM_READY重复DEVICE_INFO会覆盖devm BAR；REQUEST_MEM还会覆盖/压缩fixed HOST/CALDB逐项映射owner；相同BAR tuple复用且重编static window；变tuple拒绝并保留旧状态。详见firmware-contracts.tsv#354
+patches/ath11k/354-ath11k-Update-the-Rate-Table-information-display.patch	D	仍用一维RX rate表和顺序展示。
+patches/ath11k/354-ath11k-fix-6g-station-association-failure.patch	N	新增处理仅针对supports_6ghz关联。
+patches/ath11k/356-ath11k-invalid-desc-sanity-check.patch	F	零cookie拒绝存在；ERR必须在IDR/DMA消费前拒绝，候选已修。
+patches/ath11k/357-ath11k-fix-clear-peer-keys-during-disassoc.patch	F	单补丁相同不代表组合正确；当前clear keys落在错误状态分支，候选已修。
+patches/ath11k/357-ath11k-prevent-monitor-interface-to-transmit-packet.patch	F	原厂946380bef36e拒绝目标MONITOR VDEV；mac80211合法注入可先映射到普通AP/STA；按最终vdev_type关闭入口，不按INJECTED一刀切。详见firmware-contracts.tsv#357
+patches/ath11k/358-ath11k-Disable-HW-checksum-advertisement-to-netdevic.patch	D	继续HW_CSUM广告并保留CHECKSUM_PARTIAL处理。
+patches/ath11k/358-ath11k-fix-tx-bitrate-retry-signal-in-station-dump.patch	F	999-zh：TID≥16的PPDU不再更新txrate；按host-cmn dp_mon.c以未送达MPDU（tried−success，跳过delayed BA）计重试，NSS/host共用一个计数并取最大值避免重复；RSSI NF/带宽偏移未移植。详见firmware-contracts.tsv#358
+patches/ath11k/358-ath11k-skip-caldb-alloc-in-seg-mode.patch	E	CALDB仅coldboot支持时分配，否则清零。
+patches/ath11k/359-ath11k-fix-tkip-encryption-traffic-failure.patch	F	MIC exception重建缺TKIP条件；候选限定MMIC_ERROR修复。
+patches/ath11k/360-ath11k-add-length-validation-before-skb_put-call.patch	F	TKIP MIC skb_put缺长度/drop传播；候选已修。
+patches/ath11k/361-ath11k-Count-wbm_tx_status-reason-code-1-as-drop-pac.patch	D	未移植per-peer drop_pkts/drop_bytes布局。
+patches/ath11k/362-ath11k-fix-incorrect-ast-index-assignment-for-wds-peer.patch	E	完整增删一致；peer生命周期另外强化。
+patches/ath11k/363-ath11k-Add-the-green-AP-enabling-set-command-support.patch	N	原厂仅IPQ9574启用supports_ap_ps。
+patches/ath11k/364-ath11k-Encoding-regdb.bin-in-board-2.bin.patch	N	IPQ5018/QCN6122未启用supports_regdb。
+patches/ath11k/365-01-ath11k-Add-support-for-ADFS.patch	D	后台DFS callback及OCAC控制/事件未移植。
+patches/ath11k/365-02-ath11k-add-support-for-ADFS-radar.patch	N	依赖当前未移植的ADFS实现。
+patches/ath11k/366-ath11k-wmm-sent-pkts.patch	D	wmm_stats及per-AC发送计数未移植。
+patches/ath11k/367-ath11k-wmm-received-pkts.patch	D	WMM接收计数链未移植。
+patches/ath11k/368-ath11k-fail-sent-pkts.patch	D	WMM失败发送统计未移植。
+patches/ath11k/369-ath11k-fail-received-pkts.patch	D	WMM失败接收统计未移植。
+patches/ath11k/370-ath11k-add-support-to-get-rssi-value-of-non-associat.patch	D	neighbor_peer/nrp_rssi及监测生命周期未移植。
+patches/ath11k/371-ath11k-Fix-ppdu_id-from-firmware-PPDU-stats.patch	E	增删一致，通过FIELD_GET提取PPDU ID。
+patches/ath11k/371-ath11k-Fix-the-wrong-regdomain-update-for-KR-country.patch	F	KR仍ETSI，原厂改JP；本轮CN场景不命中，未修改监管策略。
+patches/ath11k/372-ath11k-Add-Rate-table-for-peer-tx-stats.patch	D	TX rate-table累积/展示未移植，RX表不等价。
+patches/ath11k/373-ath11k-Add-retry-mechanism-for-update_rx_qu.patch	E	重试队列保留并适配新DMA所有者/入队时点。
+patches/ath11k/374-ath11k-Check-skb_headroom-before-using-skb_push.patch	F	扩容会失效descriptor/header别名且失败未传播；候选统一重定位并传播失败。
+patches/ath11k/374-ath11k-fix-VLC-streaming-not-working-for-wan-to-wlan.patch	F	原厂c9bcb26f30a1与后续047c8f3ea16f共同要求普通native数据strip，EAPOL/QoS-null例外完整带RAW/HTT metadata；统一is_diff_encap决定skip-strip和metadata分支。详见firmware-contracts.tsv#374
+patches/ath11k/375-ath11k-add-support-for-Tx-Power-insertion.patch	D	RRM/link-measurement管理帧功率填充链未移植。
+patches/ath11k/376-ath11k-Add-nss-event-handler-support-for-link-desc.patch	E	同名补丁完整增删一致，事件主体存在。
+patches/ath11k/376-ath11k-restrict-user-country-setting-during-active-v.patch	F	SET_INIT_COUNTRY期间活动AP的Country IE未由当前hostapd重建；cfg80211合法频道检测不等价；尚未修。详见firmware-contracts.tsv#376
+patches/ath11k/377-ath11k-power-save-support-during-interface-down.patch	D	未采用interface-down suspend及核心重建方案。
+patches/ath11k/401-ath11k-Fix-mutex-dead-lock-and-q6-dump-crash.patch	E	完整增删和两个当前hunk后像一致。
+patches/ath11k/451-ath11k-Higher-RAM-support-for-third-party-platforms.patch	N	第三方高地址RAM；本机256MiB。
+patches/ath11k/452-ath11k-fix-memory-leak-caused-by-thermal-debug-regis.patch	F	恢复重复devm注册hwmon未注销；候选已修。
+patches/ath11k/453-ath11k-compilation-error-fix.patch	D	NAPI/IRQ/MHI已由现代接口替代；QRTR拥有通道start/stop；原厂自身gate>=6.1的BHIE；可选CFR/smart-ant未移植；保留现代接口和可选功能差异。详见firmware-contracts.tsv#453
+patches/ath11k/453-ath11k-flush-management-frames-to-firmware-before-wa.patch	E	完整增删及flush_work后像一致。
+patches/ath11k/454-ath11k-Removed-unwanted-rcu_read_lock-which-cause-rc.patch	E	当前FW stats parser一次RCU锁、错误统一goto out、一次unlock；不存在原厂额外unlock；无需重复修改。详见firmware-contracts.tsv#454
+patches/ath11k/454-ath11k-reap-CE-entries-if-ring-is-full-and-intrp-idl.patch	N	原厂仅IPQ9574启用CE manual-poll。
+patches/ath11k/455-ath11k-added-a-debugfs-to-dump-hal-srng-stats.patch	D	dump_srng_stats入口和完整HAL dump未移植。
+patches/ath11k/690-03-ath11k-get-txpower-for-each-link.patch	E	get_txpower的unsigned link_id后像匹配。
+patches/ath11k/702-ath11k-fix-memory-leak-in-dp-rx.patch	E	两个hunk后像匹配，fast_rx初始化前移。
+patches/ath11k/703-04-ath11k-add-support-for-set-bit-rate.patch	N	新版bitrate callback不需旧dummy-link参数。
+patches/ath11k/703-ath11k-regdb-binary-support-removal.patch	N	目标未启用supports_regdb。
+patches/ath11k/711-004-ath11k-add-two-argument-to-ath11k_mac_op_set_rts_thr.patch	E	radio_idx/value签名符合当前callback。
+patches/ath11k/711-03-ath11k-fwtest-dummy-link-id-support.patch	N	testmode关闭，当前接口无旧dummy-link要求。
+patches/ath11k/715-c-ath11k-Add-link-id-argument.patch	E	使用ieee80211_link_sta和link_sta_rc_update。
+patches/ath11k/716-004-wifi-ath11k-fetch-mbssid-tx-vif-from-deflink.patch	E	通过bss_conf.tx_bss_conf统一获取TX vif。
+patches/ath11k/751-wifi-01-ath11k-Fix-missing-duplicate-beacons-in-PSC-channels.patch	N	针对6GHz AP/PSC。
+patches/ath11k/783-001-wifi-ath11k-Fix-BCCA-counter-for-EMA.patch	F	当前逐TX beacon推进BCCA再重发整组EMA模板；fw-api有service184、独立CSC offset/bitmap及per-vdev TLV事件；尚未修。详见firmware-contracts.tsv#783
+patches/ath11k/784-ath11k-fix-compilation-issue.patch	F	fw-api qca5018/qcn6122规定REO_MISC_CTL offset0x5d8、mask0xe0000/shift17；当前目标reo_setup遗漏；目标regs填0x5d8并对三bit目的地RMW，移除错误GENERAL目的地写入。详见firmware-contracts.tsv#784
+patches/ath11k/785-fix-mhi-compilation-issue.patch	N	旧MHI SBL callback已不存在。
+patches/ath11k/786-ath11k-fix-coredump-collection-issue.patch	F	remoteproc已有stop→dump→restart，但MPD未注册dump segments且AHB无dump回调；空segments直接退出；尚未补AHB dump。详见firmware-contracts.tsv#786
+patches/ath11k/830-ath11k-Avoiding-memset-of-ppdu-info-for-next-skb.patch	E	对应本地457，完整增删一致。
+patches/ath11k/906-456-wifi-ath11k-Add-support-to-send-the-QoS-Null-Data-fr.patch	E	QoS-null特殊封装及NSS到WMI分流存在。
+patches/ath11k/907-ath11k-Fixing-with-correct-arugment-in-function.patch	N	ATH11K_TRACING关闭，旧trace宏不适用。
+patches/subsys/000-a-Revert-mac80211-allow_AP_VLAN_operation_on_crypto_controlled_devices.patch	E	ath11k主动广告AP_VLAN，不依赖全驱动无条件广告。
+patches/subsys/000-b-Revert-net-fq_impl-use-skb_get_hash-instead-of-skb_get_hash_perturb.patch	D	保留新基线skb_get_hash，不退回perturbation字段。
+patches/subsys/000-f-Revert-fq_codel-generalise-ce_threshold-marking-for-subset-of-traffic.patch	D	原厂回退CoDel选择器；当前保留新能力。
+patches/subsys/000-g-Revert-fq_codel-implement-L4S-style-ce_threshold_ect1-marking.patch	D	删除ECT1策略属于旧基线回退。
+patches/subsys/000-h-Revert-mac80211-use-eth_hw_addr_set.patch	D	当前内核保留eth_hw_addr_set。
+patches/subsys/000-i-Revert-mac80211-Use-memset_after-to-clear-tx-status.patch	D	具备memset_after，不使用硬编码偏移。
+patches/subsys/002-disable_addr_notifier.patch	D	保留IPv4/IPv6地址通知和ARP/NS过滤更新。
+patches/subsys/007-fix_compilation_issue.patch	D	删除现代TC/TWT并放松vendor-policy不适合当前接口。
+patches/subsys/008-Enabling_vht_capability_for_2G.patch	D	放宽非标准2.4GHz VHT；当前HE/NSS不依赖该扩展。
+patches/subsys/010-mac80211-disable-signed-regulatory.patch	E	有效配置启用certification-onus，未启用require-signed。
+patches/subsys/036-nl80211-add-wide-band-scan-support.patch	D	未导入vendor宽带扫描chandef接口，不广告能力。
+patches/subsys/061-mac80211-process-addba-req-during-invalid-ext-element.patch	E	已检查长度并进行完整解析和parse_error校验。
+patches/subsys/063-mac80211-fix-low-tput-for-mesh-forwarding.patch	E	异步tasklet避免锁内同步wake。
+patches/subsys/072-ath11k-support-hostapd-config-to-enable-disable-he-m.patch	E	按字段传HE波束成形/MU-MIMO，不依赖旧整元素字段。
+patches/subsys/146-mac80211-enable-TKIP-when-using-encapsulation-offloading	E	本地同名.patch保留TKIP硬件封装条件。
+patches/subsys/199-001-mac80211-add-nss-support.patch	E	NSS标志、control-port限制、统计去重、AP-isolate回调保留。
+patches/subsys/199-mac80211-fix-xmit-callback-when-hwencap-enable-in-st.patch	E	STA硬件封装发送回调修正保留。
+patches/subsys/203-mac80211-ath11k-fw-dynamic-muedca.patch	E	事件保留并增加现代policy/trace。
+patches/subsys/207-ath11k-Add-support-for-dynamic-vlan.patch	E	AP_VLAN进入802.3发送并保留接口身份。
+patches/subsys/207-mac80211-add-nss-redirect-support.patch	F	fallback未恢复数据位置且错误kfree(skb)；候选已修。
+patches/subsys/213-mac80211-ath11k-Add-HE-UL-MU-fixed-rate-setting.patch	D	HE上行固定速率vendor/WMI链未导入。
+patches/subsys/233-002-mac80211-add-support-memory-stats.patch	D	额外分配记账和debugfs未导入。
+patches/subsys/234-002-mac80211-account-tx-rx-packets-flow.patch	D	逐入口诊断和reset未导入。
+patches/subsys/235-001-mac80211-add-AP_VLAN-iftype-support-on-NSS-offload-case.patch	E	AP_VLAN生命周期、4addr通知和回调身份保留。
+patches/subsys/235-002-mac80211-Add-support-for-beacon-tx-mode.patch	D	staggered/burst用户控制未导入。
+patches/subsys/235-ath11k-update-arvif-band-info.patch	D	真实hunk仅增加诊断printk。
+patches/subsys/236-001-mac80211-add-dynamic-VLAN-support-on-NSS-offload.patch	E	VLAN key ID和AP_VLAN set_key/sta_state身份传播保留。
+patches/subsys/245-compilation_fix.patch	E	适用的NSS无STA发送及聚合绕过保留；旧兼容片段不需要。
+patches/subsys/245-revert-dev-sw-netstats-txrx-add.patch	D	服务4.4缺API；保留现代dev_sw_netstats。
+patches/subsys/300-ath11k-nss-mesh-offload-support.patch	E	路径/MPP/配置/计量框架保留，标志位适配新基线。
+patches/subsys/303-mac80211-support-to-track-mesh-beacon-miss-event.patch	D	额外beacon-miss计时和日志未导入。
+patches/subsys/305-001-mac80211-Add-support-to-handle-AWGN-interference-for-6G.patch	N	6GHz AWGN，本机无对应radio/事件生产者。
+patches/subsys/307-mac80211-support-to-dump-cont-tx-fail-count-in-mesh.patch	D	连续失败诊断、日志/CQM扩展未导入。
+patches/subsys/309-ath11k-support-to-calculate-medium-busy.patch	D	框架仅新增medium_busy和mesh日志。
+patches/subsys/312-mac80211-fix-invalid-nss-config.patch	F	HE rx_mcs_80全不支持检查缺失；候选已修。
+patches/subsys/332-0001-mac80211-Add-qos-tid-configuration-support.patch	D	聚合数量及管理帧RTS/CTS vendor控制未导入。
+patches/subsys/333-0008-cfg80211-save-power-spectral-density-psd-of-regulato.patch	E	现代基线保存并传播PSD。
+patches/subsys/333-002-mac80211-add-support-to-awgn-detection-and-mitigatio.patch	N	无6GHz AWGN bitmap事件生产者。
+patches/subsys/333-0020-mac80211-add-support-for-6G-channels-and-regulatory.patch	N	目标无6GHz九种功率模式channel池。
+patches/subsys/333-0022-cfg80211-add-6g-power-mode-advertisement-in-nl8.patch	N	依赖不存在的私有6GHz channel池。
+patches/subsys/335-0003-ath11k-skip-HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE-con.patch	E	TID-class-offload硬件标志与驱动配套保留。
+patches/subsys/335-0005-mac80211-simple-tx-for-AP-mode.patch	F	简化发送保留但HAS_TX_QUEUE分支queue未初始化；候选已修。
+patches/subsys/336-mac80211-Mesh-Fast-rx-support.patch	E	plink刷新、fast-RX条件和GFP_ATOMIC保留。
+patches/subsys/336-mac80211-fix-6GHz-AP-STA-concurrency-issue.patch	N	私有6GHz多channel池指针兼容不适用。
+patches/subsys/342-mac80211-fix-unconditional-sta-usage.patch	E	非NSS聚合/统计具备判空，NSS例外可传NULL。
+patches/subsys/343-ath11k-Add-packet-latency-histogram-support.patch	D	vendor skb时戳overlay/消费者未导入。
+patches/subsys/345-mac80211-fix-mixed-declaration.patch	E	现代spectmgmt helper已重构并满足声明要求。
+patches/subsys/346-mac80211-fix-bw-change-to-40Mhz-during-channel-switc.patch	E	WBCS helper明确解析40MHz和中心频率。
+patches/subsys/350-01-mac80211-MBSSID-and-EMA-beacon-handling-in-AP-mode.patch	E	现代MBSSID/EMA API和模板处理已有。
+patches/subsys/350-11-nl80211-add-RNR-for-EMA-AP.patch	E	EMA-RNR policy和START_AP非EMA校验存在。
+patches/subsys/350-12-mac80211-add-RNR-for-EMA-AP.patch	E	统一分配/复制；空集合越界另列843。
+patches/subsys/350-15-nl80211-FILS-discovery-template-definition.patch	E	现代AP-update和FILS模板更新已有。
+patches/subsys/353-mac80211-fix-dynamic-vlan-warning-with-monitor-interface-restart.patch	E	NSS/monitor/dynamic-VLAN封装标志条件保留。
+patches/subsys/358-mac80211-Don-t-stop-queue-when-qdisc-is-noqueue.patch	D	真实diff仅新增标志/debugfs，标题所述逻辑不存在。
+patches/subsys/380-mac80211-fix-compilation-issues-with-pkg-upgrd.patch	D	仅拆开unused变量初始化，旧编译器兼容。
+patches/subsys/529-a-mac80211-copy-MU-MIMO-and-OFDMA-HE-capability-flags-.patch	E	bss字段赋值及ath11k消费者已有。
+patches/subsys/561-nl80211-fix-attribute-definition-for-older-kernels.patch	N	低于5.10的NLA兼容分支不适用6.12。
+patches/subsys/564-nl80211-add-macro-for-maximum-EHT-NSS.patch	E	已有NL80211_EHT_NSS_MAX=16。
+patches/subsys/565-ieee80211-add-macro-for-EHT-RU-bitmask-position.patch	N	旧EHT宏在ath11k无消费者。
+patches/subsys/567-mac80211-Adding-320-MHz-bandwidth-changes.patch	N	仅IBSS扫描320MHz；目标不广告320/EHT。
+patches/subsys/570-nl80211-ensure-HE-capabilities-are-set-for-EHT.patch	E	仅在HE属性分支解析/验证EHT。
+patches/subsys/571-nl80211-beacon-EHT-rate-support.patch	E	EHT速率属性/mask/beacon校验已存在。
+patches/subsys/574-ath12k-hw-settings-for-EHT.patch	E	EHT依赖HE，而HE已强制四队列。
+patches/subsys/577-mac80211-EHT-operation-element-support-in-AP-mode.patch	N	旧私有EHT operation字段无目标消费者。
+patches/subsys/579-mac80211-Add-320-Mhz-support.patch	D	还放宽160 center_freq2；保留现代chandef规则。
+patches/subsys/581-mac80211-Support-disabling-EHT-mode.patch	E	实际仅给已有日志补EHT文字，无新状态机。
+patches/subsys/583-nl80211-add-EHT-GI-LTF-attributes-and-enums.patch	E	EHT GI/LTF字段/policy/解析已存在。
+patches/subsys/586-mac80211-copy-MU-MIMO-and-OFDMA-EHT-capability-flags.patch	E	EHT beamformer/MU-MIMO字段已设置。
+patches/subsys/588-ath12k-11be-bringup-fixes-for-D1.3-compatibility.patch	D	草案D1.3长度/解析回退不适合现代标准结构。
+patches/subsys/590-nl80211-advertise-RU-puncturing-support-to-userspace.patch	N	旧vendor能力属性，ath11k不广告。
+patches/subsys/591-cfg80211-validate-RU-puncturing-bitmap.patch	N	旧字段/草案pattern无生产者；保留现代punctured模型。
+patches/subsys/592-nl80211-validate-RU-puncturing-bitmap.patch	N	依赖私有puncturing接口，目标无非零通道。
+patches/subsys/593-mac80211-reset-puncturing-bitmap-during-width-downgr.patch	E	现代带宽降级清零punctured。
+patches/subsys/598-ath12k-Add-support-to-display-EHT-rx-rate-info-in-iw-statio.patch	N	EHT he_dcm/S1G无当前RX生产者。
+patches/subsys/619-mac80211-support-320-Mhz-in-Wide-bandwidth-CSA.patch	N	6GHz 320 CSA不适用；40MHz解析已独立覆盖。
+patches/subsys/638-02-cfg80211-Add-the-support-for-Green-AP.patch	D	vendor AP_PS命令/update_ap ABI未导入。
+patches/subsys/638-03-mac80211-Add-the-support-for-Green-AP.patch	D	无SUPPORTS_AP_PS及Green-AP消费者。
+patches/subsys/640-006-01-mac80211-Remove-unused-RX_FLAGS-from-mac80211_rx_fla.patch	E	CRC清理保留，MAC-time编码适配新基线。
+patches/subsys/640-006-mac80211-add-eht-radiotap.patch	D	保留现代标准radiotap，未替换私有U-SIG/EHT ABI。
+patches/subsys/647-02-cfg80211-Skip-punctured-channel-validation-for-5GHz.patch	N	5650MHz固定240MHz方案，本机不支持。
+patches/subsys/649-nl80211-Add-support-to-enable-disable-bss-color-coll.patch	D	无vendor禁用属性，标准检测保留。
+patches/subsys/657-mac80211-Avoid-encapsulation-of-EAPOL-frames-if-OFFL.patch	E	EAPOL按offload模式选择802.3，状态请求限制保留。
+patches/subsys/662-mac80211-add-eht_capa-for-debugfs_sta.patch	E	现代link-STA EHT capability debugfs已有。
+patches/subsys/666-mac80211-Fix-Green-AP-Crash-issue.patch	N	当前无引入err/changed问题的Green-AP实现。
+patches/subsys/667-ath12k-Add-PPE-config-definition-to-enable-disable-P.patch	N	依赖ATH12K，当前ath12k/PPE关闭。
+patches/subsys/674-Mac80211-Initialize-EWMA-fail-avg-to-1.patch	F	EWMA衰减到零可放大单次失败并断peer；候选已修。
+patches/subsys/674-mac80211-Fix-Channel-Switch-Announcement-6-GHz.patch	N	依赖私有6GHz功率模式channel池。
+patches/subsys/675-01-cfg80211-Extend-interface-combination-advertisement-.patch	N	ath11k未注册num_hw/hw_chans/iface_hw_list。
+patches/subsys/675-01-nl80211-add-support-for-background-cac-stop.patch	D	无vendor停止命令及后台雷达硬件操作。
+patches/subsys/675-02-cfg80211-add-minimum-background-cac-timeout.patch	D	无配套时长/私有API和硬件路径。
+patches/subsys/675-02-nl80211-Send-multi-hw-channel-list-and-interface.patch	N	num_hw为零直接返回，无多硬件生产者。
+patches/subsys/677-05-wifi-nl80211-use-link-ID-in-NL80211_CMD_SET_BSS.patch	E	SET_BSS已有MLO_VALID_LINK_ID。
+patches/subsys/677-10-wifi-mac80211-properly-implement-MLO-key-handling.patch	E	真实仅给tx_data加link_sta；当前已有。
+patches/subsys/677-12-wifi-mac80211-add-link-information-in-ieee80211_rx_s.patch	E	已移除CRC字段并具有RX link字段。
+patches/subsys/677-23-wifi-mac80211-add-vif-sta-link-RCU-dereference-macro.patch	E	公共现代宏已有；实际hunk是旧hwsim lockdep helper。
+patches/subsys/684-01-cfg80211-DFS-radar-detection-with-radar-bitmap.patch	D	无逐20MHz bitmap扩展，保守处理完整chandef。
+patches/subsys/684-02-mac80211-radar-bitmap-during-DFS-radar-detection.patch	D	ath11k用标准API，无vendor bitmap事件。
+patches/subsys/684-mac80211-fix-RCU-stall-while-updating-mesh-PS-STA-st.patch	E	spin_lock_bh覆盖pending发送，替代外包BH禁用。
+patches/subsys/685-mac80211-Revert-mac80211-reject-clear-user-rate-mask.patch	D	保留现代rate-control保护，不回退。
+patches/subsys/685-mac80211-fix-mesh-EHT-operation-info-IE-element.patch	N	旧草案/私有puncture，目标无EHT并提前返回。
+patches/subsys/686-mac80211-fix-RCU-stall-in-mesh-fast-xmit-path.patch	E	path-change计数原子操作与真实hunk对应。
+patches/subsys/688-cfg80211-get-channel-and-txpower-value-for-each-link.patch	N	仅valid_links MLO属性，SLO查询已有。
+patches/subsys/689-01-cfg80211-get-link-information-of-associated-station.patch	N	MLD link-MAC嵌套输出，SLO不依赖。
+patches/subsys/689-01-mac80211-use-link-conf.patch	E	link_conf/现代AddBA helper已有，额外MLD分支不命中。
+patches/subsys/689-02-mac80211-get-link-information-of-associated-station.patch	E	按link读地址/统计并清理无效link输出。
+patches/subsys/690-01-cfg80211-get-tx-power-for-each-link.patch	E	get_tx_power传link_id并增加radio_idx。
+patches/subsys/690-02-mac80211-get-tx-power-for-each-link.patch	E	mac80211查询选择link并调用驱动。
+patches/subsys/691-0001-cfg80211-mac80211-add-support-for-channel-switch-wit.patch	E	CSA用link配置/wiphy work并校验上界。
+patches/subsys/691-0002-cfg80211-mac80211-update-beacon-counters-per-link-ba.patch	E	beacon countdown逐link更新。
+patches/subsys/691-0003-mac80211-add-Critical-Update-support.patch	N	EHT/MLD Critical Update无目标消费者。
+patches/subsys/691-ath12k-240MHz-Q-Q-vendor-IE-support.patch	N	EHT 240/320 vendor IE不适用于HT/VHT/HE。
+patches/subsys/691-ath12k-Monitor-mode-bring-up-in-SLO.patch	D	保留num_running_ifaces>0，不采用放宽条件。
+patches/subsys/691-cfg80211-exported-cfg80211_chandef_dfs_cac_time-api.patch	E	公开/导出新版DFS CAC time API。
+patches/subsys/691-mac80211-support-poll-sta-for-ML-clients.patch	E	probe选择有效link/chanctx/源地址。
+patches/subsys/692-0001-cfg80211-mac80211-add-DFS-support-for-MLO.patch	E	适用SLO的CAC启停/定时/清理/radar由新版覆盖。
+patches/subsys/693-mac80211-validate-link-status-before-deciding-on-off.patch	E	SLO条件等同bss.active，另一条件已存在。
+patches/subsys/696-cfg80211-Skip-scan-entry-creation-for-duplicate-beac.patch	N	仅6GHz重复beacon建表。
+patches/subsys/697-UPSTREAM-cfg80211-mac80211-reject-bad-MBSSID-element.patch	E	拒绝范围不在1..8的indicator。
+patches/subsys/700-UPSTREAM-cfg80211-avoid-nontransmitted-BSS-list-corr.patch	E	删除nontransmitted BSS前检查链表非空。
+patches/subsys/703-01-cfg80211-add-support-for-set-bit-rate.patch	D	新版解析/应用，未采用强制当前link band校验。
+patches/subsys/703-01-cfg80211-add-support-for-set-link-specific-tx-power.patch	D	新版按radio设置，不使用旧link_id ABI。
+patches/subsys/703-02-mac80211-add-support-for-set-bit-rate.patch	D	回调接收完整mask，不用旧按link ABI。
+patches/subsys/703-02-mac80211-add-support-for-set-link-specific-tx-power.patch	D	遍历有效links，不限单一link。
+patches/subsys/705-mac80211-fetch-fils-unsol-presp-template-by-link.patch	E	FILS/unsolicited probe模板逐link获取。
+patches/subsys/706-01-mac80211-add-debugfs-support-for-links.patch	E	link->debugfs_dir管理目录。
+patches/subsys/706-mac80211-Add-support-to-enable-disable-FILS-UBPR-fra.patch	E	更新标志/空模板清理FILS/UBPR。
+patches/subsys/706-nl80211-Add-power-mode-support-for-6G.patch	N	6GHz LPI/SP/VLP不适用。
+patches/subsys/707-01-mac80211-emlsr-capabalalites.patch	N	目标不注册MLO/EMLSR。
+patches/subsys/707-a-mac80211-framework-to-support-MLO-recovery.patch	D	保留现代SLO恢复和旧通知兼容，不重组原厂通知。
+patches/subsys/707-mac80211-pass-channel-info-in-AWGN-event.patch	N	无多radio/MLO AWGN事件链。
+patches/subsys/708-nl80211-add-agile-DFS-support-for-MLO.patch	N	SLO无非默认link/background radio组合。
+patches/subsys/711-001-cfg80211-add-rts-threshold-support-for-MLO.patch	D	新版按radio RTS，不用旧wdev/link ABI。
+patches/subsys/711-002-mac80211-add-rts-threshold-support-for-MLO.patch	D	RTS回调传radio_idx，不用旧vif/link。
+patches/subsys/711-02-cfg80211-fwtest-MLO-support.patch	N	TESTMODE关闭。
+patches/subsys/711-wifi-mac80211-add-accumulated-statistics-for-Multi-lin.patch	F	逐link聚合的inactive时间未初始化、字段选择及计数/信号聚合错误，候选已修；实际函数ASan/UBSan用例通过，真机MLD未验证。
+patches/subsys/712-01-cfg80211-add-support-rts-threshold-readable-command-.patch	N	仅num_hw非零查询分支，ath11k未注册。
+patches/subsys/712-cfg80211-mac80211-add-MLO-support-for-HE-BSS-color-c.patch	E	BSS color/countdown已逐link管理。
+patches/subsys/713-001-mac80211-update-sta-max-bandwith-during-peer-assoc-p.patch	D	无旧sta_max_bandwidth字段；现代能力/工作带宽求交且ath11k无旧消费者。
+patches/subsys/714-01-UPSTREAM-wifi-mac80211-add-API-to-show-the-link-STAs-in-debug.patch	E	EHT capability debugfs归属link STA。
+patches/subsys/715-a-mac80211-Add-link-id-support-for-op-sta-rc-update.patch	E	直接传link_sta，含所需身份。
+patches/subsys/715-wifi-ath12k-Add-Dynamic-VLAN-support.patch	D	SLO AP_VLAN完整chanreq继承已有；保留非MLO key link_id校验。
+patches/subsys/716-001-wifi-cfg80211-Add-new-attribute-to-pass-TX-link-id-of-MLO.patch	N	SLO无MLD TX link属性消费者。
+patches/subsys/716-002-wifi-mac80211-restructure-vif-and-link-conf-for-mlo-mbssi.patch	E	tx_bss_conf覆盖SLO MBSSID/CSA/color关联清理。
+patches/subsys/716-ath12k-AP-bringup-with-5G-Low-5G-High-in-dfs-channel.patch	F	ROC检查移到req赋值前；候选已改从当前有效scan_req读取。
+patches/subsys/717-cfg80211-precac-check-for-self-managed-wiphy.patch	D	保留global/wiphy DFS region一致要求，不放宽法规策略。
+patches/subsys/718-cfg80211-fix-6GHz-AP-STA-concurrency-issue.patch	N	2.4/5GHz条件不变。
+patches/subsys/718-e-mac80211-Deliver-the-frame-to-driver-tx-ops-directly.patch	N	依赖未构建的厂商SFE skb.fast_xmit。
+patches/subsys/720-mac80211-update-radar_required-in-channel-context-af.patch	E	切换保留chanctx后更新radar_required。
+patches/subsys/721-b-ath12k-Set-correct-tx-bw-when-EHT-op-present.patch	N	目标不启用EHT带宽选择。
+patches/subsys/722-cfg80211-add-support-for-mlo-mon-to-set-add-del-chan.patch	N	无单wiphy多硬件monitor模型。
+patches/subsys/723-mac80211-add-mlo-monitor-support.patch	N	无多硬件/MLO monitor能力。
+patches/subsys/725-mac80211-fix-null-pointer-access-for-AP-VLAN.patch	D	未逐字加guard；已核对SLO继承/通道同步/入口排除合法触发前提。
+patches/subsys/726-cfg80211-mac80211-SLO-WDS-link-add.patch	N	实际针对MLD主AP下WDS借用link；目标拒绝MLD WDS。
+patches/subsys/726-mac80211-fix-crash-when-accessing-null-pointer.patch	D	缺通用radiotap边界防御；当前目标给有效band/rate或绕过查询，未证实触发。
+patches/subsys/751-mac80211-Get-valid-last_rate-for-rx_bitrate-from-cpu.patch	E	过滤无效per-CPU last_rate再报告。
+patches/subsys/751-wifi-ath12k-Enable-lock-less-tx-netdevice-flag.patch	D	保留现代队列/锁模型，不替换旧HW_TC/LLTX。
+patches/subsys/753-01-cfg80211-Fix-firmware-assert-during-set-bitrate-comm.patch	E	EHT bitrate用目标link AP带宽校验。
+patches/subsys/755-mac80211-Fix-6-GHz-Band-capabilities-IE-advertisemen.patch	E	仅6GHz band构造对应capability IE。
+patches/subsys/762-667-mac80211-Enable-PPE-support.patch	N	未构建PPE宏/接口。
+patches/subsys/763-a-wifi-mac80211-add-framework-to-support-PPE-DS.patch	N	PPE DS关闭。
+patches/subsys/763-b-wifi-ath12k-add-framework-to-support-PPE-DS.patch	N	ath12k/PPE DS均关闭。
+patches/subsys/765-ath12k-Bonded-interface-working.-Traffic-tested.patch	N	bonded依赖ath12k；兼容接口不构成当前缺失。
+patches/subsys/767-637-mac80211-add-RU-puncturing-support-for-mesh.patch	N	无EHT mesh能力。
+patches/subsys/768-mac80211-RU-puncturing-support-for-STA.patch	N	无EHT STA能力。
+patches/subsys/775-mac80211-Fix-client-connection-issue-on-repeater-AP.patch	N	SLO 2.4/5GHz不进入MLO/6GHz条件。
+patches/subsys/775-wifi-mac80211-Changes-for-WDS-MLD.patch	N	当前无MLD。
+patches/subsys/779-wifi-ath12k-netdev-perlink-debugfs.patch	E	正确区分SLO/per-link并防重复；原厂hunk反而重复add_link_files。
+patches/subsys/780-mac80211-Advertise-HW-checksum-offload-only-for-ethm.patch	D	有意扩展AP_VLAN checksum广告并移除!use_4addr，保留本地契约。
+patches/subsys/781-cfg80211-mac80211-fix-scan-issue-due-to-single-wiphy.patch	D	保留扫描全部合法支持频段，不按活动band裁剪。
+patches/subsys/784-04-ath12k-Add-SAWF-tx-delay-stats-support.patch	N	无ath12k SAWF消费者。
+patches/subsys/784-mac80211-fix-skb-and-sdata-mismatch.patch	N	未注册num_hw多硬件RX模型。
+patches/subsys/786-01-ath12k_compilation_fixes.patch	D	旧内核保护/厂商命令假设不适合6.18/6.12。
+patches/subsys/786-02-ath11-12k-Add-define-MAC80211_SFE_SUPPORT.patch	N	未构建厂商SFE。
+patches/subsys/786-03-mac80211-Copied-MAC-to-net_dev-structure-via-dev_add.patch	E	已用eth_hw_addr_set。
+patches/subsys/788-mac80211-Add-default-wmm-values-to-individual-links.patch	E	link初始化已设置默认WMM。
+patches/subsys/807-wifi-mac80211-set-all-links-active-for-station-by-de.patch	N	仅多link STA active bitmap。
+patches/subsys/808-wifi-mac80211-change-to-use-MLD-address-as-primary-l.patch	N	仅附加MLD link地址，当前默认link。
+patches/subsys/810-wifi-mac80211-update-all-links-rx-nss-by-ieee80211_s.patch	N	无附加MLD links。
+patches/subsys/813-wifi-nl80211-indicate-MLO-connection-info-for-NL8021.patch	N	SLO valid_links条件不成立。
+patches/subsys/815-wifi-mac80211-temp-remove-link_info_changed-callback.patch	N	无link0的MLD回调组合不适用。
+patches/subsys/821-01-589-ath12k-workaround-to-match-STA.patch	N	EHT临时措施被821-03替代，目标也无EHT。
+patches/subsys/821-01-wifi-ieee80211-Support-validating-ML-station-profile-length.patch	E	现代ML station profile长度helper已有。
+patches/subsys/821-03-wifi-cfg80211-mac80211-check-EHT-capability-size-cor.patch	N	EHT关闭，不独立回移旧临时措施。
+patches/subsys/821-04-wifi-mac80211-Parse-station-profile-from-association.patch	N	SLO不使用MLD per-STA profile。
+patches/subsys/821-10-wifi-mac80211-fix-AddBA-response-addressing.patch	E	公共BA构造用vif.cfg.ap_addr填STA BSSID。
+patches/subsys/821-22-wifi-mac80211-handle-csa-block-tx-per-link-basis-for-STA-di.patch	E	逐link清理CSA/block并解除队列阻塞。
+patches/subsys/822-767-Fix-the-incorrect-value-of-station-dump-fields-in-SL.patch	E	逐link填DTIM/beacon interval并兼容SLO。
+patches/subsys/823-wifi-nl80211-Changing-the-nl80211_fam-structure-as-p.patch	D	当前resv_start_op为REMOVE_LINK_STA+1；+6依赖厂商命令。
+patches/subsys/824_000-d-Revert-treewide-Replace-0-element-memcpy-destinations-with-flexible-arrays.patch	D	保留DECLARE_FLEX_ARRAY，不退回零长度数组。
+patches/subsys/825_375-001-mac80211-add-Radio-Measurement-Action-field-values.patch	E	WLAN_RM_ACTION枚举对应值已有。
+patches/subsys/826_624-0017-ath12k-Enable-set-tpc-power-cmd-for-320.patch	N	无EHT/320MHz 16级TPC处理。
+patches/subsys/827-mac80211-fix-compilation-and-crash-issue.patch	D	现代接口保留STA flush，不照搬原厂删除flush。
+patches/subsys/828-wifi-mac80211-Fix-to-update-6GHz-power-type-for-station.patch	N	仅6GHz HE/EHT功率类型。
+patches/subsys/829-mac80211-fix-mesh-ping-issue.patch	E	mesh fast-RX重定位保留偏移修复并适配删除分支。
+patches/subsys/832-002-wifi-cfg80211-validate-AP-phy-operation-before-start.patch	E	启动前按NO_HE/NO_EHT校验PHY配置。
+patches/subsys/834-0001-wifi-cfg80211-export-DFS-CAC-usable-state-helper-fun.patch	E	新版DFS CAC usable API已导出。
+patches/subsys/839-wifi-nl80211-allow-CAC-while-operation-is-going-on-in-cas.patch	N	仅valid_links非零放宽并行CAC；SLO一致。
+patches/subsys/840-wifi-cfg80211-fix-off-channel-operation-allowed-chec.patch	E	按radio_idx检查雷达频道以阻止违规离频。
+patches/subsys/841-02-wifi-mac80211-offchannel-support.patch	N	未注册num_hw多硬件离频RX模型。
+patches/subsys/841-04-wifi-mac80211-STA-mode-offchannel-rx-support.patch	N	无多硬件离频分发模型。
+patches/subsys/842-wifi-mac80211-Fix_association_with_AP_VLAN_interface.patch	E	发送路径用sta_info_get_bss找所属STA。
+patches/subsys/843-mbssid_mac80211.patch	F	空MBSSID+非空RNR漏计payload仍复制导致越界；候选已修。
+patches/subsys/844-wifi-mac80211-Fix-warn-on-during-recovery-with-wds-s.patch	E	恢复区分SLO/MLD vif/link通知。
+patches/subsys/900-626-mac80211-add-EHT-support-for-mesh.patch	N	无EHT mesh/320MHz。
+patches/subsys/900-628-mac80211-fix-WDS-repeater-and-root-ap-association.patch	N	仅MLD非默认links的4addr限制。
+patches/subsys/901-cfg80211-Fixing-with-correct-arugment-in-function.patch	D	保留现代trace __vstring/__assign_vstr，不采用旧固定数组。
+patches/subsys/902-wifi-mac80211-Fix-memory-corruption-during-mesh-beac.patch	E	unsigned long mbss_changed和BITMAP_FROM_U64转换已有。
+patches/ath12k/000-a-Revert-wifi-ath12k-remove-unused-enum-ath12k_dev_fla.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-b-Revert-wifi-ath12k-remove-crypto_mode-module-paramet.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-c-Revert-wifi-ath12k-remove-cold_boot_cal-module-param.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-d-Revert-wifi-ath12k-remove-unused-frame_mode-module-p.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-e-Revert-wifi-ath12k-wmi-remove-pktlog-commands.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-f-Revert-wifi-ath12k-wmi-remove-unused-thermal-command.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-g-Revert-wifi-ath12k-wmi-remove-stats-code.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-h-Revert-wifi-ath12k-wmi-remove-unused-struct-ath12k_w.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-i-Revert-wifi-ath12k-wmi-remove-struct-wmi_channel_arg.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/000-j-Revert-wifi-ath12k-remove-backpressure-event-handler.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/0001-ath12k-upgrade-6.5-mac80211-driver-compilation-fix.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/001-ath12k-fix-compilation-issues.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/500-001-ath12k-hw_params-changes-for-RDP.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/500-ath12k-add-bus-param-struct.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/501-ath12k-add-dts-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/502-ath12k-add-thermal-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/503-ath12k-add-debugfs.h.patch	N	共有local-symbols/Kconfig仅启用ath12k诊断、平台或内存选项，当前均不构建。
+patches/ath12k/504-ath12k-add-debugfs-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/505-ath12k-add-spectral-support.patch	N	共用spectral定义服务未启用的ath12k spectral；本机不启用spectral。
+patches/ath12k/506-ath12k-add-testmode-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/507-ath12k-add-unused-struct-ath12k_skb_cb-eid.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/508-ath12k-Use-reserved-host-DDR-addresses-from-DT-for-P.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/508-ath12k-add-ath12k_dp_tx_htt_h2t_vde.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/509-ath12k-remove-monitor-status-and-monitor-desc-rings.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/510-ath12k-rearrange-ring-type-enum-to-match-the-hal-rin.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/511-ath12k_fix_compilation_issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/512-ath12k-fix-qmi-server-arrive-callback-by-correcting.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/513-ath12k-Add-logic-to-write-qrtr-node-id-to-scratch.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/514-ath12k-fix-pci-read-and-write.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/515-ath12k-fix-ring-id-from-lmac-offset-of-sw2rxdma.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/518-ath12k-WAR-disable-caldata-since-it-is-not-supported.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/519-ath12k-fix-cc-ext-event-for-regulatory-build.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/520-ath12k-WAR-AP-bringup-crashes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/521-ath12k-change-dtsi-memory-region-name-to-ath-memory-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/523-ath12k-dp-tx-fixes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/528-ath12K-Enable-RAM-dump-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/529-b-ath12k-push-HE-MU-MIMO-and-OFDMA-params-to-hardware-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/529-c-ath12k-moving-HE-MCS-mapper-to-a-separate-function.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/529-d-ath12k-add-support-for-setting-fixed-HE-rate-gi-ltf.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/529-e-ath12k-add-support-for-80P80-and-160-MHz-bandwidth.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/529-f-ath12k-add-extended-NSS-bandwidth-support-for-160MHz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-a-ath12k-add-channel-2-into-6-GHz-channel-list.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-ath12k-Add-support-for-VHT-in-2G.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-b-ath12k-fix-packet-drops-due-to-incorrect-6-GHz-freq-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-c-ath12k-fix-survey-dump-collection-in-6-GHz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-d-ath12k-add-6-GHz-params-in-peer-assoc-command.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/530-e-ath12k-support-SMPS-configuration-for-6-GHz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/531-ath12k-Fix-setting-msdu_ext_desc-in-Ethernet-and-RAW.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/532-ath12k-Fix-Access-Violation-with-ath12k_pci-rmmod.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/533-ath12k-WMI-fixes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/536-ath12k-Fixed-8VAP-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/539-ath12k-Increasing-VDEV_SETUP_TIMEOUT-value-to-3s.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/545-ath12k-11be-mumimo-and-ofdma-stats-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/566-ath12k-propagation-of-EHT-capabilities-from-firmware.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/568-ath12k-Adding-320-MHz-bandwidth-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/569-ath12k-adding-EHT-PHY-modes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/572-ath12k-prepare-EHT-peer-assoc-parameters.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/573-ath12k-add-WMI-support-for-EHT-peer.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/575-ath12k-Update-driver-reg-flags-for-11be.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/578-ath12k-EHT-operation-element-support-in-AP-mode.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/584-ath12k-Add-EHT-fixed-rate-settings.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/585-ath12k-push-HE-MU-MIMO-and-OFDMA-params-to-hardware-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/587-ath12k-push-EHT-MU-MIMO-and-OFDMA-params-to-hardware.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/588-ath12k-11be-bringup-fixes-for-D1.3-compatibility.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/594-ath12k-advertise-RU-puncturing-support-to-kernel.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/595-ath12k-configure-RU-puncturing-bitmap.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/596-a-ath12k-add-WCN7850-QDSS-QMI-message.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/596-b-ath12k-Add-support-for-QDSS-dump-collection.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/597-ath12k-Add-support-for-wmi-based-fw-log.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/598-ath12k-Add-fw-recovery-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/598-ath12k-Add-support-to-display-EHT-rx-rate-info-in-iw-statio.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/600-ath12k-Enable-SSR-on-firmware-crash.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/601-ath12k-Handle-FW-updated-MU-EDCA-params.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/602-ath12k-report-tx-bitrate-for-iw-wlan-station-dump.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/603-ath12k-add-support-to-configure-spatial-reuse-par.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/604-ath12k-Enable-extended-tx-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/605-ath12k-skip-NULL-buff-segments-in-RDDM.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/606-dump-rx-desc-when-channel-freq-is-wrong-in-ph.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/607-ath12k-Fix-TX-completion-ring-mask-for-WBM2SW-ring-4.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/608-ath12k-Fix-rx-stats-support-by-enabling-monitor-ring.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/610-ath12k-Add-support-for-1024-BlockAck-bitmap-for-EHT.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/611-ath12k-Fixed-issue-in-reading-pdev-temperature-value.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-01-ath12k-add-WMI-resource-config-for-EMA.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-02-ath12k-set-MBSSID-and-EMA-driver-capabilities.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-03-ath12k-MBSSID-configuration-during-vdev-create-start.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-04-ath12k-create-a-structure-for-WMI-vdev-up-parameters.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-05-ath12k-configure-MBSSID-device-parameters.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-06-ath12k-move-vif-parameter-setting-in-a-different-fun.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-07-ath12k-EMA-beacon-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-08-ath12k-configure-WPA-and-RSNE-parameters-for-nontran.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/612-09-ath12k-skip-sending-vdev-down-for-channel-switch.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/613-ath12k-fix-kernel-panic-during-regd-update-in-6g.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/614-ath12k-Fix-firmware-assert-due-to-ce-count-mismatch.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/615-01-ath12k-add-statistics-for-tx-RU-puncturing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/615-02-ath12k-add-statistics-for-rx-RU-puncturing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/616-ath12k-add-WMI-calls-to-manually-add-del-pause-resum.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/617-ath12k-add-debugfs-for-TWT-debug-calls.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0001-ath12k-add-support-to-select-6-GHZ-Regulatory-type.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0002-ath12k-build-6-GHZ-regd-based-on-vdev-type-and-6-GHZ-power.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0003-ath12k-get-6-GHZ-power-type-from-HE-operation-element.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0004-ath12k-save-power-spectral-density-psd-of-regulatory.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0005-ath12k-add-parse-of-transmit-power-envelope-element.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0006-ath12k-save-max-tx-power-in-vdev-start-response-even.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0007-ath12k-fill-parameters-for-vdev_set_tpc_power-wmi-co.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0008-ath12k-discard-BSS_CHANGED_TXPOWER-when-EXT_TPC_REG_.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0009-ath12k-add-handler-for-WMI_VDEV_SET_TPC_POWER_CMDID.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0010-ath12k-send-TPC-power-to-firmware-for-6-GHZ-VDEV.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0011-ath12k-add-support-to-select-all-6-GHZ-regulatory-rules.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0012-ath12k-update-all-6-GHZ-reg-rules-in-sband.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0013-ath12k-update-the-eirp-power-based-on-ieee80211_get_.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0014-ath12k-porting-6-GHZ-regulatory-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0015-ath12k-fix-kernel-panic-during-mac.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0016-ath12k-Disable-6-GHz-Transmit-power-envelope-for-320.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/624-0017-ath12k-Enable-set-tpc-power-cmd-for-320.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/625-ath12k-Replace-HTT_DBG_OUT-with-scnprintf.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/625-ath12k-supporting-5.9G-band-with-160Mhz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/626-ath12k-Rename-ARRAY_TO_STRING-to-PRINT_ARRAY_TO_BUF.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/626-mac80211-ath12k-add-EHT-support-for-mesh.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/627-ath12k-Cleanup-checkpatch-warnings-in-htt-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/628-ath12k-Cleanup-unnecessary-NULL-termination-check.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/629-ath12k-Update-missing-stats-in-debugfs_htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/630-ath12k-Add-additional-debugfs_htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/631-ath12k-Add-support-for-new-htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/634-ath12k-Introduced-module-param-to-En-Dis-FW-segmente.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/635-ath12k-Add-pageable-mem-type-for-qcn9274.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/635-ath12k-Add-support-to-handle-AWGN-interference-for-6.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/635-ath12k-Comment-out-RX_MPDU_END-and-RX_MSDU_END-stats-parsing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/635-ath12k-fix-enabling-reoq-lut.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/635-ath12k_diag_support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/636-ath12k-Destroy-debugfs-during-firmware-recovery.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/636-ath12k-enable-vdev-stats-offload.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/638-01-ath12k-Add-support-for-Green-AP.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/638-ath12k-Send-Puncturing-pattern-of-peer-mesh-during-a.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/638-ath12k-disable-spectral-scan-during-spectral-deinit.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/639-03-ath12k-disabling-credit-flow-for-WMI-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/639-04-ath12k-fix-bss-chan-info-request-wmi-command.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/639-05-ath12k-tx-queue-length-fix.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/639-ath12k-Add-coredump-segment-for-dynamic-paging.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-001-ath12k-Enable-monitor-interface-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-002-ath12k-refactor-monitor-stats-ring-processing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-003-ath12k-add-filter-settings-to-enable-monitor-mode.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-004-ath12k-add-monitor-buffer-address-TLV-parsing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-005-ath12k-eht-tlv-parsing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-007-ath12k-add-EHT-radiotap-header.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-008-ath12k-fix-hal_rx-structures.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-ath12k-Ignore-frags-from-uninitialized-peer-in-dp.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/640-ath12k-fix-secu-connection-due-to-auth-early.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/641-0001-ath12k-fix-4-addr-tx-failure-for-AP-and-STA-modes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/641-0002-ath12k-handle-4addr-NULL-EAPOL-frame-from-wbm-err-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/641-0003-ath12k-fix-4addr-multicast-packet-tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/641-ath12k-Add-support-for-PCSS-SSR-dump-collection.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/641-ath12k-Add-support-for-recording-EHT-Tx-Rx-rate-info.patch	N	共有ath11k hunk仅扩EHT/320MHz枚举；本机无EHT，不放宽当前descriptor校验。
+patches/ath12k/641-ath12k-Update-the-Rate-Table-information-display.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/644-ath12k-Print-htt_peer_stats-only-when-enabled.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/646-ath12k-Fix-RU-allocation-incrementation-in-tx_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/647-01-ath12k-Add-5GHz-240MHz-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/648-ath12k-fix-6g-station-association-failure.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/648-ath12k-remove-intersection-support-for-regulatory-ru.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/649-ath12k-fill-pdev-id-for-fw-test-cmd.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/649-ath12k-fix-double-free-of-peer-rx_tid-during-reo-cmd.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/649-ath12k-switch-to-using-ieee80211_tx_status_ext.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/650-ath12k-Add-support-for-bss-color-enablement.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/650-ath12k-Update-HTT-ppdu-stats-from-the-firmware-descr.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/650-ath12k-move-warn-prints-to-dbg-when-srng-is-full.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/651-ath12k-Add-debugfs-interface-to-configure-firmware-d.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-01-ath12k-single-wiphy-registration-per-SOC.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-02-ath12k-Update-hw-generic-mac-ops-handling.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-03-ath12k-vdev-statemachine-changes-for-single-wiphy.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-04-ath12k-Support-scan-for-single-wiphy-architecture.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-05-ath12k-Cache-configs-for-vdev-before-actual-vdev-cre.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-06-ath12k-Add-additional-checks-for-vif-and-sta-iterato.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-07-ath12k-modify-regulatory-support-for-single-wiphy-ar.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-08-ath12k-Add-provision-for-common-log.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-09-ath12k-Add-support-for-multi-chip-wiphy.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-10-ath12k-Enable-mac-based-registration-for-default-gro.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/652-ath12k-fix-fixrate-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/653-001-ath12k-allocate-dst-ring-descriptors-from-cacheable-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/653-002-ath12k-Allow-fast-rx-by-bypassing-stats-update.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/653-003-Add-provision-to-configure-rx-hashmap.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/653-ath12k-Update-DP-irq-names-during-registration-for-a.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/653-ath12k-check-valid-fixed-rate-settings.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/654-ath12k-Add-HE-UL-MU-fixed-rate-setting.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/654-ath12k-Add-pktlog-support-through-debugfs.patch	N	共有local-symbols/Kconfig仅启用ath12k诊断、平台或内存选项，当前均不构建。
+patches/ath12k/654-ath12k-Fix-memory-free-during-pci-power-down.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/655-ath12k-Enable-pktlog-decode-info-embed-into-pktlog-d.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/656-ath12k-fix-scheduling-while-atomic-in-beacon_tx_status.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/656-ath12k-fix-workqueue-not-getting-destroyed-after-rmm.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-Add-missing-per-peer-parameters.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-Fix-memory-leak.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-add-module-param-to-enable-disable-MLO.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-add-mutex_lock-for-ar-allocated_vdev_map-acces.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-fix-NSS-value-update-in-rx-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/657-ath12k-prevent-monitor-interface-to-transmit-packet.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/658-ath12k-Change-default-frame-mode.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/660-ath12k-Account-correct-segment-count-in-coreudmp.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/660-ath12k-Fix-vdev-restart-start-sequence-during-channe.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-001-ath12k-Modify-Rx-ring-size-and-buff-size.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-002-ath12k-Introduced-module-param-for-enabling-fwlog.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-ath12k-Add-TPC-stats-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-ath12k-Fix-TPC-CMD-Info-s-sent-as-0.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-ath12k-Update-mutex-lock-var-in-mac-ops.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-ath12k-add-length-validation-before-skb_put-call.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/661-ath12k-fix-antenna-parameter-is-zero-in-iw-phyx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/662-ath12k-Fix-memory-leak-in-rx_desc-and-tx_desc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/662-ath12k-Fix-rx_per_chain_rssi_in_dbm-is-incorrect-in-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/662-ath12k-fix-clear-peer-keys-during-disassoc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/662-ath12k-fix-radar-detection-issue-in-160mhz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/663-ath12k-Clear-auth-flag-only-for-actual-association.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/663-ath12k-Fix-memory-leak.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/663-ath12k-add-FTM-Mode-Support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-a-ath12k-add-alternate-tcl-ring-selection-logic.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-ath12k-change-kzalloc-to-vzalloc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-ath12k-increase-msi.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-ath12k-prevent-monitor-memset.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-b-ath12k-Allow-fast-tx-completion-by-freeing-skb-when-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-c-ath12k-add-stats-for-TX-buffer-allocation-failures.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-d-ath12k-Remove-mod-operator-overhead-for-dst-ring-acc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-e-ath12k-do-not-parse-desctiptor-that-will-not-be-hand.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-f-ath12k-Optimize-tx-completions-in-case-of-stats-disa.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-g-ath12k-fix-tx-status-reporting-api-when-encap-offloa.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-h-ath12k-fix-transmitting-packets-during-recovery.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-i-ath12k-optimize-rcu-lock-access-in-dp_tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-j-ath12k-add-branch-predictors-in-dp_tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-k-ath12k-Make-use-of-TID-classification-offload.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/664-l-ath12k-skip-cache-synchronization-in-tx-completion-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/665-ath12k-Update-obss-color-detection-notify-to-queue-work.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/665-ath12k-Update-wbm_tx_stats-upon-tx-completion.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/666-ath12k-fix-320Mhz-bytes-packets-counters-in-peer-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/668-ath12k-Enable-PPE-in-fast-Rx-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/668-ath12k-fix-memory-leaks-during-multicast-tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/668-ath12k-regdb-encoding-board-2-binary.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/669-ath12k-change-dma_map_single-to-virt_to_phys-in-rx-r.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/669-ath12k-configure-phymode-for-beacon-in-6Hz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-01-ath12k-Add-MLO-caps.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-02-ath12k-Add-mlo-wmi-setup-apis.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-03-ath12k-Setup-MLO-link.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-04-ath12k-add-MLO-global-memory-support-in-coredump.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-ath12k-Add-support-for-cold-boot-calibartion.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-ath12k-Adding-support-for-mgmt-frames-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/670-ath12k-enhance-peer-create-delete-log.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/671-ath12k-Fix-flush-error-options-71-to-127-are-not-present.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/672-ath12k-Fix-beacon-tx-mode-when-multiple-tx-vifs-st.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/672-ath12k-Fix-freeing-hal-reo-status-entry-in-host.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/672-ath12k-enable-ampdu-flag-for-data-frame.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/673-ath12k-Fix-avg-ack-info-not-shown-in-station-dump.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/673-ath12k-RDP454-bringup.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/673-ath12k-enable-service-flag-for-survey-dump-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/674-ath12k-fix-rmmod-issue-in-SSR-case.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/675-03-ath12k-Advertise-interface-combination.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/675-ath12k-Fix-the-number-of-sounding-dimensions-above-8.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-01-ath12k-prepare-vif-and-sta-for-MLO-handling.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-02-ath12k-MLO-vdev-bringup-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-03-ath12k-changes-for-handling-multi-link-sta.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-04-ath12k-setup-ML-reo-queue-LUT.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-05-ath12k-set-idle-link-desc-buf-manager-based-on-chip.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-06-ath12k-perform-Tx-address-translation.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/676-ath12k-enable-qdss-config.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/678-ath12k-add-mac-ops-to-get-tx-power.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/679-01-wifi-ath12k-send-host-cap-until-all-the-chip-in-the-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/679-02-wifi-ath12k-add-phy-count-capability-learn.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/679-ath12k-Fix-the-avg-ack-signal-inconsistency-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/681-001-ath12k-allocate-ppdu_info-separately-during-pdev_dp-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/681-002-ath12k-Avoid-TLV-parsing-overhead-by-looping-till-sk.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/681-003-ath12k-handle-monitor-drop-TLVs-scenario.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/681-ath12k-Modify-ppdu-info-bandwidth-in-u_sig_cmn-TLV.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/683-ath12k-Debug-prints-to-prevent-buffer-overflow.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/684-03-ath12k-radar-bitmap-generation-durin-DFS-radar-detec.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/684-04-ath12k-Add-debugfs-extended-support-radar-simulation.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/684-ath12k-Check-skb_headroom-before-using-skb_push.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/685-01-wifi-ath12k-Moved-the-Tx-Descriptor-before-Rx-Descri.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/685-02-wifi-ath12k-Refactor-Tx-Rx-Descriptor-procedure.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/685-03-wifi-ath12k-Refactor-SW-cookie-procedure.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/685-ath12k-Fix-failed-to-remove-key-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/685-ath12k-fix-memory-leak-caused-by-thermal-debug-regis.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/688-01-wifi-ath12k-Added-MLO-capable-field-in-hw-group-stru.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/688-02-wifi-ath12k-Add-partner-Rxdma-buffer-processing-in-D.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/688-03-wifi-ath12k-Do-partner-rx-descriptor-init-in-each-So.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/688-ath12k-key-operations-for-Multi-link-Station-and-Acc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/688-ath12k-remove-reserve-member-of-wbm-completion-struct.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/689-02-ath12k-use-link-conf-for-all-bss-config-operations.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/689-03-ath12k-use-link-sta-instead-of-deflink.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/689-04-ath12k-use-link-for-ampdu-actions.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/689-ath12k-update-CSA-counter-in-probe-resp.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/689-wifi-ath12k-Fix-pci-register-read-write.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/690-0001-ath12k-refactor-vdev-configuration-related-functions.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/690-0002-ath12k-add-multi-vdev-restart-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/690-04-ath12k-get-txpower-for-each-link.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/690-ath12k-board-id-read-from-OTP.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/690-ath12k-improve-iterations-over-channel-contexts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/691-0002-cfg80211-mac80211-update-beacon-counters-per-link-ba.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/691-0004-ath12k-add-critical-update-support-during-set-beacon.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/691-ath12k-Add-support-for-ADFS.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/691-ath12k-Monitor-mode-bring-up-in-SLO.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/691-ath12k-sub-channel-enable-for-dfs-channel-puncturing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/692-0001-cfg80211-mac80211-add-DFS-support-for-MLO.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/692-0002-ath12k-add-initial-DFS-MLO-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/692-ath12k-enable-MLO-dump-collection.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/693-ath12k-Fix-double-free-during-BE-MU-MIMO-htt-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/693-ath12k-incorrect-paging.bin-size.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/694-ath12k-Update-reg_tpc_info-from-bss_conf-during-channel-switch.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/696-01-wifi-ath12k-Refactor-the-MLO-global-memory-request.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/696-02-wifi-ath12k-Add-MLO-global-memory-support-in-segment.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/697-ath12k-Propagate-ML-capabilities.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/697-ath12k-fix-tkip-encryption-traffic-failure.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/702-ath12k-fixed-rate-2G-fix.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-03-ath12k-add-support-for-set-bit-rate.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-11be-spectral-scan-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-Avoid-multiple-beacon-countdown-update.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-Clear-qdesc-array-on-peer-tid-update.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-Update-pending-desc-size-in-reo-cache-flush.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-fix-cold-boot-sequence-for-SoC-grouping.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-ath12k-handle-mac-op-scan-with-link-id.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/703-wifi-ath12k-fix-peer-id-and-non-primary-buffer-in-rx-dp.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-01-ath12k-fix-Factery-Test-Mode-crash-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-02-ath12k-fix-firmware-assert-issue-for-Tx-test-case-in.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-a-ath12k-Add-support-for-new-htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-ath12k-enable-backward-compatibility-to-support-lega.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-ath12k-remove-reserve-member-of-wbm-completion-struct.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-ath12k-subscribe-required-word-mask-from-rx-tlv.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/704-b-ath12k-Add-support-for-new-htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/705-ath12k-fix-hal_rx_desc-skb-corruption.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/705-mac80211-fetch-fils-unsol-presp-template-by-link.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/706-02-ath12k-fix-single-wiphy-debugfs-issues.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/706-ath12k-Fix-search-flag-and-update-peer-map-event-for.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/706-ath12k-RDP454-split-phy-bringup-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/706-ath12k-move-config-caching-to-ahvif.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-02-ath12k-Enable-emlsr-mode-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-ath12k-Add-HTT_TX_PDEV_MU_MIMO_SCH_STATS_TLV-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-ath12k-Add-wmi-control-path-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-ath12k-add-awgn-support-for-320-MHz-in-6-GHz-band.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-ath12k-tx-and-rx-nss-changes-for-eht-mode.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-b-ath12k-add-support-for-MLO-SSR-Mode0.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-c-ath12k-fix-incorrect-rates-sent-to-firmware.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-mac80211-pass-channel-info-in-AWGN-event.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/707-wifi-ath12k-add-link-id-support-in-wbm-error-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/708-ath12k-Add-support-to-set-tx-power-for-6G-via-iw.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/708-ath12k-Fix-unbalance-mutex-lock-in-mac-ops.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/708-ath12k-fix-memory-leak-in-dp-rx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/708-wifi-ath12k-add-proper-link-stats-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-0001-ath12k-symmetrize-scan-vdev-create-and-delete-during.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-0002-ath12k-do-not-return-invalid-link-id-for-scan-link.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-001-ath12k-Add-AHB-driver-support-for-ipq5332.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-002-ath12k-ath12k-Move-ath12k-module-initialization-to-c.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-003-ath12k-Add-IPQ5332-CE-config-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-004-ath12k-Add-and-initialize-hw-params-for-IPQ5332.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-005-ath12k-IPQ5332-qmi-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-006-ath12k-callbacks-to-read-write-to-cmem-space.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-007-ath12-Enable-AHB-driver-for-IPQ5332.patch	N	共有local-symbols/Kconfig仅启用ath12k诊断、平台或内存选项，当前均不构建。
+patches/ath12k/710-008-ath12k-Disable-QDSS-firmware-log-for-ipq5332.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-010-ath12k-add-ipq5332-data-path-register-changes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/710-ath12k-fix-sta-association-in-mbssid-case.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-003-ath12k-add-rts-threshold-support-for-MLO.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-01-ath12k-fwtest-MLO-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-04-ath10k-fwtest-dummy-link-id-support.patch	N	实际改动ath9k/ath10k接口，当前两驱动均关闭。
+patches/ath12k/711-ath12k-athdiag-debugfs-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-ath12k-drop-packets-with-invalid-peer-id-in-dp_tx-pa.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-ath12k-fix-qmi-handler-terminator-entry.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/711-ath12k-fix-register-access-after-power-down-the-targ.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/712-02-ath12k-add-support-rts-threshold-readable-command-fo.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/712-ath12k-Update-htt_stats-for-Rx-Tx-OFDMA-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/712-cfg80211-mac80211-add-MLO-support-for-HE-BSS-color-c.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/713-002-ath12k-update-sta-max-bandwith-during-peer-assoc-pre.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/713-ath12k-Add-supoort-for-mlo-in-cnss-daig-debug.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/713-ath12k-Performance-optimization-in-Rx-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/713-ath12k-fix-firmware-assert-during-insmod-in-memory-s.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/714-04-wifi-ath12k-move-link-sta-specific-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/714-ath12k-Introduce-module-param-for-NAPI-budget-proces.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/714-ath12k-add-support-to-get-rssi-value-of-non-associat.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-01-wifi-ath12k-remove-the-local-rx_desc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-02-wifi-ath12k-avoid-hal-rx-descriptor-access-in-ath12k.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-03-wifi-ath12k-avoid-hal-rx-descriptor-access-in-rx-ppd.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-04-wifi-ath12k-remove-the-unused-hal_ops-rx_desc_get_mp.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-ath12k-add-support-for-peer-meta-data-version.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-ath12k-btcoex-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-ath12k-ipq5332-SSR-Recovery-Support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-b-ath12k-Update-link-id-after-op-supports.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-d-ath10k-Add-link-id-argument.patch	N	实际改动ath9k/ath10k接口，当前两驱动均关闭。
+patches/ath12k/715-e-ath9k-Add-link-id-argument.patch	N	实际改动ath9k/ath10k接口，当前两驱动均关闭。
+patches/ath12k/715-wifi-ath12k-Add-Dynamic-VLAN-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/715-wifi-ath12k-Modified-the-peer-id-bit-mask-in-monitor.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/716-003-wifi-ath12k-MLO-MBSSID-Support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/716-a-ath12k-Add-tx-datapath-related-soc-and-link-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/716-ath12k-sent-pkts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/716-b-ath12k-Multicast-support-for-MLO.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/717-ath12k-fix-firmware-crash-issue-in-raw-mode-with-sof.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/717-ath12k-fix-tcl_metadata-vdev_id-info.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/717-ath12k-received-pkts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/717-ath12k-update-unsupported-bandwidth-flags.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-a-ath12k-introduce-APIs-to-access-rings-without-locks.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-ath12k-Add-support-to-enable-QDSS-in-IPQ5332.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-ath12k-failed-sent-pkts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-b-ath12k-Update-iowrite32-to-write_relaxed-to-boost-pe.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-c-ath12k-optimize-datapath-tx-completion-routine.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-d-ath12k-remove-locks-and-optimize-tx-completion-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-f-ath12k-Add-ath12k_dp_tx_direct-for-faster-tx-process.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/718-g-ath12k-Avoid-too-many-dereference-to-find-the-rbm-id.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/719-a-ath12k-Use-precomputed-SW-TCL-descriptor.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/719-ath12k-failed-received-pkts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/719-b-ath12k-Remove-locks-while-accessing-descriptors.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/719-c-ath12k-Program-the-RBM-ID-values-in-TCL-RBM-map-regi.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/719-d-ath12k-Optimize-tx-descriptor-updates.-Avoid-FIELD_P.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-a-ath12k-Process-tx-completions-using-the-napi-budget.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-ath12k-add-mac-address-for-monitor-mode-vdev.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-b-ath12k-Optimize-the-tx-completion-routine.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-c-ath12k-Optimize-the-tx-completion-routine-by-avoid-a.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-d-ath12k-Avoid-initialization-of-all-the-variables-ear.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-e-ath12k-Optimize-Tx-direct-path-variable-init.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-f-ath12k-Enable-fast-recycling-the-skbs-for-performanc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-g-ath12k-Introduce-a-module_param-to-change-the-tx-com.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/720-h-ath12k-Avoid-register-address-caculations-on-a-per-p.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/721-a-ath12k-Add-locks-while-processing-Tx-completion.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/722-ath12k-fix-usage-of-same-vdev_id-for-same-soc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/724-ath12k-avoid-deadlock-during-regulatory-update-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/725-ath12k-fix-incorrect-beacon-template-update-during-C.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/727-ath12k-rate-info-is-not-properly-updated-for-tx-pkts.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/728-ath12k-drop-the-non-transmitted-failure-tx-frames.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/746-ath12k-parse-the-mlo-mem-and-get-the-reo-snapshot-de.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/747-ath12k-add-support-for-Mgmt-Rx-re-ordering.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/748-ath12k-add-BUG_ONs-for-debugging-purpose.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/749-ath12k-Map-to-cmem_remap-structure-when-parsing-ab-h.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/749-ath12k-Modify-request_firmware_nowarn-to-request_fir.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/749-ath12k-add-support-avg-signal-in-station-dump.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/749-wifi-ath12k-refactor-peer-delete.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-01-ath12k-Add-SAWF-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-02-ath12k-Add-vendor-command-support-for-SAWF.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-03-ath12k-Add-support-to-send-service-class-params.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-04-ath12k-Add-WMI-support-for-SAWF.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-ath12k-Add-retry-mechanism-for-update_rx_queue-reo-cmd.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-ath12k-fix-memory-leak-in-ath12k_mac_setup_channels_.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/750-wifi-ath12k-Skip-CPU-sync-for-REO-in-unmap-DMA-memor.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-ath12k-Add-framework-to-use-different-hashmap-for-ML.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-ath12k-Add-support-for-new-htt_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-ath12k-Fix-incorrect-value-of-rx_per_chain_rssi.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-ath12k-Fixed-reboot-assert-issue-when-MLO-enabled.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-wifi-02-ath12k-Fix-missing-duplicate-beacons-in-PSC-channels.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/751-wifi-ath12k-avoid-dma-sync-cpu-during-dp_tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/752-wifi-ath12k-added-soc-stats-for-REO-Rx-data-path-deb.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/753-01-ath12k-sawf-update-the-TCL-Data-command-when-SKB-has.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/753-02-ath12k-add-link_sta-in-ath12k_mac_validate_fixed_rat.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/753-02-ath12k-sawf-add-callback-operation-for-dynamic-msduq.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/753-03-ath12k-sawf-add-default-q-mapping-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/754-01-ath12k-sawf-add-uplink-configuration-paraeters-in-se.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/754-02-ath12k-sawf-uplink-configuration-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/760-ath12k-Use-correct-offsets-for-handling-pci-and-ahb-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/761-ath12k-Add-correct-RING_MASK_4-and-handle-irq-config.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/762-ath12k-Fix-memory-leak-during-peer-frag-setup.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/763-b-wifi-ath12k-add-framework-to-support-PPE-DS.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/764-ath12k-Add-support-to-identify-dual-mac.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/764-ath12k-Add-the-cold-boot-calibration-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/764-ath12k-Fix-the-wrong-regdomain-update-for-KR-country.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/765-ath12k-Add-full-dump-support-for-IPQ5322.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/765-ath12k-Add-support-for-AWGN-wmi-control-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/765-ath12k-Bonded-interface-working.-Traffic-tested.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/766-ath12k-Add-ATH12K_DBG_PEER-for-serviceability.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/766-ath12k-Fix-get-peer-from-peer-id-instead-of-ast-inde.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/766-ath12k-fix-firmware-assert-during-channel-switch-for.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/767-ath12k-Check-if-ar-is-down-before-handling-mac-opera.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/767-ath12k-Modify-the-M3-SSR-Dump-address.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/767-ath12k-disable-pdev-for-non-supported-country.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/768-001-wifi-ath12k-Modify-the-threshold-param-for-Rx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/770-ath12k-Fill-vdev_id-for-fwtest-command.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/771-ath12k-IPQ5332-spectral-scan-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/771-ath12k-add-ring-descriptor-and-srng-dump-prints.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/771-ath12k-pass-center-freq-and-center-freq2-to-FW-for-E.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/772-001-ath12k-remove-ieee80211-tx-info-reference-in-tx-data.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/772-002-ath12k-fix-skb_cb-corruption-in-tx-data.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/773-001-ath12k-add-num_stations-counter-for-each-interface.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/773-002-ath12k-add-peer-channel-width-switch-command-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/773-ath12k-handle-the-vdev-id-mismatch-HTT.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/773-ath12k-perform-address-validation-during-ML-peer-cre.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/774-ath12k-Change-DMA_FROM_DEVICE-to-DMA_TO_DEVICE-when-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/774-ath12k-set-bw_40-flag-in-case-of-EHT40-in-6Ghz.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/775-ath12k-Add-locks-for-setting-and-testing-flush-flags.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/775-ath12k-Schedule-reset_work-queue-for-cold_boot-calib.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/775-ath12k-add-support-to-enqueue-mgmt-frame-at-MLD-leve.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/775-ath12k-fix-memory-leak-in-WMI-firmware-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/776-ath12k-Enable-fwlog-support-for-IPQ5332.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/776-ath12k-add-support-for-Tx-Power-insertion.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/777-01-wifi-ath12k-Fix-tqm-release-reason-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/777-02-wifi-ath12k-fix-ath12k-link-stats-missed-for-complet.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/777-ath12k-Add-soc_dp_stats-for-incorrect-reo-desc-first-and-last-msdu.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/777-wifi-ath12k-Rx-data-path-optimizations.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/778-ath12k-Validate-tx-arvif-start-status-before-non-Tx-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/778-wifi-ath12k-Add-Tx-limit-for-data-packets.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/779-01-wifi-ath12k-optimize-the-mgmt-and-data-tx-pending-wa.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/779-02-wifi-ath12k-Wake-the-tx-pending-wait-only-its-in-wai.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/779-ath12k-sawf-add-telemetry-configurations.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/780-ath12k-Fix-WARN-ON-during-bit-rate-command.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/780-ath12k-Update-the-number-of-tx_desc-used-to-FW.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/780-mac80211-Advertise-HW-checksum-offload-only-for-ethm.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/781-01-wifi-ath12k-refactor-the-mac-tx-mgmt-pending-free.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/781-02-wifi-ath12k-fix-link-specific-tx-mgmt-pending-free.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/781-03-wifi-ath12k-remove-radio-structure-reference-from-th.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/781-04-wifi-ath12k-fix-the-skb-data-when-pkt-offset-present.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/782-ath12k-PPEDS-SSR-Recovery-Fixes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/782-ath12k-add-MLO-group-descriptor-limit-check-in-dp-tx.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/782-wifi-ath12k-Move-SAWF-and-Telemetry-under-conditiona.patch	N	共有local-symbols/Kconfig仅启用ath12k诊断、平台或内存选项，当前均不构建。
+patches/ath12k/783-002-wifi-ath12k-Fix-BCCA-counter-for-EMA.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/783-ath12k-Add-peer-rhash-table-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/783-ath12k-Add-support-to-bring-in-debug-levels.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-01-ath12k-Add-debugfs-support-to-enable-and-disable.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-01-wifi-ath12k-fix-array-out-of-bound-in-undecap-native.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-02-wifi-ath12k-Add-nwifi-header-length-check-in-tkip-pa.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-02-wifi-ath12k-Add-sawf-tx-stats-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-03-wifi-ath12k-Add-support-to-handle-streaming-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-04-ath12k-Add-SAWF-tx-delay-stats-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-05-wifi-ath12k-Add-support-to-view-SAWF-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-06-ath12k-sawf-Add-telemetry-agent-interface-and-config.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/784-ath12k-restrict-user-country-setting-during-active-v.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/785-wifi-ath12k-Fix-deadlock-b-w-drain-tx-and-mgmt-tx-wo.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/786-01-ath12k_compilation_fixes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/786-02-ath11-12k-Add-define-MAC80211_SFE_SUPPORT.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/786-ath12k-add-per-histogram-count-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/786-ath12k-fix-traffic-stall-with-MLO-AP-Mon-coexist.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/786-wifi-ath12k-Fix-buffer-overflow-when-scanning-with-e.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/787-wifi-ath12k-change-to-use-dynamic-memory-for-channel.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/788-wifi-ath12k-move-peer-delete-after-vdev-stop-of-stat.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/789-01-ath12k-add-support-to-handle-wmi-event-for-real-rssi.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/789-ath12k-Enable-panic-notifer-chain-for-driver-module.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/789-wifi-ath12k-add-handler-for-scan-event-WMI_SCAN_EVEN.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/790-wifi-ath12k-indicate-scan-complete-for-scan-canceled.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/791-wifi-ath12k-indicate-to-mac80211-scan-complete-with-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/800-wifi-ath12k-Add-UMAC-DP-reset-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/800-wifi-ath12k-skip-peer-delete-if-ieee80211_sta-exsits.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/801-01-wifi-ath12k-Add-support-to-parse-mlo-chip-crash-info.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/801-02-wifi-ath12k-Add-support-to-set-mode1-to-firmware.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/801-03-wifi-ath12k-Add-support-to-send-umac_reset-flag.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/801-04-wifi-ath12k-Add-support-for-Mode-1-recovery-cache.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/802-ath12k-validate-peer-id-for-search.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/802-wifi-ath12k-add-support-to-enqueue-radio-measurement.patch	N	共有Radio Measurement枚举仅供本补丁ath12k生产者使用，当前无对应生产者。
+patches/ath12k/802-wifi-ath12k-enable-IEEE80211_VHT_EXT_NSS_BW_CAPABLE.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/802-wifi-ath12k-fix-incorrect-phymode-in-ath12k_wmi_put_.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/803-ath12k-reap-CE-entries-if-ring-is-full-and-intrp-idl.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/803-wifi-ath12k-Tx-compl-drop-for-NULL-desc.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/804-ath12k-added-a-debugfs-to-dump-hal-srng-stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/805-wifi-ath12k-add-peer-flag-ext-WMI_PEER_EXT_320MHZ-wh.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/805-wifi-ath12k-handle-hw-link-id-in-Rx-err-process.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/806-ath12k-allocate-rx_stats-while-enabling-ext_rx_stats.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/807-ath12k-add-prefetch-msdu-in-dp_tx_completion_handler.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/807-wifi-Ath12k-Removing-mutex-unlock-after-free.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/811-wifi-ath12k-change-to-stop-peer-delete-the-primary-l.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/814-wifi-mac80211-fix-recovery-fail-while-firmware-crash.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/816-wifi-ath12k-send-vdev-down-before-vdev-stop.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/818-wifi-ath12k-Changes-for-sta-mlo-support-in-single-wiphy.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/819-wifi-ath12k-Fix-the-crash-during-associate-6G-slo.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/820-wifi-ath12k-non-MLO-connection-link-id-0-pointer-to-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/822-ath12k-qcn6432-bring-up.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/822-wifi-mac80211-handling-msdu-buffer-type.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/823-ath12k-fix-caldata-download-issue-in-qcn6432.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/823-ath12k-qcn6432-bringup-compliation-fixes-for-kernel-.patch	E	当前新版backport netdevice API已覆盖所需兼容语义。
+patches/ath12k/824-disable-the-rddm-notifier-for-kernel-6-1.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/825-ath12k-Add-API-to-print-q6-crash-dump.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/825-ath12k-Vif-Delete-Timeout-Cleanup-Fix.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/825-ath12k-crashdump-enablement-for-qcn6432.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/825-ath12k-optimize-ppe-ds-rx-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/825-wifi-ath12k-Add-mhi_soc_reset-in-PCI-remove-flow.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/826-ath12k-fix-ath12k_mac_op_switch_vif_chanctx-mac-ops.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/827-ath12k-sawf-Fix-ECM-dependency-on-ath12k-module.patch	N	共有Makefile/header属于ath12k SAWF及ECM依赖，当前ATH12K/SAWF关闭。
+patches/ath12k/828-ath12k-KASAN-stack-out-of-bounds-fixes.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/828-wifi-ath12k-Debug-enhancements-for-mode1-recovery.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/829-ath12k-add-support-for-low-latency-rate-cnt.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/830-ath12k-fix-RU-puncturing-pattern-for-peers-after-CSA.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/831-ath12k-coredump-handling-for-multipd-architecture.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/831-wifi-ath12k-Add-partner-rx-replinish-support-in-wbm-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/832-003-wifi-ath12k-add-parsing-of-phy-bitmap-for-reg-rules.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/832-ath12k-remove-call-trace-while-rebooting-AP.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/832-ath12k-removed-unwanted-semi-colon.patch	E	公共trace.h中多余分号已不存在。
+patches/ath12k/833-ath12k-make-qdss-trace-as-configurable-parameter.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/834-0002-wifi-ath12k-fix-CAC-running-state-during-virtual-int.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/834-ath12k-remove-tx-monitor-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/834-wifi-ath12k-Support-Subsystem-Recovery-SSR-for-M-P-P.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/835-ath12k-Add-512MB-support-changes.patch	N	共有local-symbols/Kconfig仅启用ath12k诊断、平台或内存选项，当前均不构建。
+patches/ath12k/836-wifi-ath12k-fix-WMI-peer-kickout-sta-event-for-link-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/837-ath12k-Fix-tx-and-rx-interrupt-mask-init-and-handlin.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/837-wifi-ath12k-Drop-dynamic-fragmentation-msdu-in-Multi.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/837-wifi-ath12k-Fix-beacon-rx-for-sta-associated-to-non-Tx-va.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/837-wifi-ath12k-Send-disassoc-to-MLD-sta-during-reco.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/838-wifi-ath12k-Add-support-to-send-the-QoS-Null-Data-fr.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/838-wifi-ath12k-Introduce-and-use-ath12k_sta_to_ahsta.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/838-wifi-ath12k-Rebased-PPE-DS-patches-with-package-upgr.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/838-wifi-ath12k-add-optimisation-in-rx-data-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/840-a-ath12k-PPEDS-DS-bring-up-for-QCN6432.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/840-c-wifi-ath12k-PPEDS-Add-ENCAP-flags-during-tx-in-slow-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/840-wifi-ath12k-Fix-enablement-of-IRQs-multiple-times.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/841-00-wifi-ath12k-off-channel-enable.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/841-01-wifi-ath12k-off-channel-compl-status-handling.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/841-03-wifi-ath12k-sta-roc-support.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/842-wifi-ath12k-Fix-WMI-STA-kickout-event-parsing.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/843-ath12k-Fix-packet-drop-due-to-invalid-HW-index.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/844-ath12k-napi-node-addition-not-required-for-dummy-irq.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/844-mbssid_ath12k.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/844-wifi-ath12k-Start-ML-link-vdevs-individually-rather-than-.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/845-wifi-ath12k-Fix-SSR-Mode-0-recovery-with-Package-upg.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/845-wifi-ath12k-Translate-addr3-for-AP-properly.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/846-wifi-ath12k-Enable-lock-less-tx-netdevice-flag.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/846-wifi-ath12k-Ignore-duplicate-status-cb-received-from.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/847-001-ath12k-fix-testmode-compilation-issue.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/847-wifi-ath12k-Fix-warnings-during-SSR-recovery.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/848-compilation-fix.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/848-wifi-ath12k-Modify-teardown-complete-event-flag-to-b.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/849-wifi-ath12k-Add-support-for-Mode1-SSR-for-STATION-VI.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/849-wifi-ath12k-fix-fetching-mcbc-flag-for-QCN9274_1.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-01-wifi-ath12k-fix-reap-msdu-type-buffer.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-02-wifi-ath12k-fix-partner-reap-in-rx-err-process.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-03-wifi-ath12k-avoid-pass-the-number-of-entry-to-replen.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-04-wifi-ath12k-avoid-explicit-hw-conversion.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-05-wifi-ath12k-avoid-explicit-rbm.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-06-wifi-ath12k-avoid-used-list.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-ath12k-Stream-Classification-Service-Support-for-UL.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-ath12k-enable-qdss-trace-for-IPQ5322-QCN6432.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-ath12k-move-board-related-members-to-board-data-stru.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/850-wifi-ath12k-Assign-bdf-and-caldb-location-depends-on.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/851-wifi-ath12k-fix-encap-setting-in-DS-Tx-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/852-wifi-ath12k-ignore-ce-interrupt-until-ce-pipe-init-d.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/853-wifi-ath12k-Add-support-to-download-rxgainlut.bin.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/853-wifi-ath12k-update-peer-id-in-dp-monitor-path.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。
+patches/ath12k/854-wifi-mac80211-ath12k-handle-invalid-link-id-in-ieee8.patch	E	公共RX link ID/有效link校验已有现代实现。
+patches/ath12k/855-wifi-ath12k-initialize-link_id-and-link-status-in-at.patch	N	当前关闭ATH12K；已逐target复核，没有当前ath11k数据面的适用改动。

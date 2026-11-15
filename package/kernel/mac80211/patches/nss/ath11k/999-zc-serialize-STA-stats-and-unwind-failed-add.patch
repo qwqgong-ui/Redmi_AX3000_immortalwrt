@@ -1,0 +1,157 @@
+Subject: [PATCH] ath11k: serialize STA statistics and unwind published peers before freeing
+
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -237,7 +237,7 @@
+ 		goto out_unlock;
+ 	}
+ 
+-	spin_lock_bh(&ar->data_lock);
++	spin_lock_bh(&ar->ab->base_lock);
+ 	for (k = 0; k < ATH11K_STATS_TYPE_MAX; k++) {
+ 		for (j = 0; j < ATH11K_COUNTER_TYPE_MAX; j++) {
+ 			stats = &arsta->tx_stats->stats[k];
+@@ -362,7 +362,7 @@
+ 	len += scnprintf(buf + len, size - len,
+ 			"ack fails\n %llu\n", arsta->tx_stats->ack_fails);
+ 
+-	spin_unlock_bh(&ar->data_lock);
++	spin_unlock_bh(&ar->ab->base_lock);
+ 
+ 	if (len > size)
+ 		len = size;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -10300,6 +10300,7 @@
+ 	bool db2dbm = test_bit(WMI_TLV_SERVICE_HW_DB2DBM_CONVERSION_SUPPORT,
+ 			       ar->ab->wmi_ab.svc_map);
+ 
++	spin_lock_bh(&ar->ab->base_lock);
+ 	sinfo->rx_duration = arsta->rx_duration;
+ 	sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_DURATION);
+ 
+@@ -10321,6 +10322,7 @@
+ 		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_BITRATE);
+ 	}
+ 
++	spin_unlock_bh(&ar->ab->base_lock);
+ 	ath11k_mac_put_chain_rssi(sinfo, arsta, "ppdu", false);
+ 
+ 	mutex_lock(&ar->conf_mutex);
+@@ -10748,6 +10750,7 @@
+ 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
+ 	struct ath11k_sta *arsta = ath11k_sta_to_arsta(sta);
+ 	struct peer_create_params peer_param;
++	struct ath11k_peer *peer;
+ 	int ret;
+ 
+ 	lockdep_assert_held(&ar->conf_mutex);
+@@ -10780,6 +10783,15 @@
+ 		goto dec_num_station;
+ 	}
+ 
++	/* Both statistics objects must exist before peer_create publishes sta. */
++	if (ath11k_debugfs_is_extd_tx_stats_enabled(ar)) {
++		arsta->tx_stats = kzalloc(sizeof(*arsta->tx_stats), GFP_KERNEL);
++		if (!arsta->tx_stats) {
++			ret = -ENOMEM;
++			goto free_stats;
++		}
++	}
++
+ 	peer_param.vdev_id = arvif->vdev_id;
+ 	peer_param.peer_addr = sta->addr;
+ 	peer_param.peer_type = WMI_PEER_TYPE_DEFAULT;
+@@ -10788,19 +10800,11 @@
+ 	if (ret) {
+ 		ath11k_warn(ab, "Failed to add peer: %pM for VDEV: %d\n",
+ 			    sta->addr, arvif->vdev_id);
+-		goto free_rx_stats;
++		goto free_stats;
+ 	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_MAC, "Added peer: %pM for VDEV: %d\n",
+ 		   sta->addr, arvif->vdev_id);
+-
+-	if (ath11k_debugfs_is_extd_tx_stats_enabled(ar)) {
+-		arsta->tx_stats = kzalloc(sizeof(*arsta->tx_stats), GFP_KERNEL);
+-		if (!arsta->tx_stats) {
+-			ret = -ENOMEM;
+-			goto free_peer;
+-		}
+-	}
+ 
+ 	if (ieee80211_vif_is_mesh(vif)) {
+ 		ath11k_dbg(ab, ATH11K_DBG_MAC,
+@@ -10811,7 +10815,7 @@
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to set mesh STA %pM 4addr capability: %d\n",
+ 				    sta->addr, ret);
+-			goto free_tx_stats;
++			goto free_peer;
+ 		}
+ 	}
+ 
+@@ -10819,7 +10823,7 @@
+ 	if (ret) {
+ 		ath11k_warn(ab, "failed to setup dp for peer %pM on vdev %i (%d)\n",
+ 			    sta->addr, arvif->vdev_id, ret);
+-		goto free_tx_stats;
++		goto free_peer;
+ 	}
+ 
+ 	if (ab->hw_params.vdev_start_delay &&
+@@ -10828,21 +10832,25 @@
+ 		ret = ath11k_mac_start_vdev_delay(ar->hw, vif);
+ 		if (ret) {
+ 			ath11k_warn(ab, "failed to delay vdev start: %d\n", ret);
+-			goto free_tx_stats;
++			goto cleanup_dp;
+ 		}
+ 	}
+ 
+ 	ewma_avg_rssi_init(&arsta->avg_rssi);
+ 	return 0;
+ 
+-free_tx_stats:
+-	kfree(arsta->tx_stats);
+-	arsta->tx_stats = NULL;
++cleanup_dp:
++	ath11k_dp_peer_cleanup(ar, arvif->vdev_id, sta->addr);
+ free_peer:
+ 	ath11k_peer_delete(ar, arvif->vdev_id, sta->addr);
+-free_rx_stats:
+-	kfree(arsta->rx_stats);
+-	arsta->rx_stats = NULL;
++free_stats:
++	/* A failed DELETE may leave a peer visible to completion/stat readers. */
++	spin_lock_bh(&ab->base_lock);
++	peer = ath11k_peer_find(ar, arvif->vdev_id, sta->addr);
++	if (peer && peer->sta == sta)
++		peer->sta = NULL;
++	ath11k_mac_station_cleanup(sta);
++	spin_unlock_bh(&ab->base_lock);
+ dec_num_station:
+ 	ath11k_mac_dec_num_stations(arvif, sta);
+ exit:
+@@ -10855,6 +10863,7 @@
+ {
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
++	struct ath11k_peer *peer;
+ 	int ret;
+ 
+ 	if (ab->hw_params.vdev_start_delay &&
+@@ -10878,7 +10887,12 @@
+ 			   sta->addr, arvif->vdev_id);
+ 
+ 	ath11k_mac_dec_num_stations(arvif, sta);
++	spin_lock_bh(&ab->base_lock);
++	peer = ath11k_peer_find(ar, arvif->vdev_id, sta->addr);
++	if (peer && peer->sta == sta)
++		peer->sta = NULL;
+ 	ath11k_mac_station_cleanup(sta);
++	spin_unlock_bh(&ab->base_lock);
+ 
+ 	return ret;
+ }

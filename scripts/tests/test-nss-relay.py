@@ -266,6 +266,7 @@ def test_bridge(clients):
 #define ASSERT_RTNL() assert(rtnl_held)
 #define HZ 100
 #define system_wq NULL
+#define WRITE_ONCE(v,x) ((v)=(x))
 static int rtnl_held, joins, leaves, fail_join, fail_leave, queued;
 enum nl80211_iftype { NL80211_IFTYPE_STATION=2, NL80211_IFTYPE_AP=3, NL80211_IFTYPE_AP_VLAN=4 };
 struct wireless_dev { enum nl80211_iftype iftype; };
@@ -276,7 +277,7 @@ static struct { struct list_head list; } br_mgr_ctx;
 struct work_struct { int dummy; }; struct delayed_work { int dummy; };
 static struct delayed_work nss_bridge_reconcile_work;
 static unsigned int nss_bridge_reconcile_retries;
-static bool nss_bridge_stopping;
+static bool nss_bridge_stopping,nss_bridge_reconciling;
 struct net { struct list_head devices; }; static struct net init_net;
 #define for_each_netdev(n,d) list_for_each_entry(d,&(n)->devices,node)
 #define netdev_for_each_lower_dev(d,l,i) \
@@ -287,7 +288,6 @@ static struct net_device *netdev_master_upper_dev_get(struct net_device *d) { re
 static void rtnl_lock(void) { assert(!rtnl_held); rtnl_held=1; }
 static void rtnl_unlock(void) { assert(rtnl_held); rtnl_held=0; }
 static int mod_delayed_work(void *w,struct delayed_work *d,int delay) { ++queued; return 0; }
-static void nss_bridge_mgr_schedule_reconcile(void) { ++queued; }
 static void dev_hold(struct net_device *d) { ++d->refs; }
 static void dev_put(struct net_device *d) { assert(d->refs>1); --d->refs; }
 static int nss_cmn_get_interface_number_by_dev(struct net_device *d) { return d->ifnum; }
@@ -299,7 +299,7 @@ static struct nss_bridge_pvt *nss_bridge_mgr_find_instance(struct net_device *d)
 static int nss_bridge_mgr_register_br(struct net_device *d) { return -EIO; }
 '''
     code = structure(text, "nss_bridge_member")
-    for name in ("nss_bridge_mgr_find_member", "nss_bridge_mgr_delete_member",
+    for name in ("nss_bridge_mgr_schedule_reconcile", "nss_bridge_mgr_find_member", "nss_bridge_mgr_delete_member",
                  "nss_bridge_mgr_ap_host_port", "nss_bridge_mgr_keep_ap_on_host",
                  "nss_bridge_mgr_join_bridge", "nss_bridge_mgr_leave_bridge", "nss_bridge_mgr_reconcile"):
         code += function(text, name)
@@ -332,8 +332,21 @@ int main(void) {
  assert(nss_bridge_mgr_join_bridge(&ap,&bb)==-EAGAIN && ap.refs==2);
  fail_join=0; assert(!nss_bridge_mgr_leave_bridge(&ap,&bb) && ap.refs==1);
  fail_alloc=1; assert(nss_bridge_mgr_join_bridge(&ap,&bb)==-ENOMEM && ap.refs==1);
- fail_alloc=0; rtnl_held=0; nss_bridge_stopping=true; previous=joins;
- nss_bridge_mgr_reconcile(&work); assert(joins==previous); return 0;
+ fail_alloc=0;rtnl_held=0;fail_join=1;
+ nss_bridge_mgr_schedule_reconcile();assert(nss_bridge_reconcile_retries==10);
+ int scheduled=queued;
+ for(unsigned i=0;i<11;i++) {
+  nss_bridge_mgr_reconcile(&work);assert(!rtnl_held&&!nss_bridge_reconciling);
+  assert(nss_bridge_reconcile_retries==(i<10?9-i:0));
+  assert(queued==scheduled+(int)(i<10?i+1:10));
+ }
+ assert(ap.refs==2);
+ nss_bridge_mgr_schedule_reconcile();assert(nss_bridge_reconcile_retries==10&&queued==scheduled+11);
+ nss_bridge_stopping=true;previous=joins;scheduled=queued;
+ nss_bridge_mgr_schedule_reconcile();nss_bridge_mgr_reconcile(&work);
+ assert(joins==previous&&queued==scheduled&&!rtnl_held&&!nss_bridge_reconciling);
+ fail_join=0;rtnl_held=1;assert(!nss_bridge_mgr_leave_bridge(&ap,&bb)&&ap.refs==1);
+ return 0;
 }
 '''
     c_test("bridge STA late registration, duplicate joins, leave NACK retries and references", harness + code + main)

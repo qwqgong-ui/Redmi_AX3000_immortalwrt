@@ -41,6 +41,9 @@ typedef int nss_tx_status_t;
 #define NSS_CORE_STATUS_SUCCESS 0
 #define NSS_NBUF_PAYLOAD_SIZE 2048
 #define U32_MAX UINT32_MAX
+#define U64_MAX UINT64_MAX
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define BUG_ON(x) assert(!(x))
 #define GFP_ATOMIC 0
 #define GFP_KERNEL 1
 #define READ_ONCE(x) (x)
@@ -61,6 +64,7 @@ typedef int nss_tx_status_t;
 enum nss_cmn_response { NSS_CMN_RESPONSE_ACK=0, NSS_CMN_RESPONSE_EMSG=1, NSS_CMN_RESPONSE_NOTIFY=5 };
 struct nss_cmn_msg { uint32_t version,interface,type,len,response,error; nss_ptr_t cb,app_data; };
 struct nss_ctx_instance;
+struct nss_subsystem_dataplane_register { void *cb,*xmit_cb,*ext_cb,*app_data,*ndev;uint32_t features,type; };
 struct list_head { struct list_head *next,*prev; };
 #define LIST_HEAD(n) struct list_head n={&n,&n}
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
@@ -129,7 +133,7 @@ static unsigned nss_core_unregister_handler(struct nss_ctx_instance *ctx,unsigne
 
 STRUCTURES = r'''
 struct nss_worker_thread_stats { struct nss_project_irq_stats *irq_stats; };
-struct nss_ctx_instance { unsigned id;uint32_t worker_thread_count,irq_count;struct nss_worker_thread_stats *wt_stats; };
+struct nss_ctx_instance { unsigned id;uint32_t worker_thread_count,irq_count;struct nss_worker_thread_stats *wt_stats;struct nss_subsystem_dataplane_register subsys_dp_register[NSS_MAX_NET_INTERFACES]; };
 static struct { unsigned num_nss;pthread_mutex_t stats_lock;struct nss_ctx_instance nss[NSS_CORE_MAX]; } nss_top_main={.num_nss=2,.stats_lock=PTHREAD_MUTEX_INITIALIZER};
 struct nss_stats_data { struct nss_ctx_instance *nss_ctx; };
 struct file { void *private_data; };

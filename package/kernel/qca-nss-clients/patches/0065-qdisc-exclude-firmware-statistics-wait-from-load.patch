@@ -1,0 +1,33 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] qdisc: report lost statistics replies outside system load
+
+The stats worker waits for an asynchronous firmware response, not disk I/O.
+TASK_UNINTERRUPTIBLE counts that recurring wait toward load average even when
+there is no CPU work or blocked storage. Use TASK_IDLE for this bounded,
+stop-aware wait, retaining its wakeup and timeout semantics.
+
+On STA-r50 most roots refresh only every 10-30 s because many SYNC_MANY
+requests receive no reply within the 10 s command timeout. Upstream logged
+each timeout; keep that report, rate limited, so the lost replies remain
+visible once the wait no longer inflates the load average.
+
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -554,7 +554,7 @@ static void nss_qdisc_stats_sync_msg_tx(struct nss_qdisc_stats_wq *nqsw)
+ 			continue;
+ 		}
+ 		nqsw->stats_request_success++;
+-		wait_event_timeout(nqsw->stats_resp_waitqueue,
++		wait_event_idle_timeout(nqsw->stats_resp_waitqueue,
+ 			READ_ONCE(nqsw->stats_polling_stopped) ||
+ 			!atomic_read(&nqsw->pending_stat_resp), NSS_QDISC_COMMAND_TIMEOUT);
+ 		spin_lock_bh(&nss_qdisc_stats_list_lock);
+@@ -569,6 +569,8 @@ static void nss_qdisc_stats_sync_msg_tx(struct nss_qdisc_stats_wq *nqsw)
+ 			return;
+ 		atomic_set(&nqsw->pending_stat_resp, 0);
+ 		nqsw->stats_request_fail++;
++		pr_warn_ratelimited("nss_qdisc: stats root %x got no reply (attempt %d, failures %lu)\n",
++				    nq->qos_tag, retry + 1, nqsw->stats_request_fail);
+ 	}
+ 	if (!READ_ONCE(nqsw->stats_polling_stopped)) {
+ 		stats->count = 0;

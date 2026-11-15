@@ -1,0 +1,142 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] core: accept compact shaper STATS_SYNC_MANY replies
+
+When a STATS_SYNC_MANY ACK reports fewer nodes than the request had room
+for, the firmware returns a buffer sized to that content and leaves cm.len
+at the request size. 0223 bounded every status message by cm.len, so these
+replies were dropped: on STA-r50 every 2.4 GHz VAP (if 31) reply with
+count 0 arrived as a 56-byte buffer with cm.len 56, the stats worker slept
+for the 10 s command timeout, and all qdisc roots refreshed every 10-30 s.
+
+Accept the short buffer only for a live tracked BASE_IF request whose sent
+request asked for STATS_SYNC_MANY, with an unchanged cm.len and a buffer
+holding the stats header and every counted node. The qdisc callback already
+bounds its reads by the real receive length.
+
+--- a/nss_control.c
+--- a/nss_control.c
++++ b/nss_control.c
+@@ -9,6 +9,7 @@
+ 	uint32_t if_num;
+ 	uint32_t type;
+ 	enum nss_control_family family;
++	uint32_t size;
+ 	nss_ptr_t callback;
+ 	nss_ptr_t app_data;
+ 	unsigned char original[];
+@@ -227,6 +228,7 @@
+ 		request->family = family;
+ 		request->callback = saved_cb;
+ 		request->app_data = saved_data;
++		request->size = size;
+ 		memcpy(request->original, msg, size);
+ 	}
+ 	spin_lock_bh(&nss_control_lock);
+@@ -367,3 +369,31 @@
+ 	/* A cancel/close racing the second lookup must not fall through to parsers. */
+ 	return true;
+ }
++
++/* Copy the leading bytes of the live tracked request a reply claims, so a
++ * family can validate the reply against what the host actually sent.
++ */
++bool nss_control_request_copy(struct nss_ctx_instance *ctx, const struct nss_cmn_msg *cm,
++			      enum nss_control_family family, void *copy, uint32_t size)
++{
++	struct nss_control_request *request;
++	uint64_t cookie = cm->app_data;
++	bool found = false;
++
++	if (!nss_control_valid(ctx, family, cm->interface) || !cookie || cookie > U32_MAX ||
++	    cm->cb != (nss_ptr_t)(uintptr_t)nss_control_wire_callback)
++		return false;
++	spin_lock_bh(&nss_control_lock);
++	list_for_each_entry(request, &nss_control_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		found = request->family == family && request->core_id == ctx->id &&
++			request->if_num == cm->interface && request->type == cm->type &&
++			request->size >= size;
++		if (found)
++			memcpy(copy, request->original, size);
++		break;
++	}
++	spin_unlock_bh(&nss_control_lock);
++	return found;
++}
+--- a/nss_control.h
++++ b/nss_control.h
+@@ -32,6 +32,8 @@
+  * Valid replies owned by another family and ordinary notifications pass through.
+  */
+ bool nss_control_receive_base(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm);
++bool nss_control_request_copy(struct nss_ctx_instance *ctx, const struct nss_cmn_msg *cm,
++			      enum nss_control_family family, void *copy, uint32_t size);
+ nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
+ 			       uint32_t size, uint32_t buffer_size,
+ 			       enum nss_control_family family, uint32_t *cookie);
+--- a/nss_if.c
++++ b/nss_if.c
+@@ -80,6 +80,39 @@
+ EXPORT_SYMBOL(nss_if_msg_sync);
+ 
+ /*
++ * nss_if_short_stats_reply()
++ *	A SHAPER STATS_SYNC_MANY ACK is written into the request buffer, but when
++ *	it reports fewer nodes than the request had room for, the firmware returns
++ *	a buffer sized to that content and leaves cm.len at the request size.
++ *	Accept it only for the live tracked request that asked for these
++ *	statistics, with cm.len unchanged and every counted node present.
++ */
++bool nss_if_short_stats_reply(struct nss_ctx_instance *nss_ctx, struct nss_cmn_msg *ncm,
++			      uint32_t buf_len)
++{
++	const size_t head = offsetof(struct nss_if_msg,
++				     msg.shaper_configure.config.msg.stats_get.stats_sync);
++	const struct nss_if_msg *reply = (const struct nss_if_msg *)ncm;
++	const struct nss_shaper_node_stats_sync_many *many =
++		&reply->msg.shaper_configure.config.msg.stats_get;
++	union {
++		struct nss_cmn_msg cm;
++		unsigned char raw[offsetof(struct nss_if_msg,
++					   msg.shaper_configure.config.response_type)];
++	} sent;
++	const struct nss_if_msg *request = (const struct nss_if_msg *)sent.raw;
++
++	if (buf_len < head || ncm->response != NSS_CMN_RESPONSE_ACK ||
++	    (ncm->type != NSS_IF_ISHAPER_CONFIG && ncm->type != NSS_IF_BSHAPER_CONFIG) ||
++	    many->count > (buf_len - head) / sizeof(many->stats_sync[0]) ||
++	    !nss_control_request_copy(nss_ctx, ncm, NSS_CONTROL_BASE_IF, sent.raw, sizeof(sent.raw)))
++		return false;
++	return sent.cm.len == ncm->len &&
++	       request->msg.shaper_configure.config.request_type ==
++			NSS_SHAPER_CONFIG_TYPE_SHAPER_NODE_STATS_SYNC_MANY;
++}
++
++/*
+  * nss_if_msg_handler()
+  *	Handle NSS -> HLOS messages for base class interfaces
+  */
+--- a/nss_tx_rx_common.h
++++ b/nss_tx_rx_common.h
+@@ -110,6 +110,8 @@
+  * This is not registered with nss_core.c as it is really a base class feature
+  * of the phys_if and virt_if handlers.
+  */
++extern bool nss_if_short_stats_reply(struct nss_ctx_instance *nss_ctx, struct nss_cmn_msg *ncm,
++				     uint32_t buf_len);
+ extern void nss_if_msg_handler(struct nss_ctx_instance *nss_ctx, struct nss_cmn_msg *ncm,
+ 		__attribute__((unused))void *app_data);
+ 
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -515,7 +515,8 @@
+ 		return;
+ 	}
+ #endif
+-	if (ncm->len > buf_len - sizeof(*ncm)) {
++	if (ncm->len > buf_len - sizeof(*ncm) &&
++	    !nss_if_short_stats_reply(nss_ctx, ncm, buf_len)) {
+ 		nss_warning("%px: Message %d for interface %d received with invalid length %d, expected length %d",
+ 							nss_ctx, ncm->type, nss_if, nbuf->len, ncm->len);
+ 		return;

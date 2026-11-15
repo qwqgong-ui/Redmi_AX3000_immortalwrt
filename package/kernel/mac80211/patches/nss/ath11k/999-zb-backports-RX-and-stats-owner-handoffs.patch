@@ -1,0 +1,157 @@
+Subject: [PATCH] wifi: join backports RX and STA stats to current owners
+
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -226,14 +226,16 @@
+ 	char *buf, mu_group_id[MAX_MU_GROUP_LENGTH] = {0};
+ 	u32 index;
+ 
+-	if (!arsta->tx_stats)
+-		return -ENOENT;
+-
+ 	buf = kzalloc(size, GFP_KERNEL);
+ 	if (!buf)
+ 		return -ENOMEM;
+ 
+ 	mutex_lock(&ar->conf_mutex);
++
++	if (!arsta->tx_stats) {
++		retval = -ENOENT;
++		goto out_unlock;
++	}
+ 
+ 	spin_lock_bh(&ar->data_lock);
+ 	for (k = 0; k < ATH11K_STATS_TYPE_MAX; k++) {
+@@ -365,9 +367,10 @@
+ 	if (len > size)
+ 		len = size;
+ 	retval = simple_read_from_buffer(user_buf, count, ppos, buf, len);
++
++out_unlock:
++	mutex_unlock(&ar->conf_mutex);
+ 	kfree(buf);
+-
+-	mutex_unlock(&ar->conf_mutex);
+ 	return retval;
+ }
+ 
+@@ -385,7 +388,7 @@
+ 	struct ieee80211_sta *sta = file->private_data;
+ 	struct ath11k_sta *arsta = ath11k_sta_to_arsta(sta);
+ 	struct ath11k *ar = arsta->arvif->ar;
+-	struct ath11k_rx_peer_stats *rx_stats = arsta->rx_stats;
++	struct ath11k_rx_peer_stats *rx_stats;
+ 	int len = 0, i, retval = 0;
+ 	const int size = 4 * 4096;
+ 	char *buf;
+@@ -394,19 +397,22 @@
+ 				   "9Mbps", "11Mbps", "12Mbps", "18Mbps",
+ 				   "24Mbps", "36 Mbps", "48Mbps", "54Mbps"};
+ 
+-	if (!rx_stats)
+-		return -ENOENT;
+-
++	buf = kzalloc(size, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	mutex_lock(&ar->conf_mutex);
++
++	rx_stats = arsta->rx_stats;
++	if (!rx_stats) {
++		retval = -ENOENT;
++		goto out_unlock;
++	}
++
++	spin_lock_bh(&ar->ab->base_lock);
+ 	he_rates_avail = rx_stats->pream_cnt[HAL_RX_PREAMBLE_11AX] > 1;
+ 	rate_table_len = he_rates_avail ? ATH11K_RX_RATE_TABLE_11AX_NUM :
+ 					ATH11K_RX_RATE_TABLE_NUM;
+-
+-	buf = kzalloc(size, GFP_KERNEL);
+-	if (!buf)
+-		return -ENOMEM;
+-
+-	mutex_lock(&ar->conf_mutex);
+-	spin_lock_bh(&ar->ab->base_lock);
+ 
+ 	len += scnprintf(buf + len, size - len, "RX peer stats:\n");
+ 	len += scnprintf(buf + len, size - len, "Num of MSDUs: %llu\n",
+@@ -544,9 +550,10 @@
+ 	if (len > size)
+ 		len = size;
+ 	retval = simple_read_from_buffer(user_buf, count, ppos, buf, len);
++
++out_unlock:
++	mutex_unlock(&ar->conf_mutex);
+ 	kfree(buf);
+-
+-	mutex_unlock(&ar->conf_mutex);
+ 	return retval;
+ }
+ 
+@@ -1081,9 +1088,6 @@
+ 	struct ath11k *ar = arsta->arvif->ar;
+ 	int ret, reset;
+ 
+-	if (!arsta->rx_stats)
+-		return -ENOENT;
+-
+ 	ret = kstrtoint_from_user(buf, count, 0, &reset);
+ 	if (ret)
+ 		return ret;
+@@ -1091,11 +1095,17 @@
+ 	if (!reset || reset > 1)
+ 		return -EINVAL;
+ 
++	mutex_lock(&ar->conf_mutex);
+ 	spin_lock_bh(&ar->ab->base_lock);
+-	memset(arsta->rx_stats, 0, sizeof(*arsta->rx_stats));
++	if (arsta->rx_stats) {
++		memset(arsta->rx_stats, 0, sizeof(*arsta->rx_stats));
++		ret = count;
++	} else {
++		ret = -ENOENT;
++	}
+ 	spin_unlock_bh(&ar->ab->base_lock);
+-
+-	ret = count;
++	mutex_unlock(&ar->conf_mutex);
++
+ 	return ret;
+ }
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -3900,12 +3900,12 @@
+ 		}
+ 	}
+ 
++	rx_desc = ATH11K_SKB_RXCB(msdu)->rx_desc;
+ 	if (unlikely(!ath11k_dp_rx_check_nwifi_hdr_len_valid(ab, rx_desc, msdu))) {
+ 		ret = -EINVAL;
+ 		goto free_out;
+ 	}
+ 
+-	rx_desc = ATH11K_SKB_RXCB(msdu)->rx_desc;
+ 	ret = ath11k_dp_rx_h_mpdu(ar, msdu, rx_desc, rx_status, fast_rx, false);
+ 	if (ret)
+ 		return ret;
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -2765,10 +2765,14 @@
+ 		if (ieee80211_hw_check(&local->hw, SUPPORTS_NSS_OFFLOAD) &&
+ 		    (sdata->vif.driver_flags & IEEE80211_VIF_NSS_OFFLOAD_DEBUG_MODE) &&
+ 		    !(is_multicast_ether_addr(skb->data))) {
++			if (!chanctx_conf) {
++				ret = -ENOTCONN;
++				goto free;
++			}
+ 			info = IEEE80211_SKB_CB(skb);
+ 			memset(info, 0, sizeof(*info));
+ 			info->flags = IEEE80211_TX_CTL_HW_80211_ENCAP | info_flags;
+-			info->band = band;
++			info->band = chanctx_conf->def.chan->band;
+ 			goto nss_mesh;
+ 		}
+ 

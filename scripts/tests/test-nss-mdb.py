@@ -44,6 +44,7 @@ typedef uint64_t atomic64_t;
 #define ETH_P_IPV6 0x86dd
 #define BIT(i) (1U << (i))
 #define BR_MULTICAST_TO_UNICAST BIT(12)
+#define BR_ISOLATED BIT(16)
 #define BR_STATE_FORWARDING 3
 #define BROPT_MULTICAST_ENABLED 0
 #define BROPT_MCAST_VLAN_SNOOPING_ENABLED 1
@@ -259,6 +260,11 @@ int main(void) {
         assert(br_mcast_offload_set_mcu(&dev[1],1,7,true)==0);
         assert(br_mcast_offload_get_ifindexes(&master,&mp.addr,dst,0,&seq)==-E2BIG&&dst[0]==0xfeedbeef);
         assert(br_mcast_offload_get_ifindexes(&master,&mp.addr,dst,2,&seq)==1&&dst[0]==11&&seq==7);
+        ports[1].flags|=BR_ISOLATED;dst[0]=0xfeedbeef;seq=999;
+        assert(br_mcast_offload_get_ifindexes(&master,&mp.addr,dst,2,&seq)==-EOPNOTSUPP);
+        assert(dst[0]==0xfeedbeef&&seq==999);
+        assert(br_mcast_offload_get_routed_egress_ifindexes(&master,&mp.addr,dst,2,&seq)==-EOPNOTSUPP);
+        assert(dst[0]==0xfeedbeef&&seq==999);ports[1].flags&=~BR_ISOLATED;
         for (int host_flags=1;host_flags<8;host_flags++) {
             mp.host_joined=host_flags&1;master.flags=(host_flags&2)?IFF_ALLMULTI:0;
             br.multicast_ctx.local_router=host_flags&4;

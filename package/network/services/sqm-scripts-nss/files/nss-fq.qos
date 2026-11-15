@@ -6,6 +6,11 @@
 sqm_start() {
 	[ -e "/sys/class/net/$IFACE" ] || return 1
 	[ "$(cat /sys/module/qca_nss_drv/parameters/core0_ready 2>/dev/null)" = 1 ] || return 1
+	# The core boots before nss-lan attaches the physical conduit. Creating
+	# a hardware root before that owner is published fails with EINVAL.
+	if [ ! -e "/sys/class/net/$IFACE/phy80211" ]; then
+		[ "$(cat /sys/module/qca_dsa_nss/parameters/ready 2>/dev/null)" = Y ] || return 1
+	fi
 	modprobe qca-nss-qdisc || return 1
 	$TC qdisc replace dev "$IFACE" root handle 10: nssfq_codel \
 		limit "${ELIMIT:-128}" flows 128 quantum 1514 target "${ETARGET:-5ms}" \

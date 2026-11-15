@@ -1,0 +1,16 @@
+Subject: [PATCH] net: export scheduler shutdown for NSS wireless ndo_stop
+
+NSS wireless interfaces must destroy their inactive shapers before ndo_stop
+unregisters the firmware control interface. Their FREE command and DMA drain
+cannot be deferred to unregister_netdevice's later dev_shutdown call.
+
+--- a/net/sched/sch_generic.c
++++ b/net/sched/sch_generic.c
+@@ -1477,6 +1477,7 @@ void dev_shutdown(struct net_device *dev)
+ 
+ 	WARN_ON(timer_pending(&dev->watchdog_timer));
+ }
++EXPORT_SYMBOL_GPL(dev_shutdown);
+ 
+ /**
+  * psched_ratecfg_precompute__() - Pre-compute values for reciprocal division

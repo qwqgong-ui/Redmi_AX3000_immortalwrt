@@ -195,17 +195,15 @@ static int collect(struct dsa_nss_want *want)
 		conduit = dp->cpu_dp->conduit;
 		if (!netif_running(conduit))
 			return -EAGAIN;
-		if (dp->bridge && dp->bridge->tx_fwd_offload) {
-			unsigned int vbid = dsa_port_bridge_num_get(dp);
-
-			vid = dsa_tag_8021q_bridge_vid(vbid);
-			bound = dsa_tag_8021q_find_user(conduit, -1, -1, vid, vbid);
-			if (!bound)
-				return -EAGAIN;
-		} else {
+		/* The first administratively up member anchors a bridge node.
+		 * Carrier and STP changes must not rebuild the conduit; RX
+		 * re-resolves the designated forwarding port per packet.
+		 */
+		if (dp->bridge && dp->bridge->tx_fwd_offload)
+			vid = dsa_tag_8021q_bridge_vid(dsa_port_bridge_num_get(dp));
+		else
 			vid = dsa_tag_8021q_standalone_vid(dp);
-			bound = dev;
-		}
+		bound = dev;
 		for (i = 0; i < n; i++)
 			if (want[i].vid == vid && want[i].conduit == conduit)
 				break;
@@ -240,6 +238,75 @@ static int conduit_attach(struct net_device *dev)
 	return ret;
 }
 
+/* N2H_BUFFER_PACKET is ingress on this VLAN node. NSS has removed the DSA
+ * 802.1Q tag; egress-to-host-device buffers use N2H_BUFFER_PACKET_VIRTUAL.
+ * Restore the native tagger's bridge forwarding metadata and RX accounting.
+ */
+static void node_receive(struct net_device *dev, struct sk_buff *skb,
+			 struct napi_struct *napi)
+{
+	struct dsa_port *dp;
+	struct net_device *bound = NULL, *conduit;
+	u16 vid = 0;
+	int i, phys_if;
+	bool matched = false;
+
+	rcu_read_lock();
+	dp = port_of(dev);
+	if (!dp)
+		goto drop;
+	conduit = dp->cpu_dp->conduit;
+	phys_if = nss_cmn_get_interface_number_by_dev(conduit);
+	spin_lock_bh(&table_lock);
+	for (i = 0; i < DSA_NSS_MAX_NODES; i++) {
+		if (nodes[i].dev == dev && nodes[i].handler &&
+		    nodes[i].phys_if == phys_if) {
+			vid = nodes[i].vid;
+			matched = true;
+			break;
+		}
+	}
+	spin_unlock_bh(&table_lock);
+	if (!matched)
+		goto drop;
+	if (dp->bridge && dp->bridge->tx_fwd_offload) {
+		unsigned int vbid = dsa_port_bridge_num_get(dp);
+
+		if (vid == dsa_tag_8021q_bridge_vid(vbid))
+			bound = dsa_tag_8021q_find_user(conduit, -1, -1, vid, vbid);
+		if (bound && bound != dev) {
+			struct dsa_port *bound_dp = port_of(bound);
+
+			/* Imprecise bridge RX follows the current designated port,
+			 * exactly as the native tagger does after an STP change.
+			 */
+			if (!bound_dp || bound_dp->bridge != dp->bridge ||
+			    bound_dp->cpu_dp->conduit != conduit)
+				goto drop;
+			dev = bound;
+			dp = bound_dp;
+		}
+	} else if (vid == dsa_tag_8021q_standalone_vid(dp))
+		bound = dsa_tag_8021q_find_user(conduit, dp->index, dp->ds->index,
+					       vid, 0);
+	if (bound != dev || !pskb_may_pull(skb, ETH_HLEN))
+		goto drop;
+	skb->offload_fwd_mark = !!dp->bridge;
+	skb->dev = dev;
+	skb->pkt_type = PACKET_HOST;
+	skb->protocol = eth_type_trans(skb, dev);
+	dev_sw_netstats_rx_add(dev, skb->len + ETH_HLEN);
+	netif_receive_skb(skb);
+	rcu_read_unlock();
+	return;
+drop:
+	pr_warn_ratelimited("qca-dsa-nss: %s RX ownership mismatch vid=%u\n",
+			    dev->name, vid);
+	dev_core_stats_rx_dropped_inc(dev);
+	dev_kfree_skb_any(skb);
+	rcu_read_unlock();
+}
+
 static int node_create(struct dsa_nss_node *n, struct dsa_nss_want *w)
 {
 	int ret;
@@ -270,7 +337,7 @@ static int node_create(struct dsa_nss_node *n, struct dsa_nss_want *w)
 	    nss_vlan_tx_add_tag_msg(n->ifnum, ((u32)ETH_P_8021Q << 16) | n->vid,
 				  n->phys_if, n->phys_if) != NSS_TX_SUCCESS)
 		return -EIO;
-	nss_vlan_publish_if(n->ifnum, NULL, n->dev, 0, n);
+	nss_vlan_publish_if(n->ifnum, node_receive, n->dev, 0, n);
 	n->published = true;
 	ret = nss_bridge_mgr_offload_port_join(n->dev);
 	if (ret)
@@ -534,6 +601,38 @@ static struct notifier_block netdev_nb = {
 	.notifier_call = netdev_event, .priority = 100,
 };
 
+/* Revoke old NSS VLAN ownership before DSA can write a different PVID.
+ * This is the blocking chain: disable_locked() waits for real control ACKs.
+ */
+static int switchdev_event(struct notifier_block *nb, unsigned long event, void *ptr)
+{
+	struct switchdev_notifier_port_attr_info *info = ptr;
+	struct net_device *dev;
+	int ret;
+
+	if (event != SWITCHDEV_PORT_ATTR_SET || !initialised || stopping ||
+	    info->attr->id != SWITCHDEV_ATTR_ID_BRIDGE_VLAN_FILTERING)
+		return NOTIFY_DONE;
+	dev = switchdev_notifier_info_to_dev(&info->info);
+	if (!port_of(dev) && !netif_is_bridge_master(dev))
+		return NOTIFY_DONE;
+	ASSERT_RTNL();
+	mutex_lock(&owner_lock);
+	ret = disable_locked();
+	last_error = ret;
+	mutex_unlock(&owner_lock);
+	if (ret) {
+		info->handled = true;
+		return notifier_from_errno(ret);
+	}
+	mod_delayed_work(system_wq, &reconcile_work, HZ);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block switchdev_nb = {
+	.notifier_call = switchdev_event, .priority = 100,
+};
+
 static int status_show(struct seq_file *m, void *v)
 {
 	int i;
@@ -567,6 +666,11 @@ static int __init dsa_nss_init(void)
 	ret = register_netdevice_notifier(&netdev_nb);
 	if (ret)
 		return ret;
+	ret = register_switchdev_blocking_notifier(&switchdev_nb);
+	if (ret) {
+		unregister_netdevice_notifier(&netdev_nb);
+		return ret;
+	}
 	dentry = debugfs_create_dir("qca-dsa-nss", NULL);
 	debugfs_create_file("status", 0444, dentry, NULL, &status_fops);
 	initialised = true;
@@ -581,6 +685,7 @@ static void __exit dsa_nss_exit(void)
  * reaches here only after explicit successful disable.
  */
 	stopping = true;
+	unregister_switchdev_blocking_notifier(&switchdev_nb);
 	unregister_netdevice_notifier(&netdev_nb);
 	cancel_delayed_work_sync(&reconcile_work);
 	debugfs_remove_recursive(dentry);

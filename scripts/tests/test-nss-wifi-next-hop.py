@@ -26,6 +26,7 @@ enum { NSS_DYNAMIC_INTERFACE_TYPE_VAP=1,NSS_DYNAMIC_INTERFACE_TYPE_IGS };
 #define NSS_IF_TX_TIMEOUT 3000
 #define GFP_KERNEL 0
 #define msecs_to_jiffies(x) (x)
+#define READ_ONCE(x) (x)
 struct completion { bool done; };
 struct nss_cmn_msg { unsigned type,interface,len,response,error; nss_ptr_t cb,app_data; };
 struct nss_wifi_vdev_msg { struct nss_cmn_msg cm; union { struct { unsigned ifnumber; } next_hop; } msg; };
@@ -35,6 +36,7 @@ static unsigned mode,cancels,allocs,frees,submits;
 static struct nss_cmn_msg pending;
 static void init_completion(struct completion *c) { c->done=false; }
 static void complete(struct completion *c) { c->done=true; }
+static bool completion_done(struct completion *c) { return c->done; }
 static unsigned wait_for_completion_timeout(struct completion *c,unsigned timeout) { return c->done; }
 static void *kzalloc(size_t n,unsigned flags) { allocs++;return calloc(1,n); }
 static void kfree(void *p) { if(p){frees++;free(p);} }
@@ -64,7 +66,7 @@ int main(void) {
  struct nss_ctx_instance ctx={.type=NSS_DYNAMIC_INTERFACE_TYPE_VAP};
  for(mode=0;mode<6;mode++){
   nss_tx_status_t result=nss_wifi_vdev_set_next_hop_sync(&ctx,6,16);
-  assert(result==(mode==0?NSS_TX_SUCCESS:NSS_TX_FAILURE));
+  assert(result==((mode==0||mode==2||mode==5)?NSS_TX_SUCCESS:NSS_TX_FAILURE));
  }
  assert(submits==6 && cancels==5 && allocs==frees);
  ctx.type=NSS_DYNAMIC_INTERFACE_TYPE_IGS;
@@ -73,7 +75,7 @@ int main(void) {
  assert(nss_wifi_vdev_set_next_hop_sync(&ctx,3,16)==NSS_TX_FAILURE_BAD_PARAM);
  assert(nss_wifi_vdev_set_next_hop_sync(&ctx,6,64)==NSS_TX_FAILURE_BAD_PARAM);
  assert(submits==6 && allocs==frees);
- puts("PASS actual Wi-Fi next-hop sync: ACK/NACK/ACK-error/send failure/timeout/late callback drain/input identity");
+ puts("PASS actual Wi-Fi next-hop sync: header ACK with undefined error, NACK/send failure/timeout, timeout-edge ACK and callback drain/input identity");
 }
 '''
 

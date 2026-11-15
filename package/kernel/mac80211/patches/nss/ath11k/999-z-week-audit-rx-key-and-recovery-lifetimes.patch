@@ -1,0 +1,2369 @@
+Subject: [PATCH] ath11k/mac80211: close NSS RX, key and recovery lifetimes
+
+--- a/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_htt_stats.c
+@@ -4149,7 +4149,7 @@
+ 	for (i = 0; i < ATH11K_STATS_MGMT_FRM_TYPE_MAX - 1; i++)
+ 		len += scnprintf(buf + len, buf_len - len, "%s:%u\n",
+ 				 mgmt_frm_type[i],
+-				 htt_stat_buf->peer_rx_mgmt_subtype[i]);
++				 htt_stat_buf->peer_tx_mgmt_subtype[i]);
+ 
+ 	len += scnprintf(buf + len, buf_len - len, "peer_rx_mgmt_subtype:\n");
+ 	for (i = 0; i < ATH11K_STATS_MGMT_FRM_TYPE_MAX - 1; i++)
+@@ -4170,6 +4170,8 @@
+ 
+ 	switch (tag) {
+ 	case HTT_STATS_TX_PDEV_CMN_TAG:
++		if (len < sizeof(struct htt_tx_pdev_stats_cmn_tlv))
++			return -EINVAL;
+ 		htt_print_tx_pdev_stats_cmn_tlv(tag_buf, stats_req);
+ 		break;
+ 	case HTT_STATS_TX_PDEV_UNDERRUN_TAG:
+--- a/drivers/net/wireless/ath/ath11k/debugfs_sta.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs_sta.c
+@@ -389,15 +389,17 @@
+ 	int len = 0, i, retval = 0;
+ 	const int size = 4 * 4096;
+ 	char *buf;
+-	int he_rates_avail = (rx_stats->pream_cnt[HAL_RX_PREAMBLE_11AX] > 1) ? 1 : 0;
+-	int rate_table_len = he_rates_avail ? ATH11K_RX_RATE_TABLE_11AX_NUM :
+-					      ATH11K_RX_RATE_TABLE_NUM;
++	int he_rates_avail, rate_table_len;
+ 	char *legacy_rate_str[] = {"1Mbps", "2Mbps", "5.5Mbps", "6Mbps",
+ 				   "9Mbps", "11Mbps", "12Mbps", "18Mbps",
+ 				   "24Mbps", "36 Mbps", "48Mbps", "54Mbps"};
+ 
+ 	if (!rx_stats)
+ 		return -ENOENT;
++
++	he_rates_avail = rx_stats->pream_cnt[HAL_RX_PREAMBLE_11AX] > 1;
++	rate_table_len = he_rates_avail ? ATH11K_RX_RATE_TABLE_11AX_NUM :
++					ATH11K_RX_RATE_TABLE_NUM;
+ 
+ 	buf = kzalloc(size, GFP_KERNEL);
+ 	if (!buf)
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -2029,8 +2029,29 @@
+ 	rcu_read_lock();
+ 
+ 	spin_lock_bh(&ab->base_lock);
+-	peer = ath11k_peer_find_by_id(ar, msg->sw_peer_id);
+-	if (!peer)
++	if (ar) {
++		peer = ath11k_peer_find_by_id(ar, msg->sw_peer_id);
++	} else {
++		/* SOC-wide flush TLVs have no pdev. Accept a unique live peer,
++		 * never an uninitialized radio pointer or an ambiguous peer ID.
++		 */
++		int i;
++
++		for (i = 0; i < ab->num_radios; i++) {
++			struct ath11k_peer *candidate;
++			struct ath11k *radio = ab->pdevs[i].ar;
++
++			if (!radio)
++				continue;
++			candidate = ath11k_peer_find_by_id(radio, msg->sw_peer_id);
++			if (!candidate)
++				continue;
++			if (peer && peer != candidate)
++				goto exit;
++			peer = candidate;
++		}
++	}
++	if (!peer || !peer->vif || !peer->sta)
+ 		goto exit;
+ 
+ 	if (peer->vif->type != NL80211_IFTYPE_MESH_POINT)
+@@ -2048,6 +2069,7 @@
+ 	status_rate.rate_idx = arsta->last_txrate;
+ 
+ 	status.rates = &status_rate;
++	status.n_rates = 1;
+ 	status.mpdu_fail = FIELD_GET(HTT_PPDU_STATS_CMPLTN_FLUSH_INFO_NUM_MPDU,
+ 				     msg->info);
+ 	ar = arsta->arvif->ar;
+@@ -2443,7 +2465,7 @@
+ 	ppdu_id = msg->ppdu_id;
+ 
+ 	if (pdev_id == 0) {
+-		ret = ath11k_dp_htt_tlv_iter(ab, ar, msg->data, len,
++		ret = ath11k_dp_htt_tlv_iter(ab, NULL, msg->data, len,
+ 					     ath11k_htt_tlv_ppdu_soc_stats_parse,
+ 					     NULL);
+ 		if (ret)
+@@ -2717,6 +2739,31 @@
+ 	dev_kfree_skb_any(skb);
+ }
+ 
++/* RX descriptors live in the skb head, including the part before skb->data.
++ * pskb_expand_head() moves that storage, so relocate the descriptor explicitly.
++ * Monitor/fragment callers may use skb->cb for ieee80211_rx_status instead.
++ */
++static int ath11k_dp_rx_expand_head(struct sk_buff *skb, int nhead, int ntail,
++				  struct hal_rx_desc **desc, u32 desc_size)
++{
++	unsigned long offset = 0;
++	int ret;
++
++	if (desc) {
++		if ((unsigned long)*desc < (unsigned long)skb->head ||
++		    (unsigned long)*desc > (unsigned long)skb_tail_pointer(skb) ||
++		    desc_size > (unsigned long)skb_tail_pointer(skb) -
++				(unsigned long)*desc)
++			return -EINVAL;
++		offset = (u8 *)*desc - skb->head;
++	}
++
++	ret = pskb_expand_head(skb, nhead, ntail, GFP_ATOMIC);
++	if (!ret && desc)
++		*desc = (void *)(skb->head + nhead + offset);
++	return ret;
++}
++
+ static int ath11k_dp_rx_msdu_coalesce(struct ath11k *ar,
+ 				      struct sk_buff_head *msdu_list,
+ 				      struct sk_buff *first, struct sk_buff *last,
+@@ -2726,7 +2773,7 @@
+ 	struct sk_buff *skb;
+ 	struct ath11k_skb_rxcb *rxcb = ATH11K_SKB_RXCB(first);
+ 	int buf_first_hdr_len, buf_first_len;
+-	struct hal_rx_desc *ldesc;
++	struct hal_rx_desc *ldesc, *fdesc = rxcb->rx_desc;
+ 	int space_extra, rem_len, buf_len;
+ 	u32 hal_rx_desc_sz = ar->ab->hw_params.hal_desc_sz;
+ 	bool is_continuation;
+@@ -2762,7 +2809,8 @@
+ 
+ 	space_extra = msdu_len - (buf_first_len + skb_tailroom(first));
+ 	if (space_extra > 0 &&
+-	    (pskb_expand_head(first, 0, space_extra, GFP_ATOMIC) < 0)) {
++	    (ath11k_dp_rx_expand_head(first, 0, space_extra, &fdesc,
++				     hal_rx_desc_sz) < 0)) {
+ 		/* Free up all buffers of the MSDU */
+ 		while ((skb = __skb_dequeue(msdu_list)) != NULL) {
+ 			rxcb = ATH11K_SKB_RXCB(skb);
+@@ -2774,6 +2822,7 @@
+ 		}
+ 		return -ENOMEM;
+ 	}
++	ATH11K_SKB_RXCB(first)->rx_desc = fdesc;
+ 
+ 	rem_len = msdu_len - buf_first_len;
+ 	while ((skb = __skb_dequeue(msdu_list)) != NULL && rem_len > 0) {
+@@ -2918,35 +2967,24 @@
+ static void ath11k_get_dot11_hdr_from_rx_desc(struct ath11k *ar,
+ 					      struct sk_buff *msdu,
+ 					      struct ath11k_skb_rxcb *rxcb,
++					      struct hal_rx_desc *rx_desc,
+ 					      struct ieee80211_rx_status *status,
+ 					      enum hal_encrypt_type enctype)
+ {
+-	struct hal_rx_desc *rx_desc = rxcb->rx_desc;
+ 	struct ath11k_base *ab = ar->ab;
+ 	size_t hdr_len, crypto_len;
+ 	struct ieee80211_hdr *hdr;
+ 	u16 fc, qos_ctl = 0;
+-	int expand_by;
+ 	u8 *crypto_hdr;
+ 
+ 	if (!(status->flag & RX_FLAG_IV_STRIPPED)) {
+ 		crypto_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
+-		if (skb_headroom(msdu) < crypto_len) {
+-			expand_by = crypto_len - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		crypto_hdr = skb_push(msdu, crypto_len);
+ 		ath11k_dp_rx_desc_get_crypto_header(ab, rx_desc, crypto_hdr, enctype);
+ 	}
+ 
+ 	fc = ath11k_dp_rxdesc_get_mpdu_frame_ctrl(ab, rx_desc);
+ 	hdr_len = ieee80211_hdrlen(fc);
+-	if (skb_headroom(msdu) < hdr_len) {
+-		expand_by = hdr_len - skb_headroom(msdu);
+-		if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-			return;
+-	}
+ 	skb_push(msdu, hdr_len);
+ 	hdr = (struct ieee80211_hdr *)msdu->data;
+ 	hdr->frame_control = fc;
+@@ -2970,8 +3008,9 @@
+ }
+ 
+ static void ath11k_dp_rx_h_undecap_nwifi(struct ath11k *ar,
+-					 struct sk_buff *msdu,
+-					 u8 *first_hdr,
++						 struct sk_buff *msdu,
++						 u8 *first_hdr,
++						 struct hal_rx_desc *rx_desc,
+ 					 enum hal_encrypt_type enctype,
+ 					 struct ieee80211_rx_status *status)
+ {
+@@ -2982,7 +3021,6 @@
+ 	u8 da[ETH_ALEN];
+ 	u8 sa[ETH_ALEN];
+ 	u16 qos_ctl = 0;
+-	int expand_by = 0;
+ 	u8 *qos, *crypto_hdr;
+ 	bool add_qos_ctrl = false;
+ 
+@@ -3016,7 +3054,7 @@
+ 
+ 		qos_ctl = rxcb->tid;
+ 
+-		if (ath11k_dp_rx_h_msdu_start_mesh_ctl_present(ar->ab, rxcb->rx_desc))
++		if (ath11k_dp_rx_h_msdu_start_mesh_ctl_present(ar->ab, rx_desc))
+ 			qos_ctl |= IEEE80211_QOS_CTL_MESH_CONTROL_PRESENT;
+ 
+ 		/* TODO Add other QoS ctl fields when required */
+@@ -3029,44 +3067,24 @@
+ 	if (!(status->flag & RX_FLAG_IV_STRIPPED)) {
+ 		int crypto_param_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
+ 
+-		if (skb_headroom(msdu) < crypto_param_len) {
+-			expand_by = crypto_param_len - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		if (first_hdr) {
+ 			memcpy(skb_push(msdu, crypto_param_len),
+ 			       (void *)hdr + hdr_len, crypto_param_len);
+ 		} else {
+ 			crypto_hdr = skb_push(msdu, crypto_param_len);
+ 			ath11k_dp_rx_desc_get_crypto_header(ar->ab,
+-							    rxcb->rx_desc, crypto_hdr, enctype);
++								    rx_desc, crypto_hdr, enctype);
+ 		}
+ 	}
+ 
+ 	if (!rxcb->is_first_msdu || add_qos_ctrl) {
+-		if (skb_headroom(msdu) < IEEE80211_QOS_CTL_LEN) {
+-			expand_by = IEEE80211_QOS_CTL_LEN - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		memcpy(skb_push(msdu,
+ 				IEEE80211_QOS_CTL_LEN), &qos_ctl,
+ 				IEEE80211_QOS_CTL_LEN);
+-		if (skb_headroom(msdu) < hdr_len) {
+-			expand_by = hdr_len - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		memcpy(skb_push(msdu, hdr_len), decap_hdr, hdr_len);
+ 		return;
+ 	}
+ 
+-	if (skb_headroom(msdu) < hdr_len) {
+-		expand_by = hdr_len - skb_headroom(msdu);
+-		if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-			return;
+-	}
+ 	memcpy(skb_push(msdu, hdr_len), hdr, hdr_len);
+ 
+ 	/* original 802.11 header has a different DA and in
+@@ -3137,7 +3155,8 @@
+ }
+ 
+ static void *ath11k_dp_rx_h_find_rfc1042(struct ath11k *ar,
+-					 struct sk_buff *msdu,
++						 struct sk_buff *msdu,
++						 struct hal_rx_desc *rx_desc,
+ 					 enum hal_encrypt_type enctype)
+ {
+ 	struct ath11k_skb_rxcb *rxcb = ATH11K_SKB_RXCB(msdu);
+@@ -3147,7 +3166,7 @@
+ 	bool is_amsdu;
+ 
+ 	is_amsdu = !(rxcb->is_first_msdu && rxcb->is_last_msdu);
+-	hdr = (struct ieee80211_hdr *)ath11k_dp_rx_h_80211_hdr(ar->ab, rxcb->rx_desc);
++	hdr = (struct ieee80211_hdr *)ath11k_dp_rx_h_80211_hdr(ar->ab, rx_desc);
+ 	rfc1042 = hdr;
+ 
+ 	if (rxcb->is_first_msdu) {
+@@ -3164,8 +3183,9 @@
+ }
+ 
+ static void ath11k_dp_rx_h_undecap_eth(struct ath11k *ar,
+-				       struct sk_buff *msdu,
+-				       u8 *first_hdr,
++					       struct sk_buff *msdu,
++					       u8 *first_hdr,
++					       struct hal_rx_desc *rx_desc,
+ 				       enum hal_encrypt_type enctype,
+ 				       struct ieee80211_rx_status *status)
+ {
+@@ -3175,7 +3195,6 @@
+ 	u8 da[ETH_ALEN];
+ 	u8 sa[ETH_ALEN];
+ 	void *rfc1042;
+-	int expand_by;
+ 	struct ath11k_skb_rxcb *rxcb = ATH11K_SKB_RXCB(msdu);
+ 	struct ath11k_dp_rfc1042_hdr rfc = {0xaa, 0xaa, 0x03, {0x00, 0x00, 0x00}};
+ 
+@@ -3185,18 +3204,13 @@
+ 		ether_addr_copy(sa, eth->h_source);
+ 		rfc.snap_type = eth->h_proto;
+ 		skb_pull(msdu, sizeof(struct ethhdr));
+-		if (skb_headroom(msdu) < sizeof(struct ath11k_dp_rfc1042_hdr)) {
+-			expand_by = sizeof(struct ath11k_dp_rfc1042_hdr) - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		memcpy(skb_push(msdu, sizeof(struct ath11k_dp_rfc1042_hdr)), &rfc,
+ 		       sizeof(struct ath11k_dp_rfc1042_hdr));
+-		ath11k_get_dot11_hdr_from_rx_desc(ar, msdu, rxcb, status, enctype);
++		ath11k_get_dot11_hdr_from_rx_desc(ar, msdu, rxcb, rx_desc, status, enctype);
+ 		goto exit;
+ 	}
+ 
+-	rfc1042 = ath11k_dp_rx_h_find_rfc1042(ar, msdu, enctype);
++	rfc1042 = ath11k_dp_rx_h_find_rfc1042(ar, msdu, rx_desc, enctype);
+ 	if (WARN_ON_ONCE(!rfc1042))
+ 		return;
+ 
+@@ -3207,11 +3221,6 @@
+ 	skb_pull(msdu, sizeof(struct ethhdr));
+ 
+ 	/* push rfc1042/llc/snap */
+-	if (skb_headroom(msdu) < sizeof(struct ath11k_dp_rfc1042_hdr)) {
+-		expand_by = sizeof(struct ath11k_dp_rfc1042_hdr) - skb_headroom(msdu);
+-		if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-			return;
+-	}
+ 	memcpy(skb_push(msdu, sizeof(struct ath11k_dp_rfc1042_hdr)), rfc1042,
+ 	       sizeof(struct ath11k_dp_rfc1042_hdr));
+ 
+@@ -3222,20 +3231,10 @@
+ 	if (!(status->flag & RX_FLAG_IV_STRIPPED)) {
+ 		int crypto_param_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
+ 
+-		if (skb_headroom(msdu) < crypto_param_len) {
+-			expand_by = crypto_param_len - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		memcpy(skb_push(msdu, crypto_param_len),
+ 		       (void *)hdr + hdr_len, crypto_param_len);
+ 	}
+ 
+-	if (skb_headroom(msdu) < hdr_len) {
+-		expand_by = hdr_len - skb_headroom(msdu);
+-		if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-			return;
+-	}
+ 	memcpy(skb_push(msdu, hdr_len), hdr, hdr_len);
+ 
+ exit:
+@@ -3248,16 +3247,14 @@
+ }
+ 
+ static void ath11k_dp_rx_h_undecap_snap(struct ath11k *ar,
+-				        struct sk_buff *msdu,
+-				        u8 *first_hdr,
++					        struct sk_buff *msdu,
++					        u8 *first_hdr,
++					        struct hal_rx_desc *rx_desc,
+ 				        enum hal_encrypt_type enctype,
+ 				        struct ieee80211_rx_status *status)
+ {
+ 	struct ieee80211_hdr *hdr;
+ 	size_t hdr_len;
+-	u8 l3_pad_bytes;
+-	int expand_by;
+-	struct hal_rx_desc *rx_desc;
+ 	struct ath11k_skb_rxcb *rxcb = ATH11K_SKB_RXCB(msdu);
+ 
+ 	/* Delivered decapped frame:
+@@ -3266,14 +3263,11 @@
+ 	 * [payload]
+ 	 */
+ 
+-	rx_desc = (void *)msdu->data - sizeof(*rx_desc);
+-	l3_pad_bytes = ath11k_dp_rx_h_msdu_end_l3pad(ar->ab, rx_desc);
+-
+-	skb_put(msdu, l3_pad_bytes);
+-	skb_pull(msdu, sizeof(struct ath11k_dp_amsdu_subframe_hdr) + l3_pad_bytes);
++	/* Descriptor and L3 padding were removed by the receive owner. */
++	skb_pull(msdu, sizeof(struct ath11k_dp_amsdu_subframe_hdr));
+ 
+ 	if (!first_hdr) {
+-		ath11k_get_dot11_hdr_from_rx_desc(ar, msdu, rxcb, status, enctype);
++		ath11k_get_dot11_hdr_from_rx_desc(ar, msdu, rxcb, rx_desc, status, enctype);
+ 		return;
+ 	}
+ 
+@@ -3283,25 +3277,15 @@
+ 	if (!(status->flag & RX_FLAG_IV_STRIPPED)) {
+ 		int crypto_param_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
+ 
+-		if (skb_headroom(msdu) < crypto_param_len) {
+-			expand_by = crypto_param_len - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				return;
+-		}
+ 		memcpy(skb_push(msdu, crypto_param_len),
+ 		       (void *)hdr + hdr_len, crypto_param_len);
+ 	}
+ 
+-	if (skb_headroom(msdu) < hdr_len) {
+-		expand_by = hdr_len - skb_headroom(msdu);
+-		if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-			return;
+-	}
+ 	memcpy(skb_push(msdu, hdr_len), hdr, hdr_len);
+ }
+ 
+-static void ath11k_dp_rx_h_undecap(struct ath11k *ar, struct sk_buff *msdu,
+-				   struct hal_rx_desc *rx_desc,
++static int ath11k_dp_rx_h_undecap(struct ath11k *ar, struct sk_buff *msdu,
++					   struct hal_rx_desc **desc,
+ 				   enum hal_encrypt_type enctype,
+ 				   struct ieee80211_rx_status *status,
+ 				   bool decrypted)
+@@ -3309,26 +3293,84 @@
+ 	u8 *first_hdr;
+ 	u8 decap;
+ 	struct ethhdr *ehdr;
+-
++	struct hal_rx_desc *rx_desc = *desc;
++	struct ieee80211_hdr *hdr;
++	size_t hdr_len, crypto_len, trailer = 0;
++	int ret;
++
++	decap = ath11k_dp_rx_h_msdu_start_decap_type(ar->ab, rx_desc);
++	/* Fragment MIC reporting stores ieee80211_rx_status in skb->cb.
++	 * RAW never grows the head and must not overwrite that control block.
++	 */
++	if (decap == DP_RX_DECAP_TYPE_RAW) {
++		if (msdu->len < sizeof(hdr->frame_control))
++			return -EINVAL;
++		hdr = (void *)msdu->data;
++		hdr_len = ieee80211_hdrlen(hdr->frame_control);
++		trailer = FCS_LEN;
++		if (decrypted) {
++			if (status->flag & (RX_FLAG_IV_STRIPPED | RX_FLAG_MIC_STRIPPED))
++				trailer += ath11k_dp_rx_crypto_mic_len(ar, enctype);
++			if (status->flag & (RX_FLAG_IV_STRIPPED | RX_FLAG_ICV_STRIPPED))
++				trailer += ath11k_dp_rx_crypto_icv_len(ar, enctype);
++			if ((status->flag & RX_FLAG_MMIC_STRIPPED) &&
++			    !ieee80211_has_morefrags(hdr->frame_control) &&
++			    enctype == HAL_ENCRYPT_TYPE_TKIP_MIC)
++				trailer += IEEE80211_CCMP_MIC_LEN;
++		}
++		crypto_len = decrypted && (status->flag & RX_FLAG_IV_STRIPPED) ?
++			     ath11k_dp_rx_crypto_param_len(ar, enctype) : 0;
++		if (msdu->len < hdr_len + crypto_len + trailer)
++			return -EINVAL;
++		ath11k_dp_rx_h_undecap_raw(ar, msdu, enctype, status, decrypted);
++		return 0;
++	}
++
++	/* Grow once, before taking any alias into the descriptor/header.
++	 * 128 covers the MAC, mesh, crypto, LLC and QoS headers together.
++	 */
++	if (skb_headroom(msdu) < 128) {
++		ret = ath11k_dp_rx_expand_head(msdu, 128 - skb_headroom(msdu),
++					      0, desc, ar->ab->hw_params.hal_desc_sz);
++		if (ret)
++			return ret;
++		rx_desc = *desc;
++	}
+ 	first_hdr = ath11k_dp_rx_h_80211_hdr(ar->ab, rx_desc);
+-	decap = ath11k_dp_rx_h_msdu_start_decap_type(ar->ab, rx_desc);
++	if (first_hdr) {
++		hdr = (void *)first_hdr;
++		hdr_len = ieee80211_hdrlen(hdr->frame_control);
++		crypto_len = ath11k_dp_rx_crypto_param_len(ar, enctype);
++		if (hdr_len > DP_MAX_NWIFI_HDR_LEN ||
++		    first_hdr < (u8 *)rx_desc ||
++		    first_hdr + hdr_len + crypto_len >
++			    (u8 *)rx_desc + ar->ab->hw_params.hal_desc_sz)
++			return -EINVAL;
++	}
+ 
+ 	switch (decap) {
+ 	case DP_RX_DECAP_TYPE_NATIVE_WIFI:
+-		ath11k_dp_rx_h_undecap_nwifi(ar, msdu, first_hdr,
+-					     enctype, status);
+-		break;
+-	case DP_RX_DECAP_TYPE_RAW:
+-		ath11k_dp_rx_h_undecap_raw(ar, msdu, enctype, status,
+-					   decrypted);
++		if (msdu->len < sizeof(hdr->frame_control))
++			return -EINVAL;
++		hdr = (void *)msdu->data;
++		hdr_len = ieee80211_hdrlen(hdr->frame_control);
++		if (hdr_len < 24 || hdr_len > DP_MAX_NWIFI_HDR_LEN ||
++		    hdr_len > msdu->len)
++			return -EINVAL;
++		ath11k_dp_rx_h_undecap_nwifi(ar, msdu, first_hdr, rx_desc,
++						     enctype, status);
+ 		break;
+ 	case DP_RX_DECAP_TYPE_ETHERNET2_DIX:
++		if (msdu->len < ETH_HLEN)
++			return -EINVAL;
+ 		ehdr = (struct ethhdr *)msdu->data;
+ 
+ 		/* mac80211 allows fast path only for authorized STA */
+-		if (ehdr->h_proto == cpu_to_be16(ETH_P_PAE)) {
++		if (ehdr->h_proto == cpu_to_be16(ETH_P_PAE) ||
++		    (enctype == HAL_ENCRYPT_TYPE_TKIP_MIC &&
++		     (status->flag & RX_FLAG_MMIC_ERROR))) {
+ 			ATH11K_SKB_RXCB(msdu)->is_eapol = true;
+-			ath11k_dp_rx_h_undecap_eth(ar, msdu, first_hdr,
++			ath11k_dp_rx_h_undecap_eth(ar, msdu, first_hdr, rx_desc,
+ 						   enctype, status);
+ 			break;
+ 		}
+@@ -3337,14 +3379,19 @@
+ 		 * remove eth header and add 802.11 header.
+ 		 */
+ 		if (ATH11K_SKB_RXCB(msdu)->is_mcbc && decrypted)
+-			ath11k_dp_rx_h_undecap_eth(ar, msdu, first_hdr,
++				ath11k_dp_rx_h_undecap_eth(ar, msdu, first_hdr, rx_desc,
+ 						   enctype, status);
+ 		break;
+ 	case DP_RX_DECAP_TYPE_8023:
+-		ath11k_dp_rx_h_undecap_snap(ar, msdu, first_hdr,
++		if (msdu->len < sizeof(struct ath11k_dp_amsdu_subframe_hdr))
++			return -EINVAL;
++		ath11k_dp_rx_h_undecap_snap(ar, msdu, first_hdr, rx_desc,
+ 					    enctype, status);
+ 		break;
+-	}
++	default:
++		return -EINVAL;
++	}
++	return 0;
+ }
+ 
+ static struct ath11k_peer *
+@@ -3418,7 +3465,7 @@
+ 	return true;
+ }
+ 
+-static void ath11k_dp_rx_h_mpdu(struct ath11k *ar,
++static int ath11k_dp_rx_h_mpdu(struct ath11k *ar,
+ 				struct sk_buff *msdu,
+ 				struct hal_rx_desc *rx_desc,
+ 				struct ieee80211_rx_status *rx_status,
+@@ -3432,9 +3479,9 @@
+ 	struct ath11k_peer *peer;
+ 	struct rx_attention *rx_attention;
+ 	u32 err_bitmap;
++	int ret;
+ 
+ 	struct wireless_dev *wdev = NULL;
+-	struct ath11k_sta *arsta = NULL;
+ 
+ 	/* PN for multicast packets will be checked in mac80211 */
+ 	rxcb = ATH11K_SKB_RXCB(msdu);
+@@ -3466,9 +3513,7 @@
+ 				msdu->dev = wdev->netdev;
+ 				msdu->protocol = eth_type_trans(msdu, msdu->dev);
+ 				napi_gro_receive(rxcb->napi, msdu);
+-				if (peer->sta)
+-					arsta = ath11k_sta_to_arsta(peer->sta);
+-				return;
++					return 0;
+ 			}
+ 		}
+ 
+@@ -3513,17 +3558,21 @@
+ 	}
+ 
+ 	ath11k_dp_rx_h_csum_offload(ar, msdu);
+-	ath11k_dp_rx_h_undecap(ar, msdu, rx_desc,
+-			       enctype, rx_status, is_decrypted);
++	ret = ath11k_dp_rx_h_undecap(ar, msdu, &rx_desc,
++				   enctype, rx_status, is_decrypted);
++	rxcb->rx_desc = rx_desc;
++	if (ret)
++		return ret;
+ 
+ 	if (!is_decrypted || fill_crypto_hdr)
+-		return;
++		return 0;
+ 
+ 	if (ath11k_dp_rx_h_msdu_start_decap_type(ar->ab, rx_desc) !=
+ 	    DP_RX_DECAP_TYPE_ETHERNET2_DIX) {
+ 		hdr = (void *)msdu->data;
+ 		hdr->frame_control &= ~__cpu_to_le16(IEEE80211_FCTL_PROTECTED);
+ 	}
++	return 0;
+ }
+ 
+ static void ath11k_dp_rx_h_rate(struct ath11k *ar, struct hal_rx_desc *rx_desc,
+@@ -3660,15 +3709,25 @@
+ 	u8 decap = DP_RX_DECAP_TYPE_RAW;
+ 	bool is_mcbc = rxcb->is_mcbc;
+ 	bool is_eapol = rxcb->is_eapol;
++	struct hal_rx_desc *rx_desc = NULL;
++	u8 peer_addr[ETH_ALEN] = {};
+ 	int expand_by;
+ 
++	if (!(status->flag & RX_FLAG_ONLY_MONITOR))
++		rx_desc = rxcb->rx_desc;
+ 	if (status->encoding == RX_ENC_HE &&
+ 	    !(status->flag & RX_FLAG_RADIOTAP_HE) &&
+ 	    !(status->flag & RX_FLAG_SKIP_MONITOR)) {
+ 		if (skb_headroom(msdu) < sizeof(known)) {
+ 			expand_by = sizeof(known) - skb_headroom(msdu);
+-			if (WARN_ON_ONCE(pskb_expand_head(msdu, expand_by, 0, GFP_ATOMIC)))
+-				goto exit;
++			if (ath11k_dp_rx_expand_head(msdu, expand_by, 0,
++						    rx_desc ? &rx_desc : NULL,
++						    ar->ab->hw_params.hal_desc_sz)) {
++				dev_kfree_skb_any(msdu);
++				return;
++			}
++			if (rx_desc)
++				rxcb->rx_desc = rx_desc;
+ 		}
+ 		he = skb_push(msdu, sizeof(known));
+ 		memcpy(he, &known, sizeof(known));
+@@ -3676,19 +3735,22 @@
+ 	}
+ 
+ 	if (!(status->flag & RX_FLAG_ONLY_MONITOR))
+-		decap = ath11k_dp_rx_h_msdu_start_decap_type(ar->ab, rxcb->rx_desc);
++		decap = ath11k_dp_rx_h_msdu_start_decap_type(ar->ab, rx_desc);
+ 
+ 	spin_lock_bh(&ar->ab->base_lock);
+-	peer = ath11k_dp_rx_h_find_peer(ar, msdu);
++	peer = rx_desc ? ath11k_dp_rx_h_find_peer(ar, msdu) :
++			ath11k_peer_find_by_id(ar, rxcb->peer_id);
+ 	if (peer && peer->sta)
+ 		pubsta = peer->sta;
++	if (peer)
++		ether_addr_copy(peer_addr, peer->addr);
+ 	spin_unlock_bh(&ar->ab->base_lock);
+ 
+ 	ath11k_dbg(ar->ab, ATH11K_DBG_DATA,
+ 		   "rx skb %p len %u peer %pM %d %s sn %u %s%s%s%s%s%s%s %srate_idx %u vht_nss %u freq %u band %u flag 0x%x fcs-err %i mic-err %i amsdu-more %i\n",
+ 		   msdu,
+ 		   msdu->len,
+-		   peer ? peer->addr : NULL,
++		   peer_addr,
+ 		   rxcb->tid,
+ 		   is_mcbc ? "mcast" : "ucast",
+ 		   rxcb->seq_no,
+@@ -3725,7 +3787,6 @@
+ 	    !(is_mcbc && rx_status->flag & RX_FLAG_DECRYPTED))
+ 		rx_status->flag |= RX_FLAG_8023;
+ 
+-exit:
+ 	ieee80211_rx_napi(ar->hw, pubsta, msdu, napi);
+ }
+ 
+@@ -3791,7 +3852,8 @@
+ 	if (rxcb->is_frag) {
+ 		skb_pull(msdu, hal_rx_desc_sz);
+ 	} else if (!rxcb->is_continuation) {
+-		if ((msdu_len + hal_rx_desc_sz) > DP_RX_BUFFER_SIZE) {
++		if (msdu_len + hal_rx_desc_sz + l3_pad_bytes > DP_RX_BUFFER_SIZE ||
++		    msdu_len + hal_rx_desc_sz + l3_pad_bytes > skb_tailroom(msdu)) {
+ 			hdr_status = ath11k_dp_rx_h_80211_hdr(ab, rx_desc);
+ 			ret = -EINVAL;
+ 			ath11k_warn(ab, "invalid msdu len %u\n", msdu_len);
+@@ -3815,12 +3877,16 @@
+ 		}
+ 	}
+ 
+-	ath11k_dp_rx_h_mpdu(ar, msdu, rx_desc, rx_status, fast_rx, false);
++	rx_desc = ATH11K_SKB_RXCB(msdu)->rx_desc;
++	ret = ath11k_dp_rx_h_mpdu(ar, msdu, rx_desc, rx_status, fast_rx, false);
++	if (ret)
++		return ret;
+ 	if (*fast_rx) {
+ 		ab->soc_stats.invalid_rbm++;
+ 		return 0;
+ 	}
+ 
++	rx_desc = ATH11K_SKB_RXCB(msdu)->rx_desc;
+ 	ath11k_dp_rx_h_ppdu(ar, rx_desc, rx_status);
+ 
+ 	rx_status->flag |= RX_FLAG_SKIP_MONITOR | RX_FLAG_DUP_VALIDATED;
+@@ -3891,7 +3957,11 @@
+ 	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, rxcb->rx_desc);
+ 
+ 	ath11k_dp_rx_h_ppdu(ar, rxcb->rx_desc, &rx_status);
+-	ath11k_dp_rx_h_mpdu(ar, msdu, rxcb->rx_desc, &rx_status, &fast_rx, true);
++	if (ath11k_dp_rx_h_mpdu(ar, msdu, rxcb->rx_desc, &rx_status,
++			       &fast_rx, true)) {
++		dev_kfree_skb_any(msdu);
++		return;
++	}
+ 
+ 	rx_status.flag |= RX_FLAG_SKIP_MONITOR;
+ 	if (!rxcb->is_mcbc)
+@@ -3935,6 +4005,16 @@
+ 	while (likely(desc =
+ 	      (struct hal_reo_dest_ring *)ath11k_hal_srng_dst_get_next_entry(ab,
+ 									     srng))) {
++		/* Error descriptors do not transfer the buffer to this ring.
++		 * The release ring owns its IDR entry and DMA mapping.
++		 */
++		push_reason = FIELD_GET(HAL_REO_DEST_RING_INFO0_PUSH_REASON,
++					desc->info0);
++		if (unlikely(push_reason ==
++			     HAL_REO_DEST_RING_PUSH_REASON_ERR_DETECTED)) {
++			ab->soc_stats.hal_reo_error[ring_id]++;
++			continue;
++		}
+ 		cookie = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
+ 				   desc->buf_addr_info.info1);
+ 		buf_id = FIELD_GET(DP_RXDMA_BUF_COOKIE_BUF_ID,
+@@ -3970,8 +4050,6 @@
+ 
+ 		num_buffs_reaped[mac_id]++;
+ 
+-		push_reason = FIELD_GET(HAL_REO_DEST_RING_INFO0_PUSH_REASON,
+-					desc->info0);
+ 		if (unlikely(push_reason !=
+ 			     HAL_REO_DEST_RING_PUSH_REASON_ROUTING_INSTRUCTION)) {
+ 			dev_kfree_skb_any(msdu);
+@@ -4758,18 +4836,27 @@
+ 	    HAL_ENCRYPT_TYPE_TKIP_MIC)
+ 		return 0;
+ 
++	if (msdu->len < hal_rx_desc_sz + sizeof(hdr->frame_control))
++		goto malformed;
+ 	hdr = (struct ieee80211_hdr *)(msdu->data + hal_rx_desc_sz);
+ 	hdr_len = ieee80211_hdrlen(hdr->frame_control);
+ 
+ 	head_len = hdr_len + hal_rx_desc_sz + IEEE80211_TKIP_IV_LEN;
+ 	tail_len = IEEE80211_CCMP_MIC_LEN + IEEE80211_TKIP_ICV_LEN + FCS_LEN;
++	if (hdr_len < 24 || msdu->len < head_len + tail_len)
++		goto malformed;
+ 
+ 	if (!is_multicast_ether_addr(hdr->addr1))
+ 		key_idx = peer->ucast_keyidx;
+ 	else
+ 		key_idx = peer->mcast_keyidx;
+ 
++	if (key_idx >= ARRAY_SIZE(peer->keys))
++		goto malformed;
+ 	key_conf = peer->keys[key_idx];
++	if (!key_conf || key_conf->keylen <
++			 NL80211_TKIP_DATA_OFFSET_RX_MIC_KEY + sizeof(mic))
++		goto malformed;
+ 
+ 	data = msdu->data + head_len;
+ 	data_len = msdu->len - head_len - tail_len;
+@@ -4790,9 +4877,14 @@
+ 	skb_pull(msdu, hal_rx_desc_sz);
+ 
+ 	ath11k_dp_rx_h_ppdu(ar, rx_desc, rxs);
+-	ath11k_dp_rx_h_undecap(ar, msdu, rx_desc,
+-			       HAL_ENCRYPT_TYPE_TKIP_MIC, rxs, true);
++	if (ath11k_dp_rx_h_undecap(ar, msdu, &rx_desc,
++				 HAL_ENCRYPT_TYPE_TKIP_MIC, rxs, true))
++		goto malformed;
+ 	ieee80211_rx(ar->hw, msdu);
++	return -EINVAL;
++
++malformed:
++	dev_kfree_skb_any(msdu);
+ 	return -EINVAL;
+ }
+ 
+@@ -5523,7 +5615,8 @@
+ 
+ 	rxcb->tid = ath11k_dp_rx_h_mpdu_start_tid(ar->ab, desc);
+ 	fast_rx = false;
+-	ath11k_dp_rx_h_mpdu(ar, msdu, desc, status, &fast_rx, false);
++	if (ath11k_dp_rx_h_mpdu(ar, msdu, desc, status, &fast_rx, false))
++		return -EINVAL;
+ 
+ 	/* Please note that caller will having the access to msdu and completing
+ 	 * rx with mac80211. Need not worry about cleaning up amsdu_list.
+@@ -5577,6 +5670,10 @@
+ 
+ 	l3pad_bytes = ath11k_dp_rx_h_msdu_end_l3pad(ar->ab, desc);
+ 	msdu_len = ath11k_dp_rx_h_msdu_start_msdu_len(ar->ab, desc);
++	if (hal_rx_desc_sz + l3pad_bytes + msdu_len > DP_RX_BUFFER_SIZE ||
++	    hal_rx_desc_sz + l3pad_bytes + msdu_len > skb_tailroom(msdu))
++		return true;
++	rxcb->rx_desc = desc;
+ 	skb_put(msdu, hal_rx_desc_sz + l3pad_bytes + msdu_len);
+ 	skb_pull(msdu, hal_rx_desc_sz + l3pad_bytes);
+ 
+@@ -5627,10 +5724,14 @@
+ 	status->flag |= (RX_FLAG_MMIC_STRIPPED | RX_FLAG_MMIC_ERROR |
+ 			 RX_FLAG_DECRYPTED);
+ 
+-	ath11k_dp_rx_h_undecap(ar, msdu, desc,
+-			       HAL_ENCRYPT_TYPE_TKIP_MIC, status, false);
++	if (ath11k_dp_rx_h_undecap(ar, msdu, &desc,
++				 HAL_ENCRYPT_TYPE_TKIP_MIC, status, false)) {
++		rxcb->rx_desc = desc;
++		return true;
++	}
++	rxcb->rx_desc = desc;
+ 
+ 	return false;
+ }
+ 
+ static bool ath11k_dp_rx_h_rxdma_err(struct ath11k *ar,  struct sk_buff *msdu,
+@@ -7423,16 +7525,14 @@
+ 			goto next_skb;
+ 		}
+ 
+-		if ((ppdu_info->fc_valid) &&
+-		    (ppdu_info->ast_index != HAL_AST_IDX_INVALID)) {
+-			if (ppdu_info->reception_type == HAL_RX_RECEPTION_TYPE_SU) {
++		if (ppdu_info->reception_type == HAL_RX_RECEPTION_TYPE_SU) {
+ 				arsta = ath11k_sta_to_arsta(peer->sta);
+ 				ath11k_dp_rx_update_peer_su_stats(arsta, ppdu_info);
+ 				ath11k_nss_update_sta_rxrate(ppdu_info, peer, NULL);
+-			} else {
++		} else if (ppdu_info->fc_valid &&
++			   ppdu_info->ast_index != HAL_AST_IDX_INVALID) {
+ 				ath11k_dp_rx_mon_process_ulofdma(ppdu_info);
+ 				ath11k_dp_rx_update_peer_mu_stats(ar, ppdu_info);
+-			}
+ 		}
+ 
+ 		if (ath11k_debugfs_is_pktlog_peer_valid(ar, peer->addr))
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -227,7 +227,8 @@
+ 	switch (ti.encap_type) {
+ 	case HAL_TCL_ENCAP_TYPE_NATIVE_WIFI:
+ 		if ((arvif->vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED) &&
+-		    ieee80211_is_qos_nullfunc(hdr->frame_control))
++		    (skb->protocol == cpu_to_be16(ETH_P_PAE) ||
++		     ieee80211_is_qos_nullfunc(hdr->frame_control)))
+ 			is_diff_encap = true;
+ 		else
+ 			ath11k_dp_tx_encap_nwifi(skb);
+@@ -253,7 +254,7 @@
+ 	if ((!test_bit(ATH11K_FLAG_HW_CRYPTO_DISABLED, &ar->ab->dev_flags) &&
+ 	    !(info->control.flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
+ 	    !info->control.hw_key && ieee80211_has_protected(hdr->frame_control)) ||
+-	    (skb->protocol == cpu_to_be16(ETH_P_PAE) && is_diff_encap)) {
++	    is_diff_encap) {
+ 		/* HW requirement is that metadata should always point to a
+ 		 * 8-byte aligned address. So we add alignment pad to start of
+ 		 * buffer. HTT Metadata should be ensured to be multiple of 8-bytes
+@@ -404,7 +405,7 @@
+ 				 struct ath11k_dp_htt_wbm_tx_status *ts)
+ {
+ 	struct ieee80211_tx_status status = {};
+-	struct sk_buff *msdu;
++	struct sk_buff *msdu = NULL;
+ 	struct ieee80211_tx_info *info;
+ 	struct ath11k_skb_cb *skb_cb;
+ 	struct ath11k *ar;
+@@ -437,8 +438,8 @@
+ 
+ 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
+ 
++	/* Free skb here if stats is disabled */
+ 	flags = skb_cb->flags;
+-	/* Free skb here if stats is disabled */
+ 	if (ab->stats_disable && !(flags & ATH11K_SKB_TX_STATUS)) {
+ 		if (msdu->destructor) {
+ 			msdu->wifi_acked_valid = 1;
+@@ -722,6 +723,7 @@
+ 	rel_status = FIELD_GET(HAL_WBM_RELEASE_INFO0_TQM_RELEASE_REASON,
+ 			       tx_status->info0);
+ 
++	flags = skb_cb->flags;
+  	/* Free skb here if stats is disabled */
+ 	if (ab->stats_disable && !(flags & ATH11K_SKB_TX_STATUS)) {
+ 		if (msdu->destructor) {
+--- a/drivers/net/wireless/ath/ath11k/hal.h
++++ b/drivers/net/wireless/ath/ath11k/hal.h
+@@ -285,6 +285,7 @@
+ #define HAL_REO1_GEN_ENABLE_AGING_LIST_ENABLE		BIT(2)
+ #define HAL_REO1_GEN_ENABLE_AGING_FLUSH_ENABLE		BIT(3)
+ #define HAL_REO1_MISC_CTL_FRAGMENT_DST_RING		GENMASK(20, 17)
++#define HAL_IPQ5018_REO1_MISC_CTL_FRAGMENT_DST_RING	GENMASK(19, 17)
+ 
+ /* CE ring bit field mask and shift */
+ #define HAL_CE_DST_R0_DEST_CTRL_MAX_LEN			GENMASK(15, 0)
+--- a/drivers/net/wireless/ath/ath11k/hw.c
++++ b/drivers/net/wireless/ath/ath11k/hw.c
+@@ -1063,11 +1063,15 @@
+ 	val = ath11k_hif_read32(ab, reo_base + HAL_REO1_GEN_ENABLE);
+ 
+ 	val &= ~HAL_REO1_GEN_ENABLE_FRAG_DST_RING;
+-	val |= FIELD_PREP(HAL_REO1_GEN_ENABLE_FRAG_DST_RING,
+-			frag_dest_ring) |
+-		FIELD_PREP(HAL_REO1_GEN_ENABLE_AGING_LIST_ENABLE, 1) |
++	val |= FIELD_PREP(HAL_REO1_GEN_ENABLE_AGING_LIST_ENABLE, 1) |
+ 		FIELD_PREP(HAL_REO1_GEN_ENABLE_AGING_FLUSH_ENABLE, 1);
+ 	ath11k_hif_write32(ab, reo_base + HAL_REO1_GEN_ENABLE, val);
++
++	val = ath11k_hif_read32(ab, reo_base + HAL_REO1_MISC_CTL(ab));
++	val &= ~HAL_IPQ5018_REO1_MISC_CTL_FRAGMENT_DST_RING;
++	val |= FIELD_PREP(HAL_IPQ5018_REO1_MISC_CTL_FRAGMENT_DST_RING,
++			  frag_dest_ring);
++	ath11k_hif_write32(ab, reo_base + HAL_REO1_MISC_CTL(ab), val);
+ 
+ 	ath11k_hif_write32(ab, reo_base + HAL_REO1_AGING_THRESH_IX_0(ab),
+ 			   HAL_DEFAULT_REO_TIMEOUT_USEC);
+@@ -3093,6 +3097,7 @@
+ };
+ 
+ const struct ath11k_hw_regs ipq5018_regs = {
++	.hal_reo1_misc_ctl = 0x000005d8,
+ 	/* SW2TCL(x) R0 ring configuration address */
+ 	.hal_tcl1_ring_base_lsb = 0x00000694,
+ 	.hal_tcl1_ring_base_msb = 0x00000698,
+@@ -3172,6 +3177,7 @@
+ };
+ 
+ const struct ath11k_hw_regs qcn6122_regs = {
++	.hal_reo1_misc_ctl = 0x000005d8,
+ 	/* SW2TCL(x) R0 ring configuration address */
+ 	.hal_tcl1_ring_base_lsb = 0x00000694,
+ 	.hal_tcl1_ring_base_msb = 0x00000698,
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -2337,14 +2337,15 @@
+ 
+ 	if (arg->peer_phymode == MODE_11AC_VHT160 ||
+ 	    arg->peer_phymode == MODE_11AC_VHT80_80) {
+-		tx_nss = ath11k_get_nss_160mhz(ar, max_nss);
++		/* The firmware ratio limits our radio, not the peer's stream count. */
++		tx_nss = ath11k_get_nss_160mhz(ar, ar->num_tx_chains);
+ 		rx_nss = min(arg->peer_nss, tx_nss);
+-		arg->peer_bw_rxnss_override = ATH11K_BW_NSS_MAP_ENABLE;
+ 
+ 		if (!rx_nss) {
+ 			ath11k_warn(ar->ab, "invalid max_nss\n");
+ 			return;
+ 		}
++		arg->peer_bw_rxnss_override = ATH11K_BW_NSS_MAP_ENABLE;
+ 
+ 		if (arg->peer_phymode == MODE_11AC_VHT160)
+ 			nss_160 = FIELD_PREP(ATH11K_PEER_RX_NSS_160MHZ, rx_nss - 1);
+@@ -2647,14 +2648,15 @@
+ 
+ 	if (arg->peer_phymode == MODE_11AX_HE160 ||
+ 	    arg->peer_phymode == MODE_11AX_HE80_80) {
+-		tx_nss = ath11k_get_nss_160mhz(ar, max_nss);
++		/* The peer's 160 MHz MCS map already describes its reduced NSS. */
++		tx_nss = ath11k_get_nss_160mhz(ar, ar->num_tx_chains);
+ 		rx_nss = min(arg->peer_nss, tx_nss);
+-		arg->peer_bw_rxnss_override = ATH11K_BW_NSS_MAP_ENABLE;
+ 
+ 		if (!rx_nss) {
+ 			ath11k_warn(ar->ab, "invalid max_nss\n");
+ 			return;
+ 		}
++		arg->peer_bw_rxnss_override = ATH11K_BW_NSS_MAP_ENABLE;
+ 
+ 		if (arg->peer_phymode == MODE_11AX_HE160)
+ 			nss_160 = FIELD_PREP(ATH11K_PEER_RX_NSS_160MHZ, rx_nss - 1);
+@@ -4204,6 +4206,9 @@
+ 	case ATH11K_SCAN_ABORTING:
+ 		ret = -EBUSY;
+ 		break;
++	default:
++		ret = -EINVAL;
++		break;
+ 	}
+ 	spin_unlock_bh(&ar->data_lock);
+ 
+@@ -4538,6 +4543,7 @@
+ 	if (cmd == DISABLE_KEY) {
+ 		arg.key_cipher = WMI_CIPHER_NONE;
+ 		arg.key_data = NULL;
++		arg.key_len = 0;
+ 		goto install;
+ 	}
+ 
+@@ -4651,30 +4657,62 @@
+ 	const u8 *addr = arvif->bssid;
+ 	int i, ret, first_errno = 0;
+ 	struct ath11k_peer *peer;
+-
++	struct ath11k_nss_peer_state *state;
++	struct ieee80211_key_conf *key;
++
++	lockdep_assert_held(&ar->conf_mutex);
+ 	spin_lock_bh(&ab->base_lock);
+ 	peer = ath11k_peer_find(ar, arvif->vdev_id, addr);
++	if (!peer) {
++		spin_unlock_bh(&ab->base_lock);
++		return -ENOENT;
++	}
++	ath11k_peer_get(peer);
++	state = ath11k_nss_key_get(ar, peer);
+ 	spin_unlock_bh(&ab->base_lock);
+-
+-	if (!peer)
+-		return -ENOENT;
++	if (IS_ERR(state)) {
++		ret = PTR_ERR(state);
++		ath11k_peer_put(ar, peer);
++		return ret;
++	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
+-		struct ieee80211_key_conf *key = peer->keys[i];
+-
++		spin_lock_bh(&ab->base_lock);
++		ret = ath11k_nss_key_check(ar, peer, state);
++		if (!ret && (!ath11k_mac_key_install_available_locked(ar) ||
++			     ath11k_peer_find(ar, arvif->vdev_id, addr) != peer ||
++			     peer->vif != arvif->vif))
++			ret = -ESHUTDOWN;
++		key = !ret ? peer->keys[i] : NULL;
++		spin_unlock_bh(&ab->base_lock);
++		if (ret) {
++			first_errno = ret;
++			break;
++		}
+ 		if (!key || (key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+ 			continue;
+ 
+ 		ret = ath11k_install_key(arvif, key, SET_KEY, addr,
+ 					 WMI_KEY_GROUP);
+-		if (ret < 0 && first_errno == 0)
+-			first_errno = ret;
+-
+-		if (ret < 0)
++		spin_lock_bh(&ab->base_lock);
++		if (!ret)
++			ret = ath11k_nss_key_check(ar, peer, state);
++		if (!ret && (!ath11k_mac_key_install_available_locked(ar) ||
++			     ath11k_peer_find(ar, arvif->vdev_id, addr) != peer ||
++			     peer->vif != arvif->vif || peer->keys[i] != key))
++			ret = -ESHUTDOWN;
++		spin_unlock_bh(&ab->base_lock);
++		if (ret < 0) {
+ 			ath11k_warn(ab, "failed to set group key of idx %d for vdev %d: %d\n",
+ 				    i, arvif->vdev_id, ret);
+-	}
+-
++			first_errno = ret;
++			ath11k_nss_key_recover(arvif, peer, state);
++			break;
++		}
++	}
++
++	ath11k_nss_key_put(state);
++	ath11k_peer_put(ar, peer);
+ 	return first_errno;
+ }
+ 
+@@ -6352,6 +6390,10 @@
+ 	vht_cap.vht_mcs.rx_mcs_map = cpu_to_le16(rxmcs_map);
+ 	vht_cap.vht_mcs.tx_mcs_map = cpu_to_le16(txmcs_map);
+ 
++	if (ar->pdev->cap.nss_ratio_enabled &&
++	    ar->pdev->cap.nss_ratio_info == WMI_NSS_RATIO_1_NSS)
++		vht_cap.cap &= ~IEEE80211_VHT_CAP_EXT_NSS_BW_MASK;
++
+ 	return vht_cap;
+ }
+ 
+@@ -6537,7 +6579,19 @@
+ 				    int band)
+ {
+ 	u16 txmcs_map, rxmcs_map;
++	u16 txmcs_map_160 = 0, rxmcs_map_160 = 0;
++	u8 maxtxnss_160 = ar->num_tx_chains;
++	u8 maxrxnss_160 = ar->num_rx_chains;
+ 	u32 i;
++
++	if (cap->nss_ratio_enabled) {
++		maxtxnss_160 = ath11k_get_nss_160mhz(ar, ar->num_tx_chains);
++		maxrxnss_160 = ath11k_get_nss_160mhz(ar, ar->num_rx_chains);
++	}
++	if (!maxtxnss_160 || !maxrxnss_160)
++		he_cap->he_cap_elem.phy_cap_info[0] &=
++			~(IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G |
++			  IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G);
+ 
+ 	rxmcs_map = 0;
+ 	txmcs_map = 0;
+@@ -6549,23 +6603,35 @@
+ 			txmcs_map |= IEEE80211_HE_MCS_NOT_SUPPORTED << (i * 2);
+ 
+ 		if (i < ar->num_rx_chains &&
+-		    (ar->cfg_rx_chainmask >> cap->tx_chain_mask_shift) & BIT(i))
++		    (ar->cfg_rx_chainmask >> cap->rx_chain_mask_shift) & BIT(i))
+ 			rxmcs_map |= IEEE80211_HE_MCS_SUPPORT_0_11 << (i * 2);
+ 		else
+ 			rxmcs_map |= IEEE80211_HE_MCS_NOT_SUPPORTED << (i * 2);
++
++		if (i < maxtxnss_160 &&
++		    (ar->cfg_tx_chainmask >> cap->tx_chain_mask_shift) & BIT(i))
++			txmcs_map_160 |= IEEE80211_HE_MCS_SUPPORT_0_11 << (i * 2);
++		else
++			txmcs_map_160 |= IEEE80211_HE_MCS_NOT_SUPPORTED << (i * 2);
++
++		if (i < maxrxnss_160 &&
++		    (ar->cfg_rx_chainmask >> cap->rx_chain_mask_shift) & BIT(i))
++			rxmcs_map_160 |= IEEE80211_HE_MCS_SUPPORT_0_11 << (i * 2);
++		else
++			rxmcs_map_160 |= IEEE80211_HE_MCS_NOT_SUPPORTED << (i * 2);
+ 	}
+ 	he_cap->he_mcs_nss_supp.rx_mcs_80 =
+ 		cpu_to_le16(rxmcs_map & 0xffff);
+ 	he_cap->he_mcs_nss_supp.tx_mcs_80 =
+ 		cpu_to_le16(txmcs_map & 0xffff);
+ 	he_cap->he_mcs_nss_supp.rx_mcs_160 =
+-		cpu_to_le16(rxmcs_map & 0xffff);
++		cpu_to_le16(rxmcs_map_160);
+ 	he_cap->he_mcs_nss_supp.tx_mcs_160 =
+-		cpu_to_le16(txmcs_map & 0xffff);
++		cpu_to_le16(txmcs_map_160);
+ 	he_cap->he_mcs_nss_supp.rx_mcs_80p80 =
+-		cpu_to_le16(rxmcs_map & 0xffff);
++		cpu_to_le16(rxmcs_map_160);
+ 	he_cap->he_mcs_nss_supp.tx_mcs_80p80 =
+-		cpu_to_le16(txmcs_map & 0xffff);
++		cpu_to_le16(txmcs_map_160);
+ }
+ 
+ static int ath11k_mac_copy_he_cap(struct ath11k *ar,
+@@ -6960,6 +7026,12 @@
+ 	bool is_prb_rsp;
+ 	u16 frm_type = 0;
+ 	int ret;
++
++	if (unlikely(test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags)) ||
++	    arvif->vdev_type == WMI_VDEV_TYPE_MONITOR) {
++		ieee80211_free_txskb(ar->hw, skb);
++		return;
++	}
+ 
+ 	memset(skb_cb, 0, sizeof(*skb_cb));
+ 	skb_cb->vif = vif;
+@@ -10514,6 +10586,9 @@
+ 	case ATH11K_SCAN_ABORTING:
+ 		ret = -EBUSY;
+ 		break;
++	default:
++		ret = -EINVAL;
++		break;
+ 	}
+ 	spin_unlock_bh(&ar->data_lock);
+ 
+@@ -10890,15 +10965,6 @@
+ 		arsta->bw = ath11k_mac_ieee80211_sta_bw_to_wmi(ar, sta);
+ 		arsta->bw_prev = arsta->bw;
+ 		spin_unlock_bh(&ar->data_lock);
+-
+-		/* Driver should clear the peer keys during mac80211's ref ptr
+-		 * gets cleared in __sta_info_destroy_part2 (trans from
+-		 * IEEE80211_STA_AUTHORIZED to IEEE80211_STA_ASSOC)
+-		 */
+-		ret = ath11k_clear_peer_keys(arvif, sta->addr);
+-		if (ret)
+-			ath11k_warn(ar->ab, "failed to clear all peer keys for vdev %i: %d\n",
+-				    arvif->vdev_id, ret);
+ 	} else if (old_state == IEEE80211_STA_ASSOC &&
+ 		   new_state == IEEE80211_STA_AUTHORIZED) {
+ 		spin_lock_bh(&ar->ab->base_lock);
+@@ -10971,21 +11037,17 @@
+ 		}
+ 	} else if (old_state == IEEE80211_STA_AUTHORIZED &&
+ 		   new_state == IEEE80211_STA_ASSOC) {
+-
+ 		spin_lock_bh(&ar->ab->base_lock);
++
+ 		peer = ath11k_peer_find(ar, arvif->vdev_id, sta->addr);
+ 		if (peer)
+ 			peer->is_authorized = false;
++
+ 		spin_unlock_bh(&ar->ab->base_lock);
+-	} else if (old_state == IEEE80211_STA_AUTHORIZED &&
+-		   new_state == IEEE80211_STA_ASSOC) {
+-		spin_lock_bh(&ar->ab->base_lock);
+-
+-		peer = ath11k_peer_find(ar, arvif->vdev_id, sta->addr);
+-		if (peer)
+-			peer->is_authorized = false;
+-
+-		spin_unlock_bh(&ar->ab->base_lock);
++		ret = ath11k_clear_peer_keys(arvif, sta->addr);
++		if (ret)
++			ath11k_warn(ar->ab, "failed to clear all peer keys for vdev %i: %d\n",
++				    arvif->vdev_id, ret);
+ 	} else if (old_state == IEEE80211_STA_ASSOC &&
+ 		   new_state == IEEE80211_STA_AUTH &&
+ 		   (vif->type == NL80211_IFTYPE_AP ||
+@@ -11685,8 +11747,17 @@
+ 	int ret;
+ 	u8 mac_addr[ETH_ALEN] = {};
+ 
+-	if (test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))
++	if (test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags)) {
++		for (i = 0; i < ab->num_radios; i++) {
++			ar = ab->pdevs[i].ar;
++			if (!ar)
++				continue;
++			ret = ath11k_debugfs_register(ar);
++			if (ret)
++				return ret;
++		}
+ 		return 0;
++	}
+ 
+ 	/* Initialize channel counters frequency value in hertz */
+ 	ab->cc_freq_hz = IPQ8074_CC_FREQ_HERTZ;
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -276,6 +276,7 @@
+ 	for (i = 0; i < stats->npeers; i++) {
+ 		pstats = &stats->wpcs[i];
+ 		tx_dropped = 0;
++		peer = NULL;
+ 
+ 		rcu_read_lock();
+ 		spin_lock_bh(&ab->base_lock);
+@@ -283,6 +284,8 @@
+ 		for (i2 = 0; i2 < ab->num_radios; i2++) {
+ 			struct ath11k_pdev *pdev = &ab->pdevs[i2];
+ 			struct ath11k *ar = pdev->ar;
++			if (!ar)
++				continue;
+ 			peer = ath11k_peer_find_by_id(ar, pstats->peer_id);
+ 			if (peer)
+ 				break;
+@@ -438,13 +441,25 @@
+ {
+ 	struct ath11k_vif *parent = arvif->nss.ap_vif;
+ 
+-	return READ_ONCE(arvif->nss.key_failed) ||
+-		READ_ONCE(arvif->nss.format_failed) ||
+-		(READ_ONCE(arvif->nss.created) && !smp_load_acquire(&arvif->nss.format_ready)) ||
+-		(parent && (READ_ONCE(parent->nss.key_failed) ||
+-			    READ_ONCE(parent->nss.format_failed) ||
+-			    (READ_ONCE(parent->nss.created) &&
+-			     !smp_load_acquire(&parent->nss.format_ready))));
++	if (READ_ONCE(arvif->nss.key_failed) ||
++	    READ_ONCE(arvif->nss.format_failed))
++		return true;
++
++	if (parent && (READ_ONCE(parent->nss.key_failed) ||
++		       READ_ONCE(parent->nss.format_failed) ||
++		       (READ_ONCE(parent->nss.created) &&
++			!smp_load_acquire(&parent->nss.format_ready))))
++		return true;
++
++	/* Ext VDEVs inherit the format committed by their configured parent.
++	 * They do not execute the ordinary VDEV format transaction.
++	 */
++	if (arvif->vif->type == NL80211_IFTYPE_AP_VLAN)
++		return !parent || !READ_ONCE(parent->nss.created) ||
++			!smp_load_acquire(&parent->nss.format_ready);
++
++	return READ_ONCE(arvif->nss.created) &&
++		!smp_load_acquire(&arvif->nss.format_ready);
+ }
+ 
+ int ath11k_nss_key_check(struct ath11k *ar, struct ath11k_peer *peer,
+@@ -4531,42 +4546,53 @@
+ }
+ 
+ int ath11k_nss_dyn_vlan_set_group_key(struct ath11k_vif *arvif, u16 vlan_id,
+-				      u16 group_key)
+-{
++					      u16 group_key)
++{
++	struct ath11k_nss_vdev_request request;
+ 	struct nss_wifi_vdev_msg *vdev_msg = NULL;
+ 	struct nss_wifi_vdev_set_vlan_group_key *vlan_group_key;
+ 	struct ath11k *ar = arvif->ar;
+ 	nss_tx_status_t status;
+-	int ret = 0;
++	u32 cookie = 0;
++	unsigned long waited = 0;
++	int ret;
+ 
+ 	if (!ar->ab->nss.enabled)
+ 		return 0;
+ 
+-	vdev_msg = kzalloc(sizeof(struct nss_wifi_vdev_msg), GFP_ATOMIC);
++	vdev_msg = kzalloc(sizeof(*vdev_msg), GFP_KERNEL);
+ 	if (!vdev_msg)
+ 		return -ENOMEM;
+ 
++	memset(&request, 0, sizeof(request));
++	init_completion(&request.complete);
++	request.type = NSS_WIFI_VDEV_SET_GROUP_KEY;
++	request.if_num = arvif->nss.if_num;
++	request.result = -ETIMEDOUT;
+ 	vlan_group_key = &vdev_msg->msg.vlan_group_key;
+ 	vlan_group_key->vlan_id = vlan_id;
+ 	vlan_group_key->group_key = group_key;
+ 
+ 	nss_wifi_vdev_msg_init(vdev_msg, arvif->nss.if_num,
+-			       NSS_WIFI_VDEV_SET_GROUP_KEY,
+-			       sizeof(struct nss_wifi_vdev_set_vlan_group_key),
+-			       NULL, NULL);
+-
+-	status = nss_wifi_vdev_tx_msg(ar->nss.ctx, vdev_msg);
+-	if (status != NSS_TX_SUCCESS) {
+-		ath11k_warn(ar->ab, "nss vdev set vlan group key error %d\n", status);
+-		ret = -EINVAL;
+-		goto free;
+-	}
+-
+-	ath11k_dbg(ar->ab, ATH11K_DBG_NSS_WDS, "nss vdev set vlan group key success\n");
+-free:
++				       NSS_WIFI_VDEV_SET_GROUP_KEY,
++				       sizeof(struct nss_wifi_vdev_set_vlan_group_key),
++				       (nss_wifi_vdev_msg_callback_t *)ath11k_nss_vdev_cfg_cb,
++				       &request);
++
++	status = nss_wifi_vdev_tx_msg_tracked(ar->nss.ctx, vdev_msg, &cookie);
++	if (status == NSS_TX_SUCCESS)
++		waited = wait_for_completion_timeout(&request.complete,
++						     msecs_to_jiffies(ATH11K_NSS_MSG_TIMEOUT_MS));
++	/* A header-only ACK is sufficient. Revoke and drain before stack expiry. */
++	nss_wifi_vdev_cancel_msg(cookie);
++	ret = status != NSS_TX_SUCCESS ? -EIO :
++		waited || completion_done(&request.complete) ?
++		READ_ONCE(request.result) : -ETIMEDOUT;
++
++	if (ret)
++		ath11k_warn(ar->ab, "nss vdev set vlan group key failed: %d\n", ret);
+ 	kfree(vdev_msg);
+ 	return ret;
+-
+ }
+ 
+ /*----------------------------Peer Setup/Config -----------------------------*/
+@@ -6154,14 +6180,19 @@
+ 	int ret;
+ 
+ 	ath11k_nss_reoq_stop(ab);
+-	if (READ_ONCE(ab->dp.reo_ownership_uncertain))
+-		return -EIO;
+ 	if (!ab->nss.registered)
+-		return ab->nss.ownership_uncertain ? -EIO : 0;
++		return ab->nss.ownership_uncertain ||
++		       ab->nss.me_reader_uncertain ||
++		       READ_ONCE(ab->dp.reo_ownership_uncertain) ? -EIO : 0;
+ 	mutex_lock(&ab->qmi.mem_lock);
+ 	spin_lock_bh(&ab->base_lock);
+ 	ab->nss.quiescing = true;
+ 	spin_unlock_bh(&ab->base_lock);
++	if (READ_ONCE(ab->nss.me_reader_uncertain) ||
++	    READ_ONCE(ab->dp.reo_ownership_uncertain)) {
++		ret = -EUCLEAN;
++		goto unregister;
++	}
+ 	ath11k_dbg(ab, ATH11K_DBG_NSS, "NSS reset\n");
+ 	wlmsg = kzalloc(sizeof(struct nss_wifili_msg), GFP_ATOMIC);
+ 	if (!wlmsg) {
+@@ -6284,14 +6315,30 @@
+ 	int i, ret;
+ 
+ 	ath11k_nss_reoq_stop(ab);
+-	if (READ_ONCE(ab->dp.reo_ownership_uncertain))
+-		return -EIO;
++	/* Workers use mutex_trylock, so cancellation under conf_mutex is safe.
++	 * Stop all ME producers, including residual OFF/WEDGED radio VDEVs.
++	 */
++	for (i = 0; i < ab->num_radios; i++) {
++		struct ath11k *ar = ab->pdevs[i].ar;
++		struct ath11k_vif *arvif;
++
++		if (!ar)
++			continue;
++		mutex_lock(&ar->conf_mutex);
++		list_for_each_entry(arvif, &ar->arvifs, list)
++			ath11k_nss_me_stop(arvif, true);
++		mutex_unlock(&ar->conf_mutex);
++	}
+ 	if (!ab->nss.enabled)
+-		return ab->nss.ownership_uncertain ? -EIO : 0;
++		return ab->nss.ownership_uncertain ||
++		       ab->nss.me_reader_uncertain ? -EIO : 0;
+ 
+ 	spin_lock_bh(&ab->base_lock);
+ 	ab->nss.quiescing = true;
+ 	spin_unlock_bh(&ab->base_lock);
++	if (READ_ONCE(ab->nss.me_reader_uncertain) ||
++	    READ_ONCE(ab->dp.reo_ownership_uncertain))
++		goto reset;
+ 	ath11k_nss_stop(ab);
+ 
+ 	for (i = 0; i < ab->num_radios ; i++) {
+@@ -6300,6 +6347,7 @@
+ 			ath11k_warn(ab, "failure during pdev%d deinit\n", i);
+ 	}
+ 
++reset:
+ 	ret = ath11k_nss_reset(ab);
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		struct ath11k *ar = ab->pdevs[i].ar;
+@@ -6323,7 +6371,7 @@
+ 	u32 target_type;
+ 
+ 	ath11k_nss_reoq_stop(ab);
+-	if (ab->nss.ownership_uncertain)
++	if (ab->nss.ownership_uncertain || ab->nss.me_reader_uncertain)
+ 		return -EBUSY;
+ 	if (!ab->nss.enabled)
+ 		return 0;
+--- a/drivers/net/wireless/ath/ath11k/nss.h
++++ b/drivers/net/wireless/ath/ath11k/nss.h
+@@ -378,6 +378,7 @@
+ 	struct list_head peers;
+ 	bool peers_initialized;
+ 	bool ownership_uncertain;
++	bool me_reader_uncertain;
+ 	bool dma_metadata_retained;
+ 	struct list_head retained_host_peers;
+ 	bool quiescing;
+--- a/drivers/net/wireless/ath/ath11k/nss_me.c
++++ b/drivers/net/wireless/ath/ath11k/nss_me.c
+@@ -756,7 +756,7 @@
+ 	struct ath11k_nss_me_auto *auto_me = &arvif->nss.me_auto;
+ 
+ 	lockdep_assert_held(&arvif->ar->ab->base_lock);
+-	if (!auto_me->initialized || auto_me->closing)
++	if (!auto_me->initialized || auto_me->closing || auto_me->retained)
+ 		return;
+ 	auto_me->active = false;
+ 	auto_me->generation++;
+@@ -801,7 +801,7 @@
+ 	if (!mutex_trylock(&ar->conf_mutex))
+ 		goto requeue;
+ 	spin_lock_bh(&ab->base_lock);
+-	if (!auto_me->running || auto_me->closing || !arvif->is_up ||
++	if (!auto_me->running || auto_me->closing || auto_me->retained || !arvif->is_up ||
+ 	    arvif->nss.encap != HAL_TCL_ENCAP_TYPE_ETHERNET ||
+ 	    arvif->nss.decap != ATH11K_HW_TXRX_ETHERNET ||
+ 	    !me->rx_mcbc_known || me->rx_mcbc != 1) {
+@@ -821,9 +821,14 @@
+ 	/* All RAW enqueues counted under base_lock precede withdrawal. COW/free
+ 	 * of those independent extension references drives this exact counter.
+ 	 */
+-	if (!wait_event_timeout(auto_me->flight->drained,
+-				!atomic_read(&auto_me->flight->pending), msecs_to_jiffies(3000))) {
++		if (!wait_event_timeout(auto_me->flight->drained,
++					!atomic_read(&auto_me->flight->pending), msecs_to_jiffies(3000))) {
+ 		ret = -ETIMEDOUT;
++		spin_lock_bh(&ab->base_lock);
++		auto_me->retained = true;
++		me->uncertain = true;
++		ab->nss.me_reader_uncertain = true;
++		spin_unlock_bh(&ab->base_lock);
+ 		goto finish;
+ 	}
+ 	spin_lock_bh(&ab->base_lock);
+@@ -927,7 +932,8 @@
+ 	mutex_unlock(&ar->conf_mutex);
+ requeue:
+ 	spin_lock_bh(&ab->base_lock);
+-	if (auto_me->initialized && auto_me->running && !auto_me->closing)
++	if (auto_me->initialized && auto_me->running &&
++	    !auto_me->closing && !auto_me->retained)
+ 		mod_delayed_work(system_wq, &auto_me->work, HZ);
+ 	spin_unlock_bh(&ab->base_lock);
+ }
+@@ -1000,8 +1006,11 @@
+ 	br_mcast_offload_set_mcu(wdev->netdev, 0, 0, false);
+ 	if (!wait_event_timeout(auto_me->flight->drained,
+ 				!atomic_read(&auto_me->flight->pending), msecs_to_jiffies(3000))) {
++		spin_lock_bh(&arvif->ar->ab->base_lock);
+ 		auto_me->retained = true;
+ 		arvif->nss.me.uncertain = true;
++		arvif->ar->ab->nss.me_reader_uncertain = true;
++		spin_unlock_bh(&arvif->ar->ab->base_lock);
+ 		ath11k_warn(arvif->ar->ab, "NSS ME table reader drain timed out; retain VDEV %d\n",
+ 			    arvif->nss.if_num);
+ 	}
+--- a/drivers/net/wireless/ath/ath11k/peer.c
++++ b/drivers/net/wireless/ath/ath11k/peer.c
+@@ -128,7 +128,7 @@
+ 
+ void ath11k_peer_ast_wds_wmi_wk(struct work_struct *wk)
+ {
+-	struct ath11k_ast_entry *ast_entry, *entry;
++	struct ath11k_ast_entry snapshot, *ast_entry = &snapshot, *entry;
+ 	struct ath11k_base *ab = container_of(wk, struct ath11k_base, wmi_ast_work);
+ 	struct ath11k_peer *peer;
+ 	struct ath11k *ar;
+@@ -136,8 +136,6 @@
+ 	u8 peer_addr[ETH_ALEN];
+ 	int peer_id;
+ 
+-	ast_entry = kzalloc(sizeof(*ast_entry), GFP_ATOMIC);
+-
+ 	mutex_lock(&ab->base_ast_lock);
+ 	spin_lock_bh(&ab->base_lock);
+ 
+@@ -145,7 +143,7 @@
+ 	       struct ath11k_ast_entry, wmi_list))) {
+ 		list_del_init(&entry->wmi_list);
+ 
+-		if (!entry->ar || (entry->peer && entry->peer->delete_in_progress)) {
++		if (!entry->ar || !entry->peer || entry->peer->delete_in_progress) {
+ 			continue;
+ 		}
+ 		memcpy(ast_entry, entry, sizeof(*ast_entry));
+@@ -189,7 +187,6 @@
+ 	}
+ 	spin_unlock_bh(&ab->base_lock);
+ 	mutex_unlock(&ab->base_ast_lock);
+-	kfree(ast_entry);
+ }
+ 
+ int ath11k_peer_add_ast(struct ath11k *ar, struct ath11k_peer *peer,
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -2048,6 +2048,7 @@
+ 	struct resource res = DEFINE_RES_NAMED(0, 0, NULL, IORESOURCE_UNSET);
+ 	struct device *dev = ab->dev;
+ 	u32 host_ddr_sz;
++	bool host_ddr_assigned = false;
+ 	u32 addr;
+ 	int i, idx, ret;
+ 
+@@ -2078,6 +2079,7 @@
+ 
+ 			ab->qmi.target_mem[idx].size = ab->qmi.target_mem[i].size;
+ 			host_ddr_sz = ab->qmi.target_mem[i].size;
++			host_ddr_assigned = true;
+ 			ab->qmi.target_mem[idx].type = ab->qmi.target_mem[i].type;
+ 			idx++;
+ 			break;
+@@ -2097,7 +2099,11 @@
+ 			}
+ 
+ 			if (ath11k_core_coldboot_cal_support(ab)) {
+-				if (res.flags != IORESOURCE_UNSET) {
++				if (host_ddr_assigned) {
++					if (host_ddr_sz > resource_size(&res) ||
++					    ab->qmi.target_mem[i].size >
++					    resource_size(&res) - host_ddr_sz)
++						return -EINVAL;
+ 					ab->qmi.target_mem[idx].paddr =
+ 							res.start + host_ddr_sz;
+ 					ab->qmi.target_mem[idx].iaddr =
+@@ -2204,6 +2210,19 @@
+ 		goto out;
+ 	}
+ 
++	/* DEVICE_INFO is repeated after FW_MEM_READY during recovery. Keep the
++	 * existing mapping and its CE aliases when the BAR is unchanged.
++	 */
++	if (ab->mem) {
++		if (ab->mem_pa != resp.bar_addr || ab->mem_len != resp.bar_size) {
++			/* No device-info contract fences old DMA/register users. */
++			ath11k_warn(ab, "qmi device info changed a mapped BAR\n");
++			ret = -ESTALE;
++			goto out;
++		}
++		goto configure_window;
++	}
++
+ 	bar_addr_va = devm_ioremap(ab->dev, resp.bar_addr, resp.bar_size);
+ 
+ 	if (!bar_addr_va) {
+@@ -2225,6 +2244,7 @@
+ 	ath11k_info(ab, "hybrid bus BAR 0x%llx size 0x%x\n",
+ 		    (unsigned long long)resp.bar_addr, resp.bar_size);
+ 
++configure_window:
+ 	if (!ab->hw_params.ce_remap)
+ 		ab->mem_ce = ab->mem;
+ 
+@@ -2489,6 +2509,7 @@
+ 	struct device *dev = ab->dev;
+ 	char filename[ATH11K_QMI_MAX_BDF_FILE_NAME_SIZE];
+ 	const struct firmware *fw_entry;
++	const bool eeprom_caldata = ab->qmi.target.eeprom_caldata;
+ 	struct ath11k_board_data bd;
+ 	u32 fw_size, file_type;
+ 	int ret = 0, bdf_type;
+@@ -2528,7 +2549,7 @@
+ 	if (bdf_type == ATH11K_QMI_BDF_TYPE_ELF || bdf_type == ATH11K_QMI_BDF_TYPE_REGDB)
+ 		goto out;
+ 
+-	if (ab->qmi.target.eeprom_caldata) {
++	if (eeprom_caldata) {
+ 		file_type = ATH11K_QMI_FILE_TYPE_EEPROM;
+ 		tmp = filename;
+ 		fw_size = ATH11K_QMI_MAX_BDF_FILE_NAME_SIZE;
+@@ -2550,7 +2571,8 @@
+ 			if (ath11k_ftm_mode) {
+ 				ath11k_info(ab,
+ 					    "Booting without cal data file in factory test mode\n");
+-				return 0;
++				ret = 0;
++				goto out;
+ 			}
+ 			ret = PTR_ERR(fw_entry);
+ 			ath11k_warn(ab,
+@@ -2572,7 +2594,7 @@
+ 	ath11k_dbg(ab, ATH11K_DBG_QMI, "caldata type: %u\n", file_type);
+ 
+ out_qmi_cal:
+-	if (!ab->qmi.target.eeprom_caldata)
++	if (!eeprom_caldata)
+ 		release_firmware(fw_entry);
+ out:
+ 	ath11k_core_free_bdf(ab, &bd);
+--- a/drivers/net/wireless/ath/ath11k/reg.c
++++ b/drivers/net/wireless/ath/ath11k/reg.c
+@@ -514,10 +514,11 @@
+ 	u16 max_bw;
+ 	u32 flags, reg_6ghz_number, max_bw_6ghz;
+ 	char alpha2[3];
++	const bool is_ext = reg_info->is_ext_reg_event;
+ 
+ 	num_rules = reg_info->num_5ghz_reg_rules + reg_info->num_2ghz_reg_rules;
+ 
+-	if (reg_info->is_ext_reg_event) {
++	if (is_ext) {
+ 		if (vdev_type == WMI_VDEV_TYPE_STA) {
+ 			enum wmi_reg_6ghz_ap_type ap_type;
+ 
+@@ -546,7 +547,14 @@
+ 			max_bw_6ghz = reg_info->max_bw_6ghz_ap[WMI_REG_INDOOR_AP];
+ 		}
+ 
++		if (reg_6ghz_number && (!reg_rule_6ghz || !max_bw_6ghz))
++			return NULL;
+ 		num_rules += reg_6ghz_number;
++	} else {
++		/* Legacy events contain no 6 GHz rules. */
++		reg_6ghz_number = 0;
++		reg_rule_6ghz = NULL;
++		max_bw_6ghz = 0;
+ 	}
+ 
+ 	if (!num_rules)
+@@ -594,7 +602,7 @@
+ 			 * per other BW rule flags we pass from here
+ 			 */
+ 			flags = NL80211_RRF_AUTO_BW;
+-		} else if (reg_info->is_ext_reg_event && reg_6ghz_number &&
++		} else if (is_ext && reg_6ghz_number &&
+ 			   k < reg_6ghz_number) {
+ 			reg_rule = reg_rule_6ghz + k++;
+ 			max_bw = min_t(u16, reg_rule->max_bw, max_bw_6ghz);
+@@ -629,7 +637,7 @@
+ 			continue;
+ 		}
+ 
+-		if (reg_info->is_ext_reg_event) {
++		if (is_ext) {
+ 			ath11k_dbg(ab, ATH11K_DBG_REG,
+ 				   "\t%d. (%d - %d @ %d) (%d, %d) (%d ms) (FLAGS %d) (%d, %d)\n",
+ 				   i + 1, reg_rule->start_freq, reg_rule->end_freq,
+--- a/drivers/net/wireless/ath/ath11k/thermal.c
++++ b/drivers/net/wireless/ath/ath11k/thermal.c
+@@ -244,18 +244,19 @@
+ 			goto err_thermal_destroy;
+ 		}
+ 
+-		if (!IS_REACHABLE(CONFIG_HWMON))
+-			return 0;
+-
+-		hwmon_dev = devm_hwmon_device_register_with_groups(&ar->hw->wiphy->dev,
++			if (!IS_REACHABLE(CONFIG_HWMON))
++				continue;
++
++			hwmon_dev = hwmon_device_register_with_groups(&ar->hw->wiphy->dev,
+ 								   "ath11k_hwmon", ar,
+ 								   ath11k_hwmon_groups);
+ 		if (IS_ERR(hwmon_dev)) {
+ 			ath11k_err(ar->ab, "failed to register hwmon device: %ld\n",
+ 				   PTR_ERR(hwmon_dev));
+ 			ret = -EINVAL;
+-			goto err_thermal_destroy;
+-		}
++				goto err_thermal_destroy;
++			}
++			ar->thermal.hwmon_dev = hwmon_dev;
+ 	}
+ 
+ 	return 0;
+@@ -277,7 +278,14 @@
+ 		if (!ar)
+ 			continue;
+ 
+-		sysfs_remove_link(&ar->hw->wiphy->dev.kobj, "cooling_device");
+-		thermal_cooling_device_unregister(ar->thermal.cdev);
+-	}
+-}
++		if (ar->thermal.hwmon_dev) {
++			hwmon_device_unregister(ar->thermal.hwmon_dev);
++			ar->thermal.hwmon_dev = NULL;
++		}
++		if (ar->thermal.cdev) {
++			sysfs_remove_link(&ar->hw->wiphy->dev.kobj, "cooling_device");
++			thermal_cooling_device_unregister(ar->thermal.cdev);
++			ar->thermal.cdev = NULL;
++		}
++	}
++}
+--- a/drivers/net/wireless/ath/ath11k/thermal.h
++++ b/drivers/net/wireless/ath/ath11k/thermal.h
+@@ -64,6 +64,7 @@
+ 
+ struct ath11k_thermal {
+ 	struct thermal_cooling_device *cdev;
++	struct device *hwmon_dev;
+ 	struct completion wmi_sync;
+ 
+ 	/* protected by conf_mutex */
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -8069,47 +8069,35 @@
+ static void ath11k_peer_sta_kickout_event(struct ath11k_base *ab, struct sk_buff *skb)
+ {
+ 	struct wmi_peer_sta_kickout_arg arg = {};
+-	struct ieee80211_sta *sta;
+-	struct ath11k_peer *peer;
+-	struct ath11k_peer *save_peer;
+-	struct ath11k *ar;
+-	struct ath11k *save_ar;
++	bool reported = false;
+ 	int i;
+ 
+-	if (ath11k_pull_peer_sta_kickout_ev(ab, skb, &arg) != 0) {
++	if (ath11k_pull_peer_sta_kickout_ev(ab, skb, &arg)) {
+ 		ath11k_warn(ab, "failed to extract peer sta kickout event");
+ 		return;
+ 	}
+-
+ 	rcu_read_lock();
+-
+-	spin_lock_bh(&ab->base_lock);
+-
+ 	for (i = 0; i < ab->num_radios; i++) {
+-		struct ath11k_pdev *pdev = &ab->pdevs[i];
++		struct ath11k_pdev *pdev = rcu_dereference(ab->pdevs_active[i]);
++		struct ieee80211_sta *sta;
++		struct ath11k *ar;
++
++		if (!pdev || !pdev->ar)
++			continue;
+ 		ar = pdev->ar;
+-		peer = ath11k_peer_find_by_addr(ar, arg.mac_addr);
+-		if (!peer) {
++		sta = ieee80211_find_sta_by_ifaddr(ar->hw, arg.mac_addr, NULL);
++		if (!sta)
+ 			continue;
+-		}
+-		save_peer = peer;
+-		save_ar = ar;
+-		sta = ieee80211_find_sta_by_ifaddr(ar->hw, arg.mac_addr, NULL);
+-		if (!sta) {
+-			    continue;
+-		}
+-
+-		ath11k_dbg(ab, ATH11K_DBG_WMI, "event peer sta kickout %pM", arg.mac_addr);
+-
+ 		ieee80211_report_low_ack(sta, 10);
+-	}
+-	if (!sta && save_peer) {
+-		ath11k_warn(ab, "Spurious quick kickout for STA %pM but found in peer table\n", arg.mac_addr);
+-		ath11k_dp_peer_cleanup(save_ar, save_peer->vdev_id, arg.mac_addr);
+-	}
+-
+-	spin_unlock_bh(&ab->base_lock);
++		reported = true;
++	}
+ 	rcu_read_unlock();
++	/* Removal/unmap owns orphan cleanup. WMI RX cannot recursively take
++	 * base_lock through DP cleanup or act on a reused peer instance.
++	 */
++	if (!reported)
++		ath11k_dbg(ab, ATH11K_DBG_WMI, "late kickout for absent STA %pM\n",
++			   arg.mac_addr);
+ }
+ 
+ static void ath11k_roam_event(struct ath11k_base *ab, struct sk_buff *skb)
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1307,6 +1307,10 @@
+ 	int size, err;
+ 	u64 _changed = BSS_CHANGED_BEACON;
+ 	struct ieee80211_bss_conf *link_conf = link->conf;
++
++	if (params->rnr_ies && params->rnr_ies->cnt &&
++	    (!params->mbssid_ies || !params->mbssid_ies->cnt))
++		return -EINVAL;
+ 
+ 	old = sdata_dereference(link->u.ap.beacon, sdata);
+ 
+--- a/net/mac80211/debugfs.c
++++ b/net/mac80211/debugfs.c
+@@ -337,13 +337,13 @@
+ 	char buf[3];
+ 	size_t len;
+ 
+-	if (count > sizeof(buf))
++	if (!count || count >= sizeof(buf))
+ 		return -EINVAL;
+ 
+ 	if (copy_from_user(buf, user_buf, count))
+ 		return -EFAULT;
+ 
+-	buf[sizeof(buf) - 1] = '\0';
++	buf[count] = '\0';
+ 	len = strlen(buf);
+ 	if (len > 0 && buf[len - 1] == '\n')
+ 		buf[len - 1] = 0;
+--- a/net/mac80211/debugfs_sta.c
++++ b/net/mac80211/debugfs_sta.c
+@@ -149,14 +149,14 @@
+ 	if (!buf)
+ 		return -ENOMEM;
+ 
+-	spin_lock_bh(&local->fq.lock);
+-
+ 	p += scnprintf(p,
+ 		       bufsz + buf - p,
+ 		       "tid ac backlog-bytes backlog-packets new-flows drops marks overlimit collisions tx-bytes tx-packets flags\n");
+ 
+-	if (!ieee80211_hw_check(&local->hw, HAS_TX_QUEUE))
++	if (ieee80211_hw_check(&local->hw, HAS_TX_QUEUE))
+ 		goto skip_txq_info;
++
++	spin_lock_bh(&local->fq.lock);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(sta->sta.txq); i++) {
+ 		if (!sta->sta.txq[i])
+@@ -182,9 +182,9 @@
+ 			       test_bit(IEEE80211_TXQ_DIRTY, &txqi->flags) ? " DIRTY" : "");
+ 	}
+ 
++	spin_unlock_bh(&local->fq.lock);
++
+ skip_txq_info:
+-	spin_unlock_bh(&local->fq.lock);
+-
+ 	rv = simple_read_from_buffer(userbuf, count, ppos, buf, p - buf);
+ 	kfree(buf);
+ 	return rv;
+--- a/net/mac80211/he.c
++++ b/net/mac80211/he.c
+@@ -151,6 +151,8 @@
+ 	/* HE Tx/Rx HE MCS NSS Support Field */
+ 	memcpy(&he_cap->he_mcs_nss_supp,
+ 	       &he_cap_ie[sizeof(he_cap->he_cap_elem)], mcs_nss_size);
++	if (he_cap->he_mcs_nss_supp.rx_mcs_80 == cpu_to_le16(0xffff))
++		return;
+ 
+ 	/* Check if there are (optional) PPE Thresholds */
+ 	if (he_cap->he_cap_elem.phy_cap_info[6] &
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -1311,14 +1311,14 @@
+ 	struct ieee80211_sub_if_data *sdata;
+ 
+ 	if (!dev) {
+-		kfree(sk_buff);
++		dev_kfree_skb_any(sk_buff);
+ 		return;
+ 	}
+ 
+ 	netdev = (struct net_device *)dev;
+ 	sdata = netdev_priv(netdev);
+ 	if (sdata->dev != dev) {
+-		kfree(sk_buff);
++		dev_kfree_skb_any(sk_buff);
+ 		return;
+ 	}
+ 	skb = (struct sk_buff *)sk_buff;
+--- a/net/mac80211/mesh_hwmp.c
++++ b/net/mac80211/mesh_hwmp.c
+@@ -307,6 +307,8 @@
+ 	/* moving average, scaled to 100.
+ 	 * feed failure as 100 and success as 0
+ 	 */
++	if (!ewma_mesh_fail_avg_read(&sta->mesh->fail_avg))
++		ewma_mesh_fail_avg_add(&sta->mesh->fail_avg, 1);
+ 	ewma_mesh_fail_avg_add(&sta->mesh->fail_avg, failed * 100);
+ 	if (ewma_mesh_fail_avg_read(&sta->mesh->fail_avg) >
+ 			LINK_FAIL_THRESH)
+@@ -1588,6 +1590,8 @@
+ 		return;
+ 
+ 	for (i = 0; i < num_mpdu; i++) {
++		if (!ewma_mesh_fail_avg_read(&sta->mesh->fail_avg))
++			ewma_mesh_fail_avg_add(&sta->mesh->fail_avg, 1);
+ 		ewma_mesh_fail_avg_add(&sta->mesh->fail_avg, failed * 100);
+ 		if (ewma_mesh_fail_avg_read(&sta->mesh->fail_avg) >
+ 					    LINK_FAIL_THRESH)
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -6191,7 +6191,7 @@
+ 	/* The element size was already validated in
+ 	 * ieee80211_tid_to_link_map_size_ok()
+ 	 */
+-	u8 control, link_map_presence, map_size, tid;
++	u8 control, map_size, tid;
+ 	u8 *pos;
+ 
+ 	memset(ttlm_info, 0, sizeof(*ttlm_info));
+@@ -6205,8 +6205,12 @@
+ 	}
+ 
+ 	if (!(control & IEEE80211_TTLM_CONTROL_DEF_LINK_MAP)) {
+-		link_map_presence = *pos;
+-		pos++;
++		u8 link_map_presence = *pos++;
++
++		if (link_map_presence != 0xff) {
++			sdata_info(sdata, "Invalid advertised T2L mapping presence indicator\n");
++			return -EINVAL;
++		}
+ 	}
+ 
+ 	if (control & IEEE80211_TTLM_CONTROL_SWITCH_TIME_PRESENT) {
+@@ -6240,11 +6244,7 @@
+ 	 * not advertise a TID-to-link mapping that does not map all TIDs to the
+ 	 * same link set, reject frame if not all links have mapping
+ 	 */
+-	if (link_map_presence != 0xff) {
+-		sdata_info(sdata,
+-			   "Invalid advertised T2L mapping presence indicator\n");
+-		return -EINVAL;
+-	}
++
+ 
+ 	ttlm_info->map = ieee80211_get_ttlm(map_size, pos);
+ 	if (!ttlm_info->map) {
+@@ -10681,6 +10681,7 @@
+ 	struct sta_info *sta;
+ 	struct sk_buff *skb;
+ 	u16 added_links, new_valid_links;
++	const u16 removed_links = req->rem_links;
+ 	int link_id, err;
+ 
+ 	if (!ieee80211_vif_is_mld(&sdata->vif) ||
+@@ -10806,11 +10807,11 @@
+ 	 * Section 35.3.6.4 in Draft P802.11be_D7.0 the AP MLD should accept the
+ 	 * link removal request.
+ 	 */
+-	if (req->rem_links) {
++	new_valid_links = sdata->vif.valid_links & ~removed_links;
++	if (removed_links) {
+ 		u16 new_active_links =
+-			sdata->vif.active_links & ~req->rem_links;
+-
+-		new_valid_links = sdata->vif.valid_links & ~req->rem_links;
++			sdata->vif.active_links & ~removed_links;
++
+ 
+ 		/* Should not be left with no valid links to perform the
+ 		 * ML reconfiguration
+@@ -10845,16 +10846,16 @@
+ 	 * is expected to send the ML reconfiguration response frame on the link
+ 	 * on which the request was received.
+ 	 */
+-	skb = ieee80211_build_ml_reconf_req(sdata, data, req->rem_links,
++	skb = ieee80211_build_ml_reconf_req(sdata, data, removed_links,
+ 					    cpu_to_le16(req->ext_mld_capa_ops));
+ 	if (!skb) {
+ 		err = -ENOMEM;
+ 		goto err_free;
+ 	}
+ 
+-	if (req->rem_links) {
++	if (removed_links) {
+ 		u16 new_dormant_links =
+-			sdata->vif.dormant_links & ~req->rem_links;
++			sdata->vif.dormant_links & ~removed_links;
+ 
+ 		err = ieee80211_vif_set_links(sdata, new_valid_links,
+ 					      new_dormant_links);
+@@ -10876,17 +10877,17 @@
+ 		/* notify the driver and upper layers */
+ 		ieee80211_vif_cfg_change_notify(sdata,
+ 						BSS_CHANGED_MLD_VALID_LINKS);
+-		cfg80211_links_removed(sdata->dev, req->rem_links);
++		cfg80211_links_removed(sdata->dev, removed_links);
+ 	}
+ 
+ 	sdata_info(sdata, "mlo: reconf: adding=0x%x, removed=0x%x\n",
+-		   added_links, req->rem_links);
++		   added_links, removed_links);
+ 
+ 	ieee80211_tx_skb(sdata, skb);
+ 
+ 	sdata->u.mgd.reconf.added_links = added_links;
+ 	sdata->u.mgd.reconf.add_links_data = data;
+-	sdata->u.mgd.reconf.removed_links = req->rem_links;
++	sdata->u.mgd.reconf.removed_links = removed_links;
+ 	wiphy_delayed_work_queue(sdata->local->hw.wiphy,
+ 				 &sdata->u.mgd.reconf.wk,
+ 				 IEEE80211_ASSOC_TIMEOUT_SHORT);
+--- a/net/mac80211/offchannel.c
++++ b/net/mac80211/offchannel.c
+@@ -612,6 +612,7 @@
+ 
+ 	cfg80211_chandef_create(&chandef, channel, NL80211_CHAN_NO_HT);
+ 	radio_mask = ieee80211_chandef_radio_mask(local, &chandef);
++	req = wiphy_dereference(local->hw.wiphy, local->scan_req);
+ 	if (!ieee80211_can_leave_ch(sdata, req, radio_mask) &&
+ 	    !ieee80211_scanning_busy(local, &chandef))
+ 		return -EBUSY;
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2668,6 +2668,8 @@
+ 	skb_push(skb, ETH_HLEN);
+ 	ret = nss_virt_if_tx_buf(sdata->nssctx, skb);
+ 	if (ret) {
++		/* Failed submission leaves the skb with the host. */
++		skb_pull(skb, ETH_HLEN);
+ 		if (net_ratelimit()) {
+ 			if (NSS_TX_FAILURE_NOT_ENABLED == ret)
+ 			  goto out;
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -4723,7 +4723,12 @@
+ 	bool multicast;
+ 	u8 tid;
+ 
+-	if (unlikely(!ieee80211_hw_check(&local->hw, HAS_TX_QUEUE))) {
++	if (ieee80211_hw_check(&local->hw, HAS_TX_QUEUE)) {
++		/* The driver owns classification and skb queue mapping, but the
++		 * status metadata still needs a valid access-category index.
++		 */
++		queue = ieee802_1d_to_ac[skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK];
++	} else {
+ 		queue = ieee80211_select_queue(sdata, sta, skb);
+ 		skb_set_queue_mapping(skb, queue);
+ 	}
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -6328,9 +6328,10 @@
+ 			if (IS_ERR(rnr))
+ 				return PTR_ERR(rnr);
+ 
+-			if (rnr && rnr->cnt < bcn->mbssid_ies->cnt) {
++			if (rnr && (rnr->cnt < bcn->mbssid_ies->cnt ||
++				    (rnr->cnt && !bcn->mbssid_ies->cnt))) {
+ 				kfree(rnr);
+ 				return -EINVAL;
+ 			}
+ 
+ 			bcn->rnr_ies = rnr;
+@@ -7665,190 +7668,129 @@
+ 
+ static void cfg80211_sta_set_mld_sinfo(struct station_info *sinfo)
+ {
++	const struct link_station_info *inactive = NULL, *txrate = NULL;
++	const struct link_station_info *rxrate = NULL, *bss = NULL;
+ 	struct link_station_info *link_sinfo;
+-	int link_id, init = 0;
+-	u32 link_inactive_time;
+-
+-	sinfo->signal = -99;
++	u64 aggregated = 0;
++	u32 tid_aggregated[IEEE80211_NUM_TIDS + 1] = {};
++	int link_id, tid;
++
++	/* Top-level values may already include the default link. Replace each
++	 * counter on its first valid link, then add subsequent valid links.
++	 */
++#define LINK_SUM(field, flag) do { \
++	if (link_sinfo->filled & BIT_ULL(flag)) { \
++		if (!(aggregated & BIT_ULL(flag))) \
++			sinfo->field = 0; \
++		sinfo->field += link_sinfo->field; \
++		aggregated |= BIT_ULL(flag); \
++		sinfo->filled |= BIT_ULL(flag); \
++	} \
++} while (0)
++#define LINK_BYTES(field, short_flag, long_flag) do { \
++	if (link_sinfo->filled & (BIT_ULL(short_flag) | BIT_ULL(long_flag))) { \
++		if (!(aggregated & BIT_ULL(long_flag))) \
++			sinfo->field = 0; \
++		sinfo->field += link_sinfo->field; \
++		aggregated |= BIT_ULL(long_flag); \
++		sinfo->filled |= BIT_ULL(short_flag) | BIT_ULL(long_flag); \
++	} \
++} while (0)
++#define TID_SUM(field, flag) do { \
++	if (link_sinfo->pertid[tid].filled & BIT(flag)) { \
++		if (!(tid_aggregated[tid] & BIT(flag))) \
++			sinfo->pertid[tid].field = 0; \
++		sinfo->pertid[tid].field += link_sinfo->pertid[tid].field; \
++		tid_aggregated[tid] |= BIT(flag); \
++		sinfo->pertid[tid].filled |= BIT(flag); \
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TID_STATS); \
++	} \
++} while (0)
+ 
+ 	for_each_valid_link(sinfo, link_id) {
++		bool has_inactive;
++
+ 		link_sinfo = sinfo->links[link_id];
+ 		if (!link_sinfo)
+ 			continue;
+-
+-		if ((link_sinfo->filled &
+-		     BIT_ULL(NL80211_STA_INFO_TX_PACKETS))) {
+-			sinfo->tx_packets += link_sinfo->tx_packets;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_PACKETS);
+-		}
+-
+-		if ((link_sinfo->filled &
+-		     BIT_ULL(NL80211_STA_INFO_RX_PACKETS))) {
+-			sinfo->rx_packets += link_sinfo->rx_packets;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_PACKETS);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    (BIT_ULL(NL80211_STA_INFO_TX_BYTES) |
+-		     BIT_ULL(NL80211_STA_INFO_TX_BYTES64))) {
+-			sinfo->tx_bytes += link_sinfo->tx_bytes;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_BYTES);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    (BIT_ULL(NL80211_STA_INFO_RX_BYTES) |
+-		     BIT_ULL(NL80211_STA_INFO_TX_BYTES64))) {
+-			sinfo->rx_bytes += link_sinfo->rx_bytes;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BYTES);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_TX_RETRIES)) {
+-			sinfo->tx_retries += link_sinfo->tx_retries;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_RETRIES);
+-		}
+-
+-		if (link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_TX_FAILED)) {
+-			sinfo->tx_failed += link_sinfo->tx_failed;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_FAILED);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_RX_DROP_MISC)) {
+-			sinfo->rx_dropped_misc += link_sinfo->rx_dropped_misc;
+-			sinfo->filled |=
+-				BIT_ULL(NL80211_STA_INFO_RX_DROP_MISC);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_BEACON_LOSS)) {
+-			sinfo->beacon_loss_count +=
+-				link_sinfo->beacon_loss_count;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_BEACON_LOSS);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_EXPECTED_THROUGHPUT)) {
+-			sinfo->expected_throughput +=
+-				link_sinfo->expected_throughput;
+-			sinfo->filled |=
+-				BIT_ULL(NL80211_STA_INFO_EXPECTED_THROUGHPUT);
+-		}
+-
+-		if (link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_RX_MPDUS)) {
+-			sinfo->rx_mpdu_count += link_sinfo->rx_mpdu_count;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_MPDUS);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_FCS_ERROR_COUNT)) {
+-			sinfo->fcs_err_count += link_sinfo->fcs_err_count;
+-			sinfo->filled |=
+-				BIT_ULL(NL80211_STA_INFO_FCS_ERROR_COUNT);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_BEACON_RX)) {
+-			sinfo->rx_beacon += link_sinfo->rx_beacon;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_BEACON_RX);
+-		}
+-
+-		/* Update MLO signal, signal_avg as best among links */
++		has_inactive = link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME);
++
++		LINK_SUM(tx_packets, NL80211_STA_INFO_TX_PACKETS);
++		LINK_SUM(rx_packets, NL80211_STA_INFO_RX_PACKETS);
++		LINK_BYTES(tx_bytes, NL80211_STA_INFO_TX_BYTES, NL80211_STA_INFO_TX_BYTES64);
++		LINK_BYTES(rx_bytes, NL80211_STA_INFO_RX_BYTES, NL80211_STA_INFO_RX_BYTES64);
++		LINK_SUM(tx_retries, NL80211_STA_INFO_TX_RETRIES);
++		LINK_SUM(tx_failed, NL80211_STA_INFO_TX_FAILED);
++		LINK_SUM(rx_dropped_misc, NL80211_STA_INFO_RX_DROP_MISC);
++		LINK_SUM(beacon_loss_count, NL80211_STA_INFO_BEACON_LOSS);
++		LINK_SUM(expected_throughput, NL80211_STA_INFO_EXPECTED_THROUGHPUT);
++		LINK_SUM(rx_mpdu_count, NL80211_STA_INFO_RX_MPDUS);
++		LINK_SUM(fcs_err_count, NL80211_STA_INFO_FCS_ERROR_COUNT);
++		LINK_SUM(rx_beacon, NL80211_STA_INFO_BEACON_RX);
++		LINK_SUM(tx_duration, NL80211_STA_INFO_TX_DURATION);
++		LINK_SUM(rx_duration, NL80211_STA_INFO_RX_DURATION);
++
+ 		if ((link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_SIGNAL)) &&
+-		    link_sinfo->signal > sinfo->signal) {
++		    (!(aggregated & BIT_ULL(NL80211_STA_INFO_SIGNAL)) ||
++		     link_sinfo->signal > sinfo->signal)) {
+ 			sinfo->signal = link_sinfo->signal;
+ 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_SIGNAL);
++			aggregated |= BIT_ULL(NL80211_STA_INFO_SIGNAL);
+ 		}
+-
+-		if ((link_sinfo->filled &
+-			BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG)) &&
+-		    link_sinfo->signal_avg > sinfo->signal_avg) {
++		if ((link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG)) &&
++		    (!(aggregated & BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG)) ||
++		     link_sinfo->signal_avg > sinfo->signal_avg)) {
+ 			sinfo->signal_avg = link_sinfo->signal_avg;
+ 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG);
++			aggregated |= BIT_ULL(NL80211_STA_INFO_SIGNAL_AVG);
+ 		}
+-
+-		/* Update MLO inactive_time, bss_param based on least
+-		 * value for corresponding field of link.
+-		 */
+-		if ((link_sinfo->filled &
+-		     BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME)) &&
+-		    (!init ||
+-		     link_inactive_time > link_sinfo->inactive_time)) {
+-			link_inactive_time = link_sinfo->inactive_time;
+-			sinfo->inactive_time = link_sinfo->inactive_time;
+-			sinfo->filled |= NL80211_STA_INFO_INACTIVE_TIME;
+-		}
+-
+-		if (link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_BSS_PARAM) &&
+-		    (!init ||
+-		     sinfo->bss_param.dtim_period >
+-		      link_sinfo->bss_param.dtim_period)) {
+-			sinfo->bss_param.dtim_period =
+-				link_sinfo->bss_param.dtim_period;
+-			sinfo->filled |= NL80211_STA_BSS_PARAM_DTIM_PERIOD;
+-			sinfo->bss_param.beacon_interval =
+-				link_sinfo->bss_param.beacon_interval;
+-			sinfo->filled |= NL80211_STA_BSS_PARAM_BEACON_INTERVAL;
+-		}
+-
+-		/* Update MLO rates as per last updated link rate */
+-		if ((link_sinfo->filled &
+-		     BIT_ULL(NL80211_STA_INFO_TX_BITRATE)) &&
+-		    (!init ||
+-		     link_inactive_time > link_sinfo->inactive_time)) {
+-			sinfo->txrate = link_sinfo->txrate;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_BITRATE);
+-		}
+-		if ((link_sinfo->filled &
+-		     BIT_ULL(NL80211_STA_INFO_RX_BITRATE)) &&
+-		    (!init ||
+-		     link_inactive_time > link_sinfo->inactive_time)) {
+-			sinfo->rxrate = link_sinfo->rxrate;
+-			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BITRATE);
+-		}
+-
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_TX_DURATION) &&
+-		    (!init ||
+-		     link_inactive_time > link_sinfo->inactive_time)) {
+-			sinfo->tx_duration += link_sinfo->tx_duration;
+-			sinfo->filled |=
+-				BIT_ULL(NL80211_STA_INFO_TX_DURATION);
+-		}
+-		if (link_sinfo->filled &
+-		    BIT_ULL(NL80211_STA_INFO_RX_DURATION) &&
+-		    (!init ||
+-		     link_inactive_time > link_sinfo->inactive_time)) {
+-			sinfo->rx_duration += link_sinfo->rx_duration;
+-			sinfo->filled |=
+-				BIT_ULL(NL80211_STA_INFO_RX_DURATION);
+-		}
+-		init++;
+-
+-		/* pertid stats accumulate for rx/tx fields */
+-		if (sinfo->pertid) {
+-			sinfo->pertid->rx_msdu +=
+-				link_sinfo->pertid->rx_msdu;
+-			sinfo->pertid->tx_msdu +=
+-				link_sinfo->pertid->tx_msdu;
+-			sinfo->pertid->tx_msdu_retries +=
+-				link_sinfo->pertid->tx_msdu_retries;
+-			sinfo->pertid->tx_msdu_failed +=
+-				link_sinfo->pertid->tx_msdu_failed;
+-
+-			sinfo->pertid->filled |=
+-				BIT(NL80211_TID_STATS_RX_MSDU) |
+-				BIT(NL80211_TID_STATS_TX_MSDU) |
+-				BIT(NL80211_TID_STATS_TX_MSDU_RETRIES) |
+-				BIT(NL80211_TID_STATS_TX_MSDU_FAILED);
+-		}
+-	}
+-
+-	/* Reset sinfo->filled bits to exclude fields which don't make
+-	 * much sense at the MLO level.
+-	 */
+-	sinfo->filled &= ~BIT_ULL(NL80211_STA_INFO_CHAIN_SIGNAL);
+-	sinfo->filled &= ~BIT_ULL(NL80211_STA_INFO_CHAIN_SIGNAL_AVG);
++		if (has_inactive && (!inactive ||
++		    link_sinfo->inactive_time < inactive->inactive_time))
++			inactive = link_sinfo;
++
++		if ((link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_TX_BITRATE)) &&
++		    (!txrate || (has_inactive &&
++		     (!(txrate->filled & BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME)) ||
++		      link_sinfo->inactive_time < txrate->inactive_time))))
++			txrate = link_sinfo;
++		if ((link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_RX_BITRATE)) &&
++		    (!rxrate || (has_inactive &&
++		     (!(rxrate->filled & BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME)) ||
++		      link_sinfo->inactive_time < rxrate->inactive_time))))
++			rxrate = link_sinfo;
++		if ((link_sinfo->filled & BIT_ULL(NL80211_STA_INFO_BSS_PARAM)) &&
++		    (!bss || link_sinfo->bss_param.dtim_period < bss->bss_param.dtim_period))
++			bss = link_sinfo;
++
++		if (sinfo->pertid && link_sinfo->pertid)
++			for (tid = 0; tid <= IEEE80211_NUM_TIDS; tid++) {
++				TID_SUM(rx_msdu, NL80211_TID_STATS_RX_MSDU);
++				TID_SUM(tx_msdu, NL80211_TID_STATS_TX_MSDU);
++				TID_SUM(tx_msdu_retries, NL80211_TID_STATS_TX_MSDU_RETRIES);
++				TID_SUM(tx_msdu_failed, NL80211_TID_STATS_TX_MSDU_FAILED);
++			}
++	}
++	if (inactive) {
++		sinfo->inactive_time = inactive->inactive_time;
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME);
++	}
++	if (txrate) {
++		sinfo->txrate = txrate->txrate;
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_BITRATE);
++	}
++	if (rxrate) {
++		sinfo->rxrate = rxrate->rxrate;
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BITRATE);
++	}
++	if (bss) {
++		sinfo->bss_param = bss->bss_param;
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_BSS_PARAM);
++	}
++	sinfo->filled &= ~(BIT_ULL(NL80211_STA_INFO_CHAIN_SIGNAL) |
++			   BIT_ULL(NL80211_STA_INFO_CHAIN_SIGNAL_AVG));
++#undef LINK_SUM
++#undef LINK_BYTES
++#undef TID_SUM
+ }
+ 
+ static int nl80211_dump_station(struct sk_buff *skb,
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -2351,6 +2351,9 @@
+ 							     gfp);
+ 		}
+ 		break;
++	default:
++		WARN_ON_ONCE(1);
++		return NULL;
+ 	}
+ 
+ 	/*

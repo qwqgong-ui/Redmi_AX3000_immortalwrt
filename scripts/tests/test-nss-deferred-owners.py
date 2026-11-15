@@ -33,7 +33,7 @@ static bool refcount_dec_and_test(refcount_t *r) { assert(r->value);return --r->
 #define WRITE_ONCE(v,x) ((v)=(x))
 #define GFP_ATOMIC 0
 #define DMA_BIDIRECTIONAL 1
-#define FIELD_GET(mask,v) ((v)&(mask))
+#define FIELD_GET(mask,v) (((v)&(mask))>>__builtin_ctz(mask))
 #define HAL_SRNG_TLV_HDR_TAG 0xff
 #define HAL_REO_GET_QUEUE_STATS_STATUS 1
 #define HAL_REO_FLUSH_QUEUE_STATUS 2
@@ -61,11 +61,12 @@ struct dp_rx_tid { bool active;void *vaddr_unaligned;uintptr_t paddr,paddr_unali
 struct ath11k_peer { struct list_head list;refcount_t refs;struct dp_rx_tid rx_tid[2];unsigned peer_id; };
 struct dp_reo_update_rx_queue_elem { struct list_head list;struct dp_rx_tid data;unsigned peer_id,tid;bool reo_cmd_update_rx_queue_resend_flag; };
 struct ath11k_dp;
-enum ath11k_reo_cmd_kind {ATH11K_REO_CMD_RETIRE,ATH11K_REO_CMD_QUERY};
+enum ath11k_reo_cmd_kind {ATH11K_REO_CMD_RETIRE,ATH11K_REO_CMD_QUERY,ATH11K_REO_CMD_PN_UPDATE};
 struct ath11k_reo_query;
-struct dp_reo_cmd { struct list_head list;unsigned cmd_num;u16 status_tag;enum ath11k_reo_cmd_kind kind;struct ath11k_reo_query *query;struct dp_rx_tid data;void (*handler)(struct ath11k_dp *,void *,int); };
+struct ath11k_reo_pn_update { unsigned completions,puts;int status; };
+struct dp_reo_cmd { struct list_head list;unsigned cmd_num;u16 status_tag;enum ath11k_reo_cmd_kind kind;struct ath11k_reo_query *query;struct ath11k_reo_pn_update *pn_update;struct dp_rx_tid data;void (*handler)(struct ath11k_dp *,void *,int); };
 struct hal_srng { bool initialized;pthread_mutex_t lock; };
-struct ath11k_dp { struct { unsigned ring_id; } reo_status_ring;pthread_mutex_t reo_cmd_lock,reo_cmd_update_queue_lock,reo_stats_lock;bool reo_query_outstanding,reo_ownership_uncertain;unsigned reo_retained_count;u16 reo_cmd_status_tag[257];struct ath11k_reo_cmd_stats reo_cmd_stats;struct ath11k_reo_update_stats reo_update_stats;struct list_head reo_cmd_list,reo_cmd_update_rx_queue_list; };
+struct ath11k_dp { struct { unsigned ring_id; } reo_status_ring;pthread_mutex_t reo_cmd_lock,reo_cmd_update_queue_lock,reo_stats_lock;bool reo_query_outstanding,reo_ownership_uncertain;unsigned reo_retained_count,reo_pn_outstanding;u16 reo_cmd_status_tag[257];struct ath11k_reo_cmd_stats reo_cmd_stats;struct ath11k_reo_update_stats reo_update_stats;struct ath11k_reo_pn_stats reo_pn_stats;struct list_head reo_cmd_list,reo_cmd_update_rx_queue_list; };
 struct ath11k_base { pthread_mutex_t base_lock;struct ath11k_dp dp;struct { struct hal_srng srng_list[1]; } hal;struct { _Atomic bool ownership_uncertain;struct list_head retained_host_peers; } nss;struct { unsigned reo_cmd_update_rx_queue_error; } soc_stats;void *dev; };
 struct ath11k { struct ath11k_base *ab;struct ath11k_peer *bss_peer; };
 struct hal_reo_status_header {u16 cmd_num;int cmd_status;u16 cmd_exe_time;u32 timestamp;};
@@ -74,6 +75,11 @@ static void ath11k_dp_reo_queue_get(struct ath11k_reo_queue *q){assert(!q);}
 static void ath11k_dp_reo_queue_put(struct ath11k_reo_queue *q){assert(!q);}
 static void ath11k_dp_reo_query_complete(struct ath11k_reo_query *q,const struct hal_reo_status *s){(void)q;(void)s;assert(!"Query is covered by queue/query fixture");}
 static void ath11k_dp_reo_query_put(struct ath11k_reo_query *q){(void)q;assert(!"Unexpected query fixture");}
+static struct ath11k_reo_pn_update *expected_pn;
+static int descriptor_status;
+static unsigned descriptor_tag=HAL_REO_UPDATE_RX_REO_QUEUE_STATUS,descriptor_len=sizeof(struct hal_reo_status_hdr);
+static void ath11k_dp_reo_pn_update_complete(struct ath11k_reo_pn_update *p,int status) { assert(p==expected_pn&&status==descriptor_status&&!p->completions&&!p->puts);p->completions++;p->status=status; }
+static void ath11k_dp_reo_pn_update_put(struct ath11k_reo_pn_update *p) { assert(p==expected_pn&&p->completions==1&&!p->puts);p->puts++; }
 static struct ath11k_base *active;
 static struct ath11k_peer *lookup_peer;
 static unsigned heap_frees,dma_frees,allocs,detaches,ast_cleanups,ring_accesses;
@@ -95,9 +101,9 @@ static void ath11k_peer_ast_cleanup(struct ath11k *ar,struct ath11k_peer *p,bool
 static int ath11k_peer_rx_tid_delete_handler(struct ath11k_base *ab,struct dp_rx_tid *tid,unsigned number) { assert(ab==active&&tid&&number<2);return -1; }
 static void ath11k_hal_srng_access_begin(struct ath11k_base *ab,struct hal_srng *s) { assert(ab==active&&s->initialized&&!ab->nss.ownership_uncertain);ring_accesses++; }
 static void ath11k_hal_srng_access_end(struct ath11k_base *ab,struct hal_srng *s) { assert(ab==active&&s->initialized&&!ab->nss.ownership_uncertain); }
-static u32 *ath11k_hal_srng_dst_get_next_entry(struct ath11k_base *ab,struct hal_srng *s) { static u32 tag=HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;(void)ab;(void)s;if(!descriptor_available)return NULL;descriptor_available=false;return &tag; }
-static int ath11k_hal_reo_process_status(u8 *desc,u8 *status) {(void)desc;*status=0;return 42;}
-static void decode(struct ath11k_base *ab,u32 *desc,struct hal_reo_status *status) { assert(ab==active&&desc);status->uniform_hdr.cmd_num=42; }
+static u32 *ath11k_hal_srng_dst_get_next_entry(struct ath11k_base *ab,struct hal_srng *s) { static u32 desc[3];(void)ab;(void)s;if(!descriptor_available)return NULL;descriptor_available=false;desc[0]=descriptor_tag|(descriptor_len<<8);return desc; }
+static int ath11k_hal_reo_process_status(u8 *desc,u8 *status) {(void)desc;*status=descriptor_status;return 42;}
+static void decode(struct ath11k_base *ab,u32 *desc,struct hal_reo_status *status) { assert(ab==active&&desc);status->uniform_hdr.cmd_num=42;status->uniform_hdr.cmd_status=descriptor_status; }
 #define ath11k_hal_reo_status_queue_stats decode
 #define ath11k_hal_reo_flush_queue_status decode
 #define ath11k_hal_reo_flush_cache_status decode
@@ -122,8 +128,40 @@ static void init(struct ath11k_base *ab) {
  INIT_LIST_HEAD(&ab->dp.reo_cmd_list);INIT_LIST_HEAD(&ab->dp.reo_cmd_update_rx_queue_list);INIT_LIST_HEAD(&ab->nss.retained_host_peers);
  ab->hal.srng_list[0].initialized=true;
 }
+static struct dp_reo_cmd *queue_pn(struct ath11k_base *ab,struct ath11k_reo_pn_update *pn) {
+ struct dp_reo_cmd *cmd=calloc(1,sizeof(*cmd));assert(cmd);
+ cmd->kind=ATH11K_REO_CMD_PN_UPDATE;cmd->cmd_num=42;cmd->status_tag=HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;cmd->pn_update=pn;
+ expected_pn=pn;ab->dp.reo_cmd_status_tag[42]=cmd->status_tag;ab->dp.reo_cmd_stats.pending++;ab->dp.reo_pn_outstanding++;
+ list_add_tail(&cmd->list,&ab->dp.reo_cmd_list);return cmd;
+}
+static void pn_dispatch(struct ath11k_base *ab) {
+ int statuses[]={HAL_REO_CMD_SUCCESS,HAL_REO_CMD_BLOCKED,HAL_REO_CMD_FAILED,HAL_REO_CMD_RESOURCE_BLOCKED,HAL_REO_CMD_DRAIN,254};
+ for(unsigned i=0;i<ARRAY_SIZE(statuses);i++) {
+  struct ath11k_reo_pn_update pn={0};queue_pn(ab,&pn);descriptor_status=statuses[i];descriptor_available=true;
+  unsigned before=heap_frees;ath11k_dp_process_reo_status(ab);
+  assert(pn.completions==1&&pn.puts==1&&pn.status==statuses[i]&&heap_frees==before+1&&!dma_frees);
+  assert(!ab->dp.reo_pn_outstanding&&!ab->dp.reo_cmd_stats.pending&&list_empty(&ab->dp.reo_cmd_list));
+  assert(ab->dp.reo_pn_stats.completed==i+1);
+  if(i<4)assert(ab->dp.reo_pn_stats.status[i]==1);
+  descriptor_available=true;ath11k_dp_process_reo_status(ab);assert(pn.completions==1&&pn.puts==1&&heap_frees==before+1);
+ }
+ assert(ab->dp.reo_pn_stats.drained==1&&ab->dp.reo_pn_stats.status_unknown==1);
+ struct ath11k_reo_pn_update pn={0};struct dp_reo_cmd *cmd=queue_pn(ab,&pn);
+ descriptor_len=sizeof(struct hal_reo_status_hdr)-1;descriptor_available=true;ath11k_dp_process_reo_status(ab);
+ assert(!pn.completions&&!pn.puts&&ab->dp.reo_pn_outstanding==1&&ab->dp.reo_cmd_stats.pending==1);
+ descriptor_len=sizeof(struct hal_reo_status_hdr);descriptor_tag=HAL_REO_FLUSH_QUEUE_STATUS;
+ descriptor_available=true;ath11k_dp_process_reo_status(ab);
+ assert(!pn.completions&&!pn.puts&&ab->dp.reo_pn_outstanding==1&&ab->dp.reo_cmd_stats.pending==1);
+ descriptor_tag=HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;ab->nss.ownership_uncertain=true;
+ unsigned accesses=ring_accesses;ath11k_dp_process_reo_status(ab);
+ assert(ring_accesses==accesses&&!pn.completions&&!pn.puts&&ab->dp.reo_pn_outstanding==1);
+ /* Fixture cleanup does not claim that quarantined firmware finished. */
+ list_del(&cmd->list);free(cmd);ab->nss.ownership_uncertain=false;ab->dp.reo_pn_outstanding=0;ab->dp.reo_cmd_status_tag[42]=0;
+ memset(&ab->dp.reo_cmd_stats,0,sizeof(ab->dp.reo_cmd_stats));memset(&ab->dp.reo_update_stats,0,sizeof(ab->dp.reo_update_stats));
+ heap_frees=ring_accesses=0;descriptor_status=0;
+}
 int main(void) {
- struct ath11k_base ab;init(&ab);struct ath11k ar={.ab=&ab};pthread_t service,quarantine;
+ struct ath11k_base ab;init(&ab);pn_dispatch(&ab);struct ath11k ar={.ab=&ab};pthread_t service,quarantine;
  struct dp_reo_cmd *cmd=calloc(1,sizeof(*cmd));cmd->cmd_num=42;cmd->handler=callback;cmd->data.vaddr_unaligned=malloc(64);cmd->data.unaligned_size=64;
  cmd->status_tag=HAL_REO_UPDATE_RX_REO_QUEUE_STATUS;ab.dp.reo_cmd_status_tag[42]=cmd->status_tag;ab.dp.reo_cmd_stats.pending=1;
  list_add_tail(&cmd->list,&ab.dp.reo_cmd_list);descriptor_available=true;
@@ -157,7 +195,10 @@ def main():
     rx, peer, mac = [(root / name).read_text() for name in ('dp_rx.c', 'peer.c', 'mac.c')]
     header = (root / 'dp.h').read_text()
     statistics = ''
-    for name in ('ath11k_reo_cmd_stats', 'ath11k_reo_update_stats'):
+    hal = (root / 'hal.h').read_text()
+    enum_start = hal.index('enum hal_reo_cmd_status {')
+    statistics += hal[enum_start:hal.index('};',enum_start)+2]+'\n'
+    for name in ('ath11k_reo_cmd_stats', 'ath11k_reo_update_stats', 'ath11k_reo_pn_stats'):
         start = header.index('struct ' + name + ' {')
         statistics += header[start:header.index('};', start) + 2] + '\n'
     shim = SHIM.replace('struct ath11k_dp;', statistics + 'struct ath11k_dp;', 1)

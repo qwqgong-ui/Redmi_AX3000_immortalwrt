@@ -1,0 +1,181 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ath11k: release NSS before a crashed userpd powers up
+
+999-zf releases NSS before the reset power cycle, but a real firmware crash
+never takes that path: remoteproc recovers the userpd by itself and ath11k
+only learns of it later from QMI SERVER_EXIT, which just sets flags. NSS
+keeps owning the SoC rings while the new image boots, the same condition
+that raised NOC_error.c:359 and killed the Q6 root PD on opt66.
+
+Register a qcom SSR notifier on the userpd rproc. On BEFORE_POWERUP of a
+registered, non-unregistering device, tear down this SoC's NSS wifili
+instance under core_lock and clear nss.enabled, so reconfigure_on_crash()
+re-enables and rebuilds NSS once the firmware is ready. Shutdown events,
+the first boot and removal are ignored; after 999-zf the reset path
+reaches the notifier with NSS already released and it is a no-op. Both paths
+share the exported ath11k_core_release_nss(), since ath11k_nss_teardown()
+is not exported to ath11k_ahb.
+
+--- a/drivers/net/wireless/ath/ath11k/ahb.h
++++ b/drivers/net/wireless/ath/ath11k/ahb.h
+@@ -23,6 +23,8 @@
+ 
+ struct ath11k_ahb {
+ 	struct rproc *tgt_rproc;
++	struct notifier_block ssr_nb;
++	void *ssr_handle;
+ 	struct {
+ 		struct device *dev;
+ 		struct iommu_domain *iommu_domain;
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -18,6 +18,7 @@
+ #include "qmi.h"
+ #include "nss.h"
+ #include <linux/remoteproc.h>
++#include <linux/remoteproc/qcom_rproc.h>
+ #include "pcic.h"
+ #include <linux/soc/qcom/smem.h>
+ #include <linux/soc/qcom/smem_state.h>
+@@ -933,6 +934,58 @@
+ 	.get_window_offset = ath11k_ahb_get_window_offset_qcn6122,
+ };
+ 
++/* remoteproc reboots a crashed userpd on its own; ath11k only learns of it
++ * later through QMI SERVER_EXIT. NSS still owns this SoC's rings meanwhile,
++ * and a userpd booted under live NSS ownership raised a NOC error that took
++ * down the shared Q6 root PD. Release NSS before the new image powers up;
++ * the reconfigure path re-enables and rebuilds it once firmware is ready.
++ */
++static int ath11k_ahb_ssr_notify(struct notifier_block *nb, unsigned long event,
++				 void *data)
++{
++	struct ath11k_ahb *ab_ahb = container_of(nb, struct ath11k_ahb, ssr_nb);
++	struct ath11k_base *ab = container_of((void *)ab_ahb, struct ath11k_base,
++					      drv_priv);
++	bool was_enabled;
++	int ret;
++
++	if (event != QCOM_SSR_BEFORE_POWERUP ||
++	    !test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags) ||
++	    test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags))
++		return NOTIFY_DONE;
++
++	ret = ath11k_core_release_nss(ab, &was_enabled);
++	if (ret)
++		ath11k_err(ab, "NSS release failed before userpd power up: %d\n", ret);
++	else if (was_enabled)
++		ath11k_info(ab, "NSS released before userpd power up\n");
++
++	return NOTIFY_OK;
++}
++
++static int ath11k_ahb_ssr_register(struct ath11k_base *ab)
++{
++	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
++	void *handle;
++
++	ab_ahb->ssr_nb.notifier_call = ath11k_ahb_ssr_notify;
++	handle = qcom_register_ssr_notifier(ab_ahb->tgt_rproc->name, &ab_ahb->ssr_nb);
++	if (IS_ERR(handle))
++		return PTR_ERR(handle);
++	ab_ahb->ssr_handle = handle;
++	return 0;
++}
++
++static void ath11k_ahb_ssr_unregister(struct ath11k_base *ab)
++{
++	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
++
++	if (!ab_ahb->ssr_handle)
++		return;
++	qcom_unregister_ssr_notifier(ab_ahb->ssr_handle, &ab_ahb->ssr_nb);
++	ab_ahb->ssr_handle = NULL;
++}
++
+ static int ath11k_core_get_rproc(struct ath11k_base *ab)
+ {
+ 	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
+@@ -1368,6 +1421,12 @@
+ 		goto err_ce_free;
+ 	}
+ 
++	ret = ath11k_ahb_ssr_register(ab);
++	if (ret) {
++		ath11k_err(ab, "failed to register SSR notifier: %d\n", ret);
++		goto err_ce_free;
++	}
++
+ 	/* QMI can dispatch FW-ready work as soon as core_init starts. Publish all
+ 	 * IRQ/tasklet/NAPI resources before allowing that asynchronous startup.
+ 	 */
+@@ -1391,6 +1450,7 @@
+ 	ath11k_ahb_free_irq(ab);
+ 
+ err_ce_free:
++	ath11k_ahb_ssr_unregister(ab);
+ 	ath11k_ce_free_pipes(ab);
+ 
+ err_hal_srng_deinit:
+@@ -1441,6 +1501,7 @@
+ 	 */
+ 	ath11k_qmi_deinit_service(ab);
+ 
++	ath11k_ahb_ssr_unregister(ab);
+ 	ath11k_ahb_free_irq(ab);
+ 	ath11k_hal_srng_deinit(ab);
+ 	ath11k_ahb_release_smp2p_handle(ab);
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -1488,6 +1488,7 @@
+ int ath11k_core_check_dt(struct ath11k_base *ath11k);
+ int ath11k_core_check_smbios(struct ath11k_base *ab);
+ void ath11k_core_halt(struct ath11k *ar);
++int ath11k_core_release_nss(struct ath11k_base *ab, bool *was_enabled);
+ int ath11k_core_resume_early(struct ath11k_base *ab);
+ int ath11k_core_resume(struct ath11k_base *ab);
+ int ath11k_core_suspend(struct ath11k_base *ab);
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2661,10 +2661,28 @@
+ 	complete(&ab->restart_completed);
+ }
+ 
++/* Release this SoC's NSS ring ownership before its target reboots. Callers
++ * must not hold core_lock; the later reconfigure path re-enables NSS.
++ */
++int ath11k_core_release_nss(struct ath11k_base *ab, bool *was_enabled)
++{
++	int ret;
++
++	mutex_lock(&ab->core_lock);
++	*was_enabled = ab->nss.enabled;
++	ret = ath11k_nss_teardown(ab);
++	if (!ret)
++		ab->nss.enabled = false;
++	mutex_unlock(&ab->core_lock);
++	return ret;
++}
++EXPORT_SYMBOL(ath11k_core_release_nss);
++
+ static void ath11k_core_reset(struct work_struct *work)
+ {
+ 	struct ath11k_base *ab = container_of(work, struct ath11k_base, reset_work);
+ 	int reset_count, fail_cont_count, ret;
++	bool nss_was_enabled;
+ 	long time_left;
+ 
+ 	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
+@@ -2738,11 +2756,7 @@
+ 	 * a userpd rebooted under live NSS ownership raised a NOC error that
+ 	 * took down the shared Q6 root PD and every radio on it.
+ 	 */
+-	mutex_lock(&ab->core_lock);
+-	ret = ath11k_nss_teardown(ab);
+-	if (!ret)
+-		ab->nss.enabled = false;
+-	mutex_unlock(&ab->core_lock);
++	ret = ath11k_core_release_nss(ab, &nss_was_enabled);
+ 	if (ret) {
+ 		ath11k_err(ab, "NSS reset failed before power down: %d; keeping target powered\n",
+ 			   ret);

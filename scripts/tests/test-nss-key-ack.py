@@ -29,6 +29,8 @@ SHIM = r"""
 #include <errno.h>
 typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uintptr_t nss_ptr_t;
 typedef int nss_tx_status_t;
+typedef struct { uint64_t value; } atomic64_t;
+static void atomic64_set(atomic64_t *p,int64_t value) { p->value=value; }
 #define ETH_ALEN 6
 #define NSS_TX_SUCCESS 0
 #define NSS_TX_FAILURE 1
@@ -60,6 +62,7 @@ typedef int nss_tx_status_t;
 #define WMI_VDEV_TYPE_MONITOR 3
 #define NL80211_IFTYPE_STATION 2
 #define NL80211_IFTYPE_AP 3
+#define NL80211_IFTYPE_AP_VLAN 4
 #define ENOTSUPP EOPNOTSUPP
 #define ATH11K_NSS_WIFI_VDEV_CFG_MCBC_EXC_TO_HOST_CMD 1
 #define ATH11K_NSS_WIFI_VDEV_CFG_WDS_BACKHAUL_CMD 2
@@ -90,7 +93,7 @@ struct ieee80211_hw { void *wiphy; };
 struct ath11k_peer { u16 peer_id;u32 vdev_id;u8 addr[6];struct ieee80211_vif *vif;struct { struct ath11k_nss_peer_state *state; } nss; };
 struct ath11k_base { int base_lock;unsigned long dev_flags;struct { bool enabled,quiescing,ownership_uncertain,registered;u32 if_num; } nss; };
 struct ath11k { struct ath11k_base *ab;struct ieee80211_hw *hw;int conf_mutex;struct { void *ctx; } nss; };
-struct ath11k_vif { struct ath11k *ar;struct ieee80211_vif *vif;u32 vdev_id,vdev_type;struct { unsigned if_num;bool created,key_failed,format_ready,format_failed;struct ath11k_vif *ap_vif; } nss; };
+struct ath11k_vif { struct ath11k *ar;struct ieee80211_vif *vif;u32 vdev_id,vdev_type;struct { unsigned if_num;bool created,key_failed,format_ready,format_failed;struct ath11k_vif *ap_vif;atomic64_t normal_rx,normal_rx_short,normal_rx_eapol,normal_rx_undecap_drop,normal_rx_deliver_drop;struct { unsigned flags; } me; } nss; };
 struct ieee80211_key_conf { u32 flags,cipher;u8 key[32]; };
 struct nss_cmn_msg { u32 interface,type,len,response,error;nss_ptr_t cb,app_data; };
 struct nss_wifili_peer_security_type_msg { u16 peer_id;u8 pkt_type,security_type,mic_key[8]; };
@@ -103,7 +106,8 @@ static struct ath11k_base ab;static struct ath11k ar;static struct ath11k_vif vi
 static struct ieee80211_vif mac_vif;static struct ieee80211_hw hw;
 static struct ath11k_vif *ath11k_vif_to_arvif(struct ieee80211_vif *v) { return v->priv; }
 static struct wireless_dev *ieee80211_vif_to_wdev_relaxed(struct ieee80211_vif *v) { return &v->wdev; }
-static unsigned create_calls;static bool configure_fail;
+static unsigned create_calls,me_inits;static bool configure_fail;
+static void ath11k_nss_me_init(struct ath11k_vif *v) { assert(v->ar->conf_mutex&&v->nss.created&&!v->nss.me.flags);me_inits++; }
 static int ath11k_nss_vdev_alloc(struct ath11k_vif *v,void *dev) { assert(v==&vif&&dev==mac_vif.wdev.netdev);create_calls++;return 0; }
 static int ath11k_nss_vdev_register(struct ath11k_vif *v,void *dev) { (void)v;(void)dev;return 0; }
 static int ath11k_nss_vdev_configure(struct ath11k_vif *v) { (void)v;return configure_fail?-EIO:0; }
@@ -161,6 +165,7 @@ static void fresh(void) {
  peer.peer_id=42;peer.vdev_id=7;peer.addr[0]=1;peer.vif=&mac_vif;peer.nss.state=&state;lookup=&peer;replacement=peer;
  state.refs.refs=1;state.peer=&peer;state.peer_id=42;state.vdev_id=7;state.addr[0]=1;state.create_done=true;
  active_state=&state;allocations=fail_allocation=submissions=cancels=stop_requests=deletes=reply_stage=reply_kind=unmap_stage=create_calls=close_stage=0;edge_ack=configure_fail=false;key_channel_open=true;
+ me_inits=0;
 }
 int main(void) {
  struct ieee80211_key_conf key={.flags=IEEE80211_KEY_FLAG_PAIRWISE,.cipher=6};
@@ -183,13 +188,24 @@ int main(void) {
  fresh();ab.nss.enabled=false;spin_lock_bh(&ab.base_lock);assert(ath11k_nss_key_get(&ar,&peer)==NULL);spin_unlock_bh(&ab.base_lock);assert(!ath11k_nss_key_config(&vif,&peer,NULL,&key)&&!submissions);
  fresh();ath11k_nss_key_recover(&vif,&peer,&state);assert(deletes==1&&stop_requests==1&&!ab.nss.quiescing&&vif.nss.key_failed);ath11k_nss_key_recover(&vif,&peer,&state);assert(deletes==1&&stop_requests==1);
  spin_lock_bh(&ab.base_lock);assert(ath11k_nss_key_check(&ar,&peer,&state)==-ESHUTDOWN);spin_unlock_bh(&ab.base_lock);
- struct ath11k_vif vlan={.nss.ap_vif=&vif};assert(ath11k_nss_vdev_key_failed(&vlan));
+ struct ieee80211_vif vlan_mac={.type=NL80211_IFTYPE_AP_VLAN};
+ struct ath11k_vif vlan={.ar=&ar,.vif=&vlan_mac,.nss.ap_vif=&vif};vlan_mac.priv=&vlan;
+ assert(ath11k_nss_vdev_key_failed(&vlan));vif.nss.key_failed=false;
+ vlan.nss.created=true;assert(!ath11k_nss_vdev_key_failed(&vlan));
+ vlan.nss.ap_vif=NULL;assert(ath11k_nss_vdev_key_failed(&vlan));vlan.nss.ap_vif=&vif;
+ vif.nss.created=false;assert(ath11k_nss_vdev_key_failed(&vlan));vif.nss.created=true;
+ vif.nss.format_ready=false;assert(ath11k_nss_vdev_key_failed(&vlan));vif.nss.format_ready=true;
+ vif.nss.format_failed=true;assert(ath11k_nss_vdev_key_failed(&vlan));vif.nss.format_failed=false;
+ vlan.nss.key_failed=true;assert(ath11k_nss_vdev_key_failed(&vlan));vlan.nss.key_failed=false;
+ vlan.nss.format_failed=true;assert(ath11k_nss_vdev_key_failed(&vlan));
  fresh();lookup=&replacement;state.peer=NULL;peer.nss.state=NULL;ath11k_nss_key_recover(&vif,&peer,&state);assert(!deletes&&stop_requests==1);
  fresh();ab.nss.quiescing=true;ath11k_nss_key_recover(&vif,&peer,&state);assert(stop_requests==1&&vif.nss.key_failed);
  fresh();ath11k_nss_key_recover(&vif,&peer,NULL);assert(!stop_requests&&!vif.nss.key_failed);
- fresh();vif.nss.key_failed=true;assert(!ath11k_nss_vdev_create(&vif)&&vif.nss.key_failed&&!create_calls);
- vif.nss.created=false;configure_fail=true;assert(ath11k_nss_vdev_create(&vif)==-EIO&&vif.nss.key_failed&&!vif.nss.created);
+ fresh();vif.nss.key_failed=true;vif.nss.normal_rx.value=42;vif.nss.me.flags=42;
+ assert(!ath11k_nss_vdev_create(&vif)&&vif.nss.key_failed&&!create_calls&&!me_inits&&vif.nss.normal_rx.value==42&&vif.nss.me.flags==42);
+ vif.nss.created=false;configure_fail=true;assert(ath11k_nss_vdev_create(&vif)==-EIO&&vif.nss.key_failed&&!vif.nss.created&&!me_inits);
  configure_fail=false;assert(!ath11k_nss_vdev_create(&vif)&&!vif.nss.key_failed&&vif.nss.created&&!vif.nss.format_ready&&ath11k_nss_vdev_key_failed(&vif));
+ assert(me_inits==1&&!vif.nss.me.flags&&!vif.nss.normal_rx.value&&!vif.nss.normal_rx_short.value&&!vif.nss.normal_rx_eapol.value&&!vif.nss.normal_rx_undecap_drop.value&&!vif.nss.normal_rx_deliver_drop.value);
  puts("PASS actual NSS key ACKs: NACK/timeout, identity, deadline drain, peer reuse, allocation/CREATE failures and interface isolation without hardware reset");
  return 0;
 }

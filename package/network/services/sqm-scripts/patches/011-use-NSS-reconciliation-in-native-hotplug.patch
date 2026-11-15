@@ -1,0 +1,42 @@
+Subject: [PATCH] sqm: share the nonblocking NSS transaction with native hotplug
+
+--- a/platform/openwrt/sqm-hotplug
++++ b/platform/openwrt/sqm-hotplug
+@@ -25,8 +25,26 @@
+ 
+ ALL_DEVICES=$(echo $DEVICE $(uci -q get network.$INTERFACE.ifname) $(ports_for_device $(uci -q get network.$INTERFACE.device)) | tr ' ' '\n' | sort -u)
+ 
++nss_fq_device() (
++    nss_device="$1"
++    found=1
++    nss_fq_section() {
++        [ "$(config_get "$1" interface)" = "$nss_device" ] || return
++        [ "$(config_get "$1" enabled)" = 1 ] || return
++        [ "$(config_get "$1" script)" = nss-fq.qos ] || return
++        found=0
++    }
++    config_load sqm
++    config_foreach nss_fq_section queue
++    exit "$found"
++)
++
+ restart_sqm() {
+     for dev in $ALL_DEVICES; do
++        if nss_fq_device "$dev"; then
++            /usr/lib/sqm/run.sh nss-reconcile "$dev"
++            continue
++        fi
+         /usr/lib/sqm/run.sh stop $dev
+         /usr/lib/sqm/run.sh start $dev
+     done
+@@ -36,6 +54,10 @@
+ 
+ if [ "$ACTION" = ifdown ]; then
+     for dev in $ALL_DEVICES; do
++        if nss_fq_device "$dev"; then
++            /usr/lib/sqm/run.sh nss-stop "$dev"
++            continue
++        fi
+         /usr/lib/sqm/run.sh stop $dev
+     done
+ fi

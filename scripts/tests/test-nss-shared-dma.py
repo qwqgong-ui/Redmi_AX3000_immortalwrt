@@ -53,7 +53,7 @@ struct ath11k_dp {
  struct dp_tx_ring tx_ring[2];struct dp_link_desc_bank link_desc_banks[2];struct hal_wbm_idle_scatter_list scatter_list[2];
 };
 struct ath11k_base;
-struct ath11k { struct ath11k_base *ab;void *hw;int fw_stats,conf_mutex; };
+struct ath11k { struct ath11k_base *ab;void *hw,*mon_metadata;int fw_stats,conf_mutex; };
 struct ath11k_pdev { struct ath11k *ar; };
 struct ath11k_hal {
  struct hal_srng {int initialized,lock;} srng_list[4];u32 shadow_reg_addr[4];
@@ -72,6 +72,7 @@ struct ath11k_base {
 static unsigned dma_frees,heap_frees,shadow_stops,mon_stops,debug_removes,pdev_frees,mon_detaches,key_removes,workqueue_destroys,hw_frees,stats_frees;
 static struct ath11k_base *active;
 static void kfree(void *ptr) { assert(!active->nss.ownership_uncertain);if(ptr)heap_frees++; }
+static void kvfree(void *ptr) { kfree(ptr); }
 static void dma_free_coherent(struct device *dev,size_t size,void *ptr,uintptr_t dma) { (void)dev;(void)size;(void)dma;assert(ptr&&!active->nss.ownership_uncertain);dma_frees++; }
 static void dma_free_noncoherent(struct device *dev,size_t size,void *ptr,uintptr_t dma,int dir) { assert(dir==DMA_FROM_DEVICE);dma_free_coherent(dev,size,ptr,dma); }
 static void ath11k_dp_stop_shadow_timers(struct ath11k_base *ab) { assert(ab==active);shadow_stops++; }

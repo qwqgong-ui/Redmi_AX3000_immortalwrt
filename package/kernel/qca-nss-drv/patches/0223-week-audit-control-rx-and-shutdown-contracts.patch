@@ -1,0 +1,2377 @@
+Subject: [PATCH] nss-drv: own control replies, receive geometry and shutdown
+
+--- a/exports/nss_if.h
++++ b/exports/nss_if.h
+@@ -264,6 +264,12 @@
+  */
+ typedef void (*nss_if_msg_callback_t)(void *app_data, struct nss_if_msg *msg);
+ 
++/* Actual received buffer bytes, including the common header. Valid only during
++ * a synchronous message callback on this core; zero means no RX extent is known.
++ * Firmware may leave cm.len at the original request length for variable replies.
++ */
++extern uint32_t nss_if_rx_msg_buf_len(struct nss_ctx_instance *nss_ctx);
++
+ /**
+  * Callback function for receiving NSS interface data.
+  *
+--- a/exports/nss_wifi_ext_vdev_if.h
++++ b/exports/nss_wifi_ext_vdev_if.h
+@@ -236,6 +236,13 @@
+  */
+ extern nss_tx_status_t nss_wifi_ext_vdev_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_wifi_ext_vdev_msg *wevm);
+ 
++/* A non-NULL callback is required to create a request token. Cancel in process
++ * context before releasing callback storage; this also drains a claimed reply.
++ */
++extern nss_tx_status_t nss_wifi_ext_vdev_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++			struct nss_wifi_ext_vdev_msg *wevm, uint32_t *cookie);
++extern void nss_wifi_ext_vdev_cancel_msg(uint32_t cookie);
++
+ /**
+  * nss_wifi_ext_vdev_tx_msg_sync
+  *	Sends messages to NSS firmware synchronously.
+--- a/nss_bridge_log.c
++++ b/nss_bridge_log.c
+@@ -99,7 +99,7 @@
+  */
+ void nss_bridge_log_tx_msg(struct nss_bridge_msg *nbm)
+ {
+-	if (nbm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || nbm->cm.type >= (NSS_IF_MAX_MSG_TYPES + NSS_BRIDGE_MSG_TYPE_MAX + 1)) {
++	if (nbm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || nbm->cm.type >= NSS_BRIDGE_MSG_TYPE_MAX) {
+ 		nss_warning("%px: Invalid message type\n", nbm);
+ 		return;
+ 	}
+@@ -119,7 +119,7 @@
+ 		return;
+ 	}
+ 
+-	if (nbm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || nbm->cm.type >= (NSS_IF_MAX_MSG_TYPES + NSS_BRIDGE_MSG_TYPE_MAX + 1)) {
++	if (nbm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || nbm->cm.type >= NSS_BRIDGE_MSG_TYPE_MAX) {
+ 		nss_warning("%px: Invalid message type\n", nbm);
+ 		return;
+ 	}
+--- a/nss_control.c
++++ b/nss_control.c
+@@ -19,6 +19,7 @@
+ static atomic64_t nss_control_sequence = ATOMIC64_INIT(0);
+ static bool nss_control_closing[NSS_CORE_MAX];
+ static bool nss_control_registered[NSS_CONTROL_FAMILY_MAX][NSS_CORE_MAX][NSS_MAX_NET_INTERFACES];
++static uint64_t nss_control_base_generation[NSS_CORE_MAX][NSS_MAX_NET_INTERFACES];
+ 
+ /* A reply delivered to another subsystem after interface reuse must not call
+  * a client callback or interpret its wire cookie as a host pointer.
+@@ -51,7 +52,7 @@
+ {
+ 	bool opened = false;
+ 
+-	if (!nss_control_valid(ctx, family, if_num))
++	if (!nss_control_valid(ctx, family, if_num) || family == NSS_CONTROL_BASE_IF)
+ 		return false;
+ 	spin_lock_bh(&nss_control_lock);
+ 	if (!nss_control_closing[ctx->id]) {
+@@ -62,22 +63,11 @@
+ 	return opened;
+ }
+ 
+-static void nss_control_revoke(struct nss_ctx_instance *ctx, int family, int if_num)
++/* The caller holds nss_control_lock. Publishing a DP owner cannot sleep. */
++static void nss_control_drop_locked(struct nss_ctx_instance *ctx, int family, int if_num)
+ {
+ 	struct nss_control_request *request, *next;
+-	unsigned int index;
+-
+-	if (!ctx || ctx->id >= NSS_CORE_MAX)
+-		return;
+-	spin_lock_bh(&nss_control_lock);
+-	if (family < 0) {
+-		nss_control_closing[ctx->id] = true;
+-		for (index = 0; index < NSS_CONTROL_FAMILY_MAX; index++)
+-			memset(nss_control_registered[index][ctx->id], 0,
+-			       sizeof(nss_control_registered[index][ctx->id]));
+-	} else {
+-		nss_control_registered[family][ctx->id][if_num] = false;
+-	}
++
+ 	list_for_each_entry_safe(request, next, &nss_control_requests, list) {
+ 		if (request->core_id != ctx->id ||
+ 		    (family >= 0 && (request->family != (enum nss_control_family)family ||
+@@ -86,6 +76,98 @@
+ 		list_del(&request->list);
+ 		kfree(request);
+ 	}
++}
++
++static void nss_control_base_advance_locked(struct nss_ctx_instance *ctx, uint32_t if_num)
++{
++	uint64_t *generation = &nss_control_base_generation[ctx->id][if_num];
++
++	/* Exhaustion closes admission permanently, without recycling an old lease. */
++	if (*generation != U64_MAX)
++		++*generation;
++}
++
++void nss_control_register_dp(struct nss_ctx_instance *ctx, uint32_t if_num,
++			    const struct nss_subsystem_dataplane_register *update)
++{
++	struct nss_subsystem_dataplane_register *reg;
++	uint64_t generation;
++
++	BUG_ON(!nss_control_valid(ctx, NSS_CONTROL_BASE_IF, if_num));
++	spin_lock_bh(&nss_control_lock);
++	reg = &ctx->subsys_dp_register[if_num];
++	BUG_ON(reg->ndev && reg->ndev != update->ndev);
++	if (!reg->ndev && update->ndev) {
++		nss_control_base_advance_locked(ctx, if_num);
++		nss_control_drop_locked(ctx, NSS_CONTROL_BASE_IF, if_num);
++	}
++	/* Preserve type and xmit_cb: several clients set them independently. */
++	reg->cb = update->cb;
++	reg->ext_cb = update->ext_cb;
++	reg->app_data = update->app_data;
++	reg->features = update->features;
++	WRITE_ONCE(reg->ndev, update->ndev);
++	generation = nss_control_base_generation[ctx->id][if_num];
++	nss_control_registered[NSS_CONTROL_BASE_IF][ctx->id][if_num] =
++		update->ndev && generation && generation != U64_MAX &&
++		!nss_control_closing[ctx->id];
++	spin_unlock_bh(&nss_control_lock);
++}
++
++void nss_control_unregister_dp(struct nss_ctx_instance *ctx, uint32_t if_num)
++{
++	struct nss_subsystem_dataplane_register *reg;
++
++	BUG_ON(!nss_control_valid(ctx, NSS_CONTROL_BASE_IF, if_num));
++	spin_lock_bh(&nss_control_lock);
++	nss_control_registered[NSS_CONTROL_BASE_IF][ctx->id][if_num] = false;
++	nss_control_base_advance_locked(ctx, if_num);
++	nss_control_drop_locked(ctx, NSS_CONTROL_BASE_IF, if_num);
++	reg = &ctx->subsys_dp_register[if_num];
++	reg->cb = NULL;
++	reg->ext_cb = NULL;
++	reg->app_data = NULL;
++	WRITE_ONCE(reg->ndev, NULL);
++	reg->features = 0;
++	reg->type = 0;
++	/* xmit_cb has its own registration/teardown API. */
++	spin_unlock_bh(&nss_control_lock);
++}
++
++uint64_t nss_control_base_lease(struct nss_ctx_instance *ctx, uint32_t if_num)
++{
++	uint64_t generation = 0;
++
++	if (!nss_control_valid(ctx, NSS_CONTROL_BASE_IF, if_num))
++		return 0;
++	spin_lock_bh(&nss_control_lock);
++	if (nss_control_registered[NSS_CONTROL_BASE_IF][ctx->id][if_num] &&
++	    !nss_control_closing[ctx->id])
++		generation = nss_control_base_generation[ctx->id][if_num];
++	spin_unlock_bh(&nss_control_lock);
++	return generation;
++}
++
++static void nss_control_revoke(struct nss_ctx_instance *ctx, int family, int if_num)
++{
++	unsigned int index;
++
++	if (!ctx || ctx->id >= NSS_CORE_MAX)
++		return;
++	spin_lock_bh(&nss_control_lock);
++	if (family < 0) {
++		nss_control_closing[ctx->id] = true;
++		for (index = 0; index < NSS_CONTROL_FAMILY_MAX; index++)
++			memset(nss_control_registered[index][ctx->id], 0,
++			       sizeof(nss_control_registered[index][ctx->id]));
++		for (index = 0; index < NSS_MAX_NET_INTERFACES; index++)
++			nss_control_base_advance_locked(ctx, index);
++	} else {
++		nss_control_registered[family][ctx->id][if_num] = false;
++		if (family == NSS_CONTROL_BASE_IF)
++			nss_control_base_advance_locked(ctx, if_num);
++	}
++	nss_control_drop_locked(ctx, family, if_num);
+ 	spin_unlock_bh(&nss_control_lock);
+ 	/* This also drains a callback which already claimed and removed its entry. */
+ 	synchronize_net();
+@@ -119,9 +201,10 @@
+ 	synchronize_net();
+ }
+ 
+-nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
+-			       uint32_t size, uint32_t buffer_size,
+-			       enum nss_control_family family, uint32_t *cookie)
++static nss_tx_status_t nss_control_send_generation(struct nss_ctx_instance *ctx, void *msg,
++				       uint32_t size, uint32_t buffer_size,
++				       enum nss_control_family family, uint64_t generation,
++				       uint32_t *cookie)
+ {
+ 	struct nss_cmn_msg *cm = msg;
+ 	struct nss_control_request *request = NULL;
+@@ -150,6 +233,10 @@
+ 	if (!nss_control_registered[family][ctx->id][cm->interface] ||
+ 	    nss_control_closing[ctx->id])
+ 		goto unlock;
++	if (family == NSS_CONTROL_BASE_IF &&
++	    (!generation || generation == U64_MAX ||
++	     generation != nss_control_base_generation[ctx->id][cm->interface]))
++		goto unlock;
+ 	if (request) {
+ 		/* Tokens are also host shadow generations: assign them in enqueue order. */
+ 		sequence = atomic64_inc_return(&nss_control_sequence);
+@@ -184,6 +271,27 @@
+ 	return status;
+ }
+ 
++nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
++			       uint32_t size, uint32_t buffer_size,
++			       enum nss_control_family family, uint32_t *cookie)
++{
++	/* BASE_IF must use the DP lease captured at its API entry. */
++	if (family == NSS_CONTROL_BASE_IF) {
++		if (cookie)
++			*cookie = 0;
++		return NSS_TX_FAILURE_BAD_PARAM;
++	}
++	return nss_control_send_generation(ctx, msg, size, buffer_size, family, 0, cookie);
++}
++
++nss_tx_status_t nss_control_base_send(struct nss_ctx_instance *ctx, void *msg,
++				    uint32_t size, uint32_t buffer_size,
++				    uint64_t generation, uint32_t *cookie)
++{
++	return nss_control_send_generation(ctx, msg, size, buffer_size,
++					   NSS_CONTROL_BASE_IF, generation, cookie);
++}
++
+ bool nss_control_receive(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm,
+ 			 enum nss_control_family family,
+ 			 void (*prepare)(struct nss_ctx_instance *, struct nss_cmn_msg *,
+@@ -226,3 +334,36 @@
+ 	rcu_read_unlock_bh();
+ 	return accepted;
+ }
++
++bool nss_control_receive_base(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm)
++{
++	struct nss_control_request *request;
++	uint64_t cookie = cm->app_data;
++	bool base = false, other = false;
++
++	if (cm->response == NSS_CMN_RESPONSE_NOTIFY ||
++	    cm->cb != (nss_ptr_t)(uintptr_t)nss_control_wire_callback)
++		return false;
++	if (!nss_control_valid(ctx, NSS_CONTROL_BASE_IF, cm->interface) ||
++	    !cookie || cookie > U32_MAX)
++		return true;
++	spin_lock_bh(&nss_control_lock);
++	list_for_each_entry(request, &nss_control_requests, list) {
++		if (request->cookie != cookie)
++			continue;
++		if (request->core_id == ctx->id && request->if_num == cm->interface &&
++		    request->type == cm->type &&
++		    nss_control_registered[request->family][ctx->id][cm->interface]) {
++			base = request->family == NSS_CONTROL_BASE_IF;
++			other = !base;
++		}
++		break;
++	}
++	spin_unlock_bh(&nss_control_lock);
++	if (other)
++		return false;
++	if (base)
++		nss_control_receive(ctx, cm, NSS_CONTROL_BASE_IF, NULL);
++	/* A cancel/close racing the second lookup must not fall through to parsers. */
++	return true;
++}
+--- a/nss_control.h
++++ b/nss_control.h
+@@ -5,9 +5,11 @@
+ enum nss_control_family {
+ 	NSS_CONTROL_DYNAMIC,
+ 	NSS_CONTROL_WIFI_VDEV,
++	NSS_CONTROL_WIFI_EXT_VDEV,
+ 	NSS_CONTROL_PROJECT,
+ 	NSS_CONTROL_BASE_IF,
+ 	NSS_CONTROL_MIRROR,
++	NSS_CONTROL_RPS,
+ 	NSS_CONTROL_FAMILY_MAX,
+ };
+ 
+@@ -18,6 +20,18 @@
+ 		       uint32_t if_num);
+ void nss_control_close_core(struct nss_ctx_instance *ctx);
+ void nss_control_cancel(uint32_t cookie);
++struct nss_subsystem_dataplane_register;
++void nss_control_register_dp(struct nss_ctx_instance *ctx, uint32_t if_num,
++			    const struct nss_subsystem_dataplane_register *update);
++void nss_control_unregister_dp(struct nss_ctx_instance *ctx, uint32_t if_num);
++uint64_t nss_control_base_lease(struct nss_ctx_instance *ctx, uint32_t if_num);
++nss_tx_status_t nss_control_base_send(struct nss_ctx_instance *ctx, void *msg,
++				    uint32_t size, uint32_t buffer_size,
++				    uint64_t generation, uint32_t *cookie);
++/* True means a BASE reply was consumed, or a stale broker marker was dropped.
++ * Valid replies owned by another family and ordinary notifications pass through.
++ */
++bool nss_control_receive_base(struct nss_ctx_instance *ctx, struct nss_cmn_msg *cm);
+ nss_tx_status_t nss_control_send(struct nss_ctx_instance *ctx, void *msg,
+ 			       uint32_t size, uint32_t buffer_size,
+ 			       enum nss_control_family family, uint32_t *cookie);
+--- a/nss_core.c
++++ b/nss_core.c
+@@ -25,6 +25,7 @@
+ #include "nss_core.h"
+ #include <linux/module.h>
+ #include <linux/mm.h>
++#include <linux/percpu.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/sizes.h>
+@@ -42,6 +43,7 @@
+ #include <linux/skbuff_ref.h>
+ #endif
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ #ifdef NSS_DRV_WIFIOFFLOAD_ENABLE
+ #include "nss_wifili_if.h"
+ 
+@@ -411,25 +413,15 @@
+ 					void *app_data, struct net_device *ndev,
+ 					uint32_t features)
+ {
+-	struct nss_subsystem_dataplane_register *reg;
+-
+-	/*
+-	 * Check that interface number is in range.
+-	 */
+-	BUG_ON(if_num >= NSS_MAX_NET_INTERFACES);
+-
+-	reg = &nss_ctx->subsys_dp_register[if_num];
+-
+-	/*
+-	 * Check if there is already a subsystem registered at this interface number.
+-	 */
+-	BUG_ON(reg->ndev && reg->ndev != ndev);
+-
+-	reg->cb = cb;
+-	reg->ext_cb = ext_cb;
+-	reg->app_data = app_data;
+-	reg->ndev = ndev;
+-	reg->features = features;
++	struct nss_subsystem_dataplane_register update = {
++		.cb = cb,
++		.ext_cb = ext_cb,
++		.app_data = app_data,
++		.ndev = ndev,
++		.features = features,
++	};
++
++	nss_control_register_dp(nss_ctx, if_num, &update);
+ }
+ 
+ /*
+@@ -440,21 +432,7 @@
+  */
+ void nss_core_unregister_subsys_dp(struct nss_ctx_instance *nss_ctx, uint32_t if_num)
+ {
+-	struct nss_subsystem_dataplane_register *reg;
+-
+-	/*
+-	 * Check that interface number is in range.
+-	 */
+-	BUG_ON(if_num >= NSS_MAX_NET_INTERFACES);
+-
+-	reg = &nss_ctx->subsys_dp_register[if_num];
+-
+-	reg->cb = NULL;
+-	reg->ext_cb = NULL;
+-	reg->app_data = NULL;
+-	reg->ndev = NULL;
+-	reg->features = 0;
+-	reg->type = 0;
++	nss_control_unregister_dp(nss_ctx, if_num);
+ 
+ 	/*
+ 	 * The N2H receive path reads reg->ndev in the NAPI poll and hands it to
+@@ -473,6 +451,19 @@
+  * nss_core_handle_nss_status_pkt()
+  *	Handle the metadata/status packet.
+  */
++struct nss_core_rx_msg_context {
++	struct nss_ctx_instance *ctx;
++	u32 length;
++};
++static DEFINE_PER_CPU(struct nss_core_rx_msg_context, nss_core_rx_msg_context);
++
++u32 nss_core_rx_msg_buf_len(struct nss_ctx_instance *ctx)
++{
++	struct nss_core_rx_msg_context *rx = this_cpu_ptr(&nss_core_rx_msg_context);
++
++	return rx->ctx == ctx ? rx->length : 0;
++}
++
+ void nss_core_handle_nss_status_pkt(struct nss_ctx_instance *nss_ctx, struct sk_buff *nbuf)
+ {
+ 	struct nss_cmn_msg *ncm;
+@@ -481,6 +472,7 @@
+ 	void *app_data;
+ 	uint16_t nss_if;
+ 	uint32_t buf_len;
++	struct nss_core_rx_msg_context previous, *rx;
+ 
+ 	if (skb_shinfo(nbuf)->nr_frags > 0) {
+ 		ncm = (struct nss_cmn_msg *)skb_frag_address(&skb_shinfo(nbuf)->frags[0]);
+@@ -523,7 +515,7 @@
+ 		return;
+ 	}
+ #endif
+-	if (ncm->len > nbuf->len) {
++	if (ncm->len > buf_len - sizeof(*ncm)) {
+ 		nss_warning("%px: Message %d for interface %d received with invalid length %d, expected length %d",
+ 							nss_ctx, ncm->type, nss_if, nbuf->len, ncm->len);
+ 		return;
+@@ -547,18 +539,24 @@
+ 	cb = nss_ctx->nss_rx_interface_handlers[nss_if].cb;
+ 	app_data = nss_ctx->nss_rx_interface_handlers[nss_if].app_data;
+ 
+-	if (!cb) {
+-		nss_warning("%px: Callback not registered for interface %d", nss_ctx, nss_if);
+-		return;
+-	}
+-
+ 	/*
+ 	 * A response is filled into the request's buffer without ncm->len
+ 	 * being rewritten, so the receive buffer is the only length that
+ 	 * covers a variable-length payload.
+ 	 */
+-	nss_ctx->rx_msg_buf_len = buf_len;
+-	cb(nss_ctx, ncm, app_data);
++	preempt_disable();
++	rx = this_cpu_ptr(&nss_core_rx_msg_context);
++	previous = *rx;
++	rx->ctx = nss_ctx;
++	rx->length = buf_len;
++	if (!nss_control_receive_base(nss_ctx, ncm)) {
++		if (cb)
++			cb(nss_ctx, ncm, app_data);
++		else
++			nss_warning("%px: Callback not registered for interface %d", nss_ctx, nss_if);
++	}
++	*rx = previous;
++	preempt_enable();
+ 
+ 	if (ncm->interface != nss_if) {
+ 		nss_warning("%px: Invalid NSS I/F %d expected %d", nss_ctx, ncm->interface, nss_if);
+@@ -1905,6 +1903,8 @@
+ 	int ret;
+ 	int i;
+ 
++	if (READ_ONCE(nss_ctx->shutting_down))
++		return;
+ 	dma_sync_single_for_cpu(nss_ctx->dev, mem_ctx->if_map_dma, sizeof(*if_map), DMA_FROM_DEVICE);
+ 	NSS_CORE_DSB();
+ 
+@@ -2439,6 +2439,8 @@
+ 	int32_t i;
+ #endif
+ 
++	if (READ_ONCE(nss_ctx->shutting_down))
++		return;
+ 	nss_assert((cause == NSS_N2H_INTR_EMPTY_BUFFERS_SOS)
+ 			|| (cause == NSS_N2H_INTR_TX_UNBLOCKED)
+ 			|| cause == NSS_N2H_INTR_PAGED_EMPTY_BUFFERS_SOS);
+@@ -3344,6 +3346,10 @@
+ 	 * Take a lock for queue
+ 	 */
+ 	spin_lock_bh(&h2n_desc_ring->lock);
++	if (unlikely(READ_ONCE(nss_ctx->shutting_down))) {
++		spin_unlock_bh(&h2n_desc_ring->lock);
++		return NSS_CORE_STATUS_FAILURE;
++	}
+ 	nss_index = h2n_desc_ring->nss_index_local;
+ 	hlos_index = h2n_desc_ring->hlos_index;
+ 	count = ((nss_index - hlos_index - 1) + size) & (mask);
+--- a/nss_core.h
++++ b/nss_core.h
+@@ -478,6 +478,7 @@
+ 	uint32_t load;			/* Load address for this core */
+ 	struct nss_meminfo_ctx meminfo_ctx;	/* Meminfo context */
+ 	enum nss_core_state state;	/* State of NSS core */
++	bool shutting_down;		/* Terminal: zero state must not restart boot */
+ 	uint32_t c2c_start;		/* C2C start address */
+ 	uint32_t num_irq;                /* IRQ numbers per queue */
+ 	struct int_ctx_instance int_ctx[NSS_MAX_IRQ_PER_CORE];
+@@ -489,7 +490,6 @@
+ 	uint16_t rps_en;		/* N2H Enable Multiple queues for Data Packets */
+ 	uint16_t n2h_mitigate_en;	/* N2H mitigation */
+ 	uint32_t max_buf_size;		/* Maximum buffer size */
+-	uint32_t rx_msg_buf_len;	/* Receive buffer length of the status message being handled */
+ 	uint32_t buf_sz_allocated;	/* size of bufs allocated from host */
+ 	nss_cmn_queue_decongestion_callback_t queue_decongestion_callback[NSS_MAX_CLIENTS];
+ 					/* Queue decongestion callbacks */
+@@ -1095,4 +1095,5 @@
+ extern nss_tx_status_t nss_n2h_paged_buf_pool_init(struct nss_ctx_instance *nss_ctx);
+ extern nss_tx_status_t nss_n2h_cfg_qos_mem_size(struct nss_ctx_instance *nss_ctx, uint32_t pool_sz);
+ 
++u32 nss_core_rx_msg_buf_len(struct nss_ctx_instance *ctx);
+ #endif /* __NSS_CORE_H */
+--- a/nss_data_plane/include/nss_data_plane.h
++++ b/nss_data_plane/include/nss_data_plane.h
+@@ -44,6 +44,8 @@
+  *	Destroy data_plane workqueue
+  */
+ void nss_data_plane_destroy_delay_work(void);
++void nss_data_plane_shutdown_prepare(struct nss_ctx_instance *ctx);
++void nss_data_plane_shutdown_complete(struct nss_ctx_instance *ctx);
+ 
+ /*
+  * nss_data_plane_ops defines the API required to support multiple data plane targets
+--- a/nss_data_plane/nss_data_plane.c
++++ b/nss_data_plane/nss_data_plane.c
+@@ -173,6 +173,9 @@
+ 	int extra_tail = 0;
+ 	nss_tx_status_t status;
+ 	struct net_device *dev = dpc->dev;
++
++	if (!READ_ONCE(dp->notify_open))
++		return NETDEV_TX_BUSY;
+ 
+ 	if (skb->len < ETH_HLEN) {
+ 		nss_warning("skb->len ( %u ) < ETH_HLEN ( %u ) \n", skb->len, ETH_HLEN);
+@@ -345,7 +348,8 @@
+ 
+     ASSERT_RTNL();
+     if (dev_net(dev) != &init_net || !netif_running(dev) ||
+-        ctx->state != NSS_CORE_STATE_INITIALIZED)
++        ctx->state != NSS_CORE_STATE_INITIALIZED ||
++        READ_ONCE(ctx->shutting_down))
+         return -EAGAIN;
+     for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
+         struct nss_data_plane_param *p = &nss_data_plane_params[i];
+@@ -402,6 +406,43 @@
+ }
+ EXPORT_SYMBOL_GPL(nss_data_plane_is_ready);
+ 
++/* RTNL remains held through halt and IRQ/NAPI drain. No host ring restore,
++ * firmware CLOSE, callback reclaim or shared-memory free belongs to shutdown.
++ */
++void nss_data_plane_shutdown_prepare(struct nss_ctx_instance *ctx)
++{
++	int i;
++
++	ASSERT_RTNL();
++	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++		struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++		if (p->nss_ctx != ctx || !p->dpc.dev)
++			continue;
++		WRITE_ONCE(p->attached, false);
++		WRITE_ONCE(p->notify_open, 0);
++		netif_tx_disable(p->dpc.dev);
++	}
++	synchronize_net();
++}
++
++void nss_data_plane_shutdown_complete(struct nss_ctx_instance *ctx)
++{
++	int i;
++
++	ASSERT_RTNL();
++	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
++		struct nss_data_plane_param *p = &nss_data_plane_params[i];
++
++		if (p->nss_ctx != ctx || !p->dpc.dev || !p->may_own_dma)
++			continue;
++		if (nss_dp_quiesce_dma(p->dpc.dev))
++			pr_err("nss: dataplane %d shutdown DMA stop unconfirmed\n", i);
++		else
++			p->may_own_dma = false;
++	}
++}
++
+ /*
+  * __nss_data_plane_register()
+  */
+@@ -415,6 +456,10 @@
+ 	}
+ 
+ 	rtnl_lock();
++	if (READ_ONCE(nss_ctx->shutting_down)) {
++		rtnl_unlock();
++		return;
++	}
+ 	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
+ 		if (!nss_data_plane_register_to_nss_dp(nss_ctx, i)) {
+ 			nss_warning("%px: Register data plane failed for data plane %d\n", nss_ctx, i);
+--- a/nss_data_plane/nss_data_plane_common.c
++++ b/nss_data_plane/nss_data_plane_common.c
+@@ -33,6 +33,8 @@
+ 	struct nss_ctx_instance *nss_ctx = &nss_top_main.nss[NSS_CORE_0];
+ 	struct nss_top_instance *nss_top = nss_ctx->nss_top;
+ 
++	if (READ_ONCE(nss_ctx->shutting_down))
++		return;
+ 	/*
+ 	 * The queue config command is a synchronous command and needs to be issued
+ 	 * in process context, before NSS data plane switch.
+@@ -58,6 +60,8 @@
+  */
+ bool nss_data_plane_schedule_registration(void)
+ {
++	if (READ_ONCE(nss_top_main.nss[NSS_CORE_0].shutting_down))
++		return false;
+ 	if (!queue_work_on(1, nss_data_plane_workqueue, &nss_data_plane_work.work)) {
+ 		nss_warning("Failed to register data plane workqueue on core 1\n");
+ 		return false;
+--- a/nss_dscp_map.h
++++ b/nss_dscp_map.h
+@@ -119,7 +119,7 @@
+ 				loff_t *ppos, struct nss_dscp_map_parse *out)
+ {
+ 	int count;
+-	char w_buf[7];
++	char w_buf[8];
+ 	char *str;
+ 	char *tokens[NSS_DSCP_MAP_PARAM_FIELD_COUNT];
+ 	unsigned int dscp, priority, action;
+--- a/nss_gre.c
++++ b/nss_gre.c
+@@ -224,7 +224,7 @@
+ 		return NSS_TX_FAILURE;
+ 	}
+ 
+-	if (ncm->type > NSS_GRE_MSG_MAX) {
++	if (ncm->type >= NSS_GRE_MSG_MAX) {
+ 		nss_warning("%px: message type out of range: %d", nss_ctx, ncm->type);
+ 		return NSS_TX_FAILURE;
+ 	}
+--- a/nss_gre_log.c
++++ b/nss_gre_log.c
+@@ -151,7 +151,7 @@
+  */
+ void nss_gre_log_tx_msg(struct nss_gre_msg *ngm)
+ {
+-	if (ngm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || ngm->cm.type >= (NSS_IF_MAX_MSG_TYPES + NSS_GRE_MSG_MAX + 1)) {
++	if (ngm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || ngm->cm.type >= NSS_GRE_MSG_MAX) {
+ 		nss_warning("%px: Invalid message type\n", ngm);
+ 		return;
+ 	}
+@@ -171,7 +171,7 @@
+ 		return;
+ 	}
+ 
+-	if (ngm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || ngm->cm.type >= (NSS_IF_MAX_MSG_TYPES + NSS_GRE_MSG_MAX + 1)) {
++	if (ngm->cm.type < (NSS_IF_MAX_MSG_TYPES + 1) || ngm->cm.type >= NSS_GRE_MSG_MAX) {
+ 		nss_warning("%px: Invalid message type\n", ngm);
+ 		return;
+ 	}
+--- a/nss_hal/include/nss_hal.h
++++ b/nss_hal/include/nss_hal.h
+@@ -122,6 +122,7 @@
+  * nss_hal_remove()
+  */
+ int nss_hal_remove(struct platform_device *nss_dev);
++void nss_hal_shutdown(struct nss_ctx_instance *ctx);
+ 
+ /*
+  * nss_hal_firmware_load()
+--- a/nss_hal/nss_hal.c
++++ b/nss_hal/nss_hal.c
+@@ -850,6 +850,39 @@
+  * nss_hal_remove()
+  *	HLOS device remove callback
+  */
++void nss_hal_shutdown(struct nss_ctx_instance *ctx)
++{
++	struct nss_top_instance *top = ctx->nss_top;
++	int i;
++
++	if (!ctx->nmap)
++		return;
++	WRITE_ONCE(ctx->shutting_down, true);
++	/* Enqueue checks this terminal gate under each ring lock. */
++	for (i = 0; i < NSS_H2N_DESC_RING_NUM; i++) {
++		spin_lock_bh(&ctx->h2n_desc_rings[i].lock);
++		spin_unlock_bh(&ctx->h2n_desc_rings[i].lock);
++	}
++	rtnl_lock();
++#ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
++	nss_data_plane_shutdown_prepare(ctx);
++#endif
++	nss_control_close_core(ctx);
++	WRITE_ONCE(ctx->state, NSS_CORE_STATE_UNINITIALIZED);
++	if (top->hal_ops->core_halt)
++		top->hal_ops->core_halt(ctx);
++	for (i = 0; i < ctx->num_irq; i++) {
++		nss_hal_disable_interrupt(ctx, ctx->int_ctx[i].shift_factor,
++					 NSS_HAL_SUPPORTED_INTERRUPTS);
++		nss_hal_clean_up_irq(&ctx->int_ctx[i]);
++	}
++	WRITE_ONCE(ctx->state, NSS_CORE_STATE_UNINITIALIZED);
++#ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
++	nss_data_plane_shutdown_complete(ctx);
++#endif
++	rtnl_unlock();
++}
++
+ int nss_hal_remove(struct platform_device *nss_dev)
+ {
+ 	struct nss_top_instance *nss_top = &nss_top_main;
+--- a/nss_if.c
++++ b/nss_if.c
+@@ -23,21 +23,20 @@
+ #include "nss_if_log.h"
+ #include "nss_control.h"
+ 
++uint32_t nss_if_rx_msg_buf_len(struct nss_ctx_instance *nss_ctx)
++{
++	return nss_core_rx_msg_buf_len(nss_ctx);
++}
++EXPORT_SYMBOL(nss_if_rx_msg_buf_len);
++
+ /*
+  * nss_if_pvt
+  *	NSS private structure to handle the completion of NSS -> HLOS messages.
+  */
+-static DEFINE_MUTEX(nss_if_sync_mutex);
+-static DEFINE_SPINLOCK(nss_if_sync_lock);
+-static DECLARE_COMPLETION(nss_if_sync_complete);
+-static struct {
+-	nss_ptr_t sequence;
+-	nss_ptr_t cookie;
+-	u16 interface;
+-	u16 type;
++struct nss_if_wait {
++	struct completion complete;
+ 	nss_tx_status_t response;
+-	bool pending;
+-} nss_if;
++};
+ 
+ /*
+  * nss_if_callback
+@@ -45,17 +44,11 @@
+  */
+ static void nss_if_callback(void *app_data, struct nss_if_msg *nim)
+ {
+-	nss_ptr_t cookie = (nss_ptr_t)app_data;
+-
+-	spin_lock_bh(&nss_if_sync_lock);
+-	if (nss_if.pending && cookie == nss_if.cookie &&
+-	    nim->cm.interface == nss_if.interface && nim->cm.type == nss_if.type) {
+-		nss_if.response = nim->cm.response == NSS_CMN_RESPONSE_ACK ?
+-			NSS_TX_SUCCESS : NSS_TX_FAILURE;
+-		nss_if.pending = false;
+-		complete(&nss_if_sync_complete);
+-	}
+-	spin_unlock_bh(&nss_if_sync_lock);
++	struct nss_if_wait *wait = app_data;
++
++	wait->response = nim->cm.response == NSS_CMN_RESPONSE_ACK ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	complete(&wait->complete);
+ }
+ 
+ /*
+@@ -65,41 +58,23 @@
+ nss_tx_status_t nss_if_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_if_msg *nim)
+ {
+ 	struct nss_if_msg request = *nim;
++	struct nss_if_wait wait;
+ 	nss_tx_status_t status;
+-	unsigned long waited;
+-
+-	mutex_lock(&nss_if_sync_mutex);
+-	reinit_completion(&nss_if_sync_complete);
+-	spin_lock_bh(&nss_if_sync_lock);
+-	if (!++nss_if.sequence)
+-		++nss_if.sequence;
+-	nss_if.cookie = nss_if.sequence;
+-	nss_if.interface = request.cm.interface;
+-	nss_if.type = request.cm.type;
+-	nss_if.response = NSS_TX_FAILURE;
+-	nss_if.pending = true;
++	uint32_t cookie = 0;
++	bool replied = false;
++
++	init_completion(&wait.complete);
++	wait.response = NSS_TX_FAILURE;
+ 	request.cm.cb = (nss_ptr_t)nss_if_callback;
+-	request.cm.app_data = nss_if.cookie;
+-	spin_unlock_bh(&nss_if_sync_lock);
+-
+-	status = nss_if_tx_msg(nss_ctx, &request);
+-	if (status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: nss_if_msg failed\n", nss_ctx);
+-		goto retire;
+-	}
+-
+-	waited = wait_for_completion_timeout(&nss_if_sync_complete,
+-					     msecs_to_jiffies(NSS_IF_TX_TIMEOUT));
+-	if (!waited)
+-		nss_warning("%px: nss_if tx failed due to timeout\n", nss_ctx);
+-retire:
+-	spin_lock_bh(&nss_if_sync_lock);
++	request.cm.app_data = (nss_ptr_t)&wait;
++	status = nss_if_tx_msg_tracked(nss_ctx, &request, &cookie);
+ 	if (status == NSS_TX_SUCCESS)
+-		status = nss_if.response;
+-	nss_if.pending = false;
+-	nss_if.cookie = 0;
+-	spin_unlock_bh(&nss_if_sync_lock);
+-	mutex_unlock(&nss_if_sync_mutex);
++		replied = wait_for_completion_timeout(&wait.complete,
++					msecs_to_jiffies(NSS_IF_TX_TIMEOUT)) != 0;
++	if (cookie)
++		nss_if_cancel_msg(cookie);
++	if (status == NSS_TX_SUCCESS)
++		status = (replied || completion_done(&wait.complete)) ? wait.response : NSS_TX_FAILURE;
+ 	return status;
+ }
+ EXPORT_SYMBOL(nss_if_msg_sync);
+@@ -117,7 +92,7 @@
+ 	/*
+ 	 * We only support base class messages with this interface
+ 	 */
+-	if (ncm->type > NSS_IF_MAX_MSG_TYPES) {
++	if (ncm->type >= NSS_IF_MAX_MSG_TYPES) {
+ 		nss_warning("%px: message type out of range: %d", nss_ctx, ncm->type);
+ 		return;
+ 	}
+@@ -141,9 +116,9 @@
+ 	/*
+ 	 * Trace messages.
+ 	 */
++	if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_BASE_IF, NULL))
++		return;
+ 	nss_if_log_rx_msg(nim);
+-	if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_BASE_IF, NULL))
+-		return;
+ 
+ 	/*
+ 	 * Do we have a callback?
+@@ -182,40 +157,7 @@
+  */
+ nss_tx_status_t nss_if_tx_msg_with_size(struct nss_ctx_instance *nss_ctx, struct nss_if_msg *nim, uint32_t size)
+ {
+-	struct nss_cmn_msg *ncm = &nim->cm;
+-	struct net_device *dev;
+-
+-	NSS_VERIFY_CTX_MAGIC(nss_ctx);
+-
+-	/*
+-	 * Sanity check the message
+-	 */
+-	if (ncm->type >= NSS_IF_MAX_MSG_TYPES) {
+-		nss_warning("%px: message type out of range: %d", nss_ctx, ncm->type);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * Sanity check the message for valid interfaces.
+-	 */
+-	if (ncm->interface < NSS_PHYSICAL_IF_START ||
+-		ncm->interface >= NSS_MAX_NET_INTERFACES ) {
+-		nss_warning("%px: Tx request for invalid interface: %d", nss_ctx, ncm->interface);
+-		return NSS_TX_FAILURE_BAD_PARAM;
+-	}
+-
+-	/*
+-	 * Trace messages.
+-	 */
+-	nss_if_log_tx_msg(nim);
+-
+-	dev = nss_ctx->subsys_dp_register[ncm->interface].ndev;
+-	if (!dev) {
+-		nss_warning("%px: Unregister interface %d: no context", nss_ctx, ncm->interface);
+-		return NSS_TX_FAILURE_BAD_PARAM;
+-	}
+-
+-	return nss_core_send_cmd(nss_ctx, nim, sizeof(*nim), size);
++	return nss_if_tx_msg_with_size_tracked(nss_ctx, nim, size, NULL);
+ }
+ EXPORT_SYMBOL(nss_if_tx_msg_with_size);
+ 
+@@ -225,18 +167,20 @@
+ nss_tx_status_t nss_if_tx_msg_with_size_tracked(struct nss_ctx_instance *ctx,
+ 		struct nss_if_msg *msg, uint32_t buffer_size, uint32_t *cookie)
+ {
++	uint64_t generation;
++
+ 	if (cookie)
+ 		*cookie = 0;
+ 	NSS_VERIFY_CTX_MAGIC(ctx);
+ 	if (msg->cm.type >= NSS_IF_MAX_MSG_TYPES ||
+ 	    msg->cm.interface < NSS_PHYSICAL_IF_START ||
+-	    msg->cm.interface >= NSS_MAX_NET_INTERFACES ||
+-	    !ctx->subsys_dp_register[msg->cm.interface].ndev)
++	    msg->cm.interface >= NSS_MAX_NET_INTERFACES)
+ 		return NSS_TX_FAILURE_BAD_PARAM;
+-	if (!nss_control_open(ctx, NSS_CONTROL_BASE_IF, msg->cm.interface))
++	generation = nss_control_base_lease(ctx, msg->cm.interface);
++	if (!generation)
+ 		return NSS_TX_FAILURE_NOT_READY;
+-	return nss_control_send(ctx, msg, sizeof(*msg), buffer_size,
+-			NSS_CONTROL_BASE_IF, cookie);
++	nss_if_log_tx_msg(msg);
++	return nss_control_base_send(ctx, msg, sizeof(*msg), buffer_size, generation, cookie);
+ }
+ EXPORT_SYMBOL(nss_if_tx_msg_with_size_tracked);
+ 
+--- a/nss_if_log.c
++++ b/nss_if_log.c
+@@ -296,12 +296,70 @@
+ 	nss_trace("%px: NSS interface reset nexthop message \n", nim);
+ }
+ 
++/* Replies need not echo a body. Bound every field read by the verbose logger. */
++static bool nss_if_log_has_payload(struct nss_if_msg *nim)
++{
++	uint32_t minimum;
++
++	switch (nim->cm.type) {
++	case NSS_IF_OPEN:
++		minimum = sizeof(nim->msg.open);
++		break;
++	case NSS_IF_LINK_STATE_NOTIFY:
++		minimum = sizeof(nim->msg.link_state_notify);
++		break;
++	case NSS_IF_MTU_CHANGE:
++		minimum = sizeof(nim->msg.mtu_change);
++		break;
++	case NSS_IF_MAC_ADDR_SET:
++		minimum = sizeof(nim->msg.mac_address_set);
++		break;
++	case NSS_IF_STATS:
++		minimum = sizeof(nim->msg.stats);
++		break;
++	case NSS_IF_ISHAPER_ASSIGN:
++	case NSS_IF_BSHAPER_ASSIGN:
++		minimum = sizeof(nim->msg.shaper_assign);
++		break;
++	case NSS_IF_ISHAPER_UNASSIGN:
++	case NSS_IF_BSHAPER_UNASSIGN:
++		minimum = sizeof(nim->msg.shaper_unassign);
++		break;
++	case NSS_IF_ISHAPER_CONFIG:
++	case NSS_IF_BSHAPER_CONFIG:
++		minimum = offsetof(struct nss_if_shaper_configure, config.response_type) +
++			  sizeof(nim->msg.shaper_configure.config.response_type);
++		break;
++	case NSS_IF_PAUSE_ON_OFF:
++		minimum = sizeof(nim->msg.pause_on_off);
++		break;
++	case NSS_IF_VSI_ASSIGN:
++		minimum = sizeof(nim->msg.vsi_assign);
++		break;
++	case NSS_IF_VSI_UNASSIGN:
++		minimum = sizeof(nim->msg.vsi_unassign);
++		break;
++	case NSS_IF_SET_NEXTHOP:
++		minimum = sizeof(nim->msg.set_nexthop);
++		break;
++	case NSS_IF_SET_IGS_NODE:
++	case NSS_IF_CLEAR_IGS_NODE:
++		minimum = sizeof(nim->msg.config_igs);
++		break;
++	default:
++		return true;
++	}
++	return nim->cm.len >= minimum;
++}
++
+ /*
+  * nss_if_log_verbose()
+  *	Log message contents.
+  */
+ static void nss_if_log_verbose(struct nss_if_msg *nim)
+ {
++	if (!nss_if_log_has_payload(nim))
++		return;
+ 	nss_trace("NSS interface number: %u\n", nim->cm.interface);
+ 
+ 	switch (nim->cm.type) {
+@@ -384,7 +442,8 @@
+  */
+ void nss_if_log_rx_msg(struct nss_if_msg *nim)
+ {
+-	if (nim->cm.response >= NSS_CMN_RESPONSE_LAST) {
++	if (nim->cm.type >= NSS_IF_MAX_MSG_TYPES ||
++	    nim->cm.response >= NSS_CMN_RESPONSE_LAST) {
+ 		nss_info("%px: Invalid response\n", nim);
+ 		return;
+ 	}
+--- a/nss_init.c
++++ b/nss_init.c
+@@ -114,6 +114,9 @@
+ struct nss_cmd_buffer nss_cmd_buf;
+ struct nss_runtime_sampling nss_runtime_samples;
+ struct workqueue_struct *nss_wq;
++static bool nss_globals_initialized;
++static bool nss_driver_registered;
++static void nss_cleanup_globals(void);
+ 
+ /*
+  * Work Queue to handle messages to Kernel
+@@ -159,8 +162,7 @@
+ 	if (nss_dev->id < 0 || nss_dev->id >= nss_top->num_nss)
+ 		return;
+ 
+-	if (nss_top->hal_ops->core_halt)
+-		nss_top->hal_ops->core_halt(&nss_top->nss[nss_dev->id]);
++	nss_hal_shutdown(&nss_top->nss[nss_dev->id]);
+ }
+ #endif
+ 
+@@ -705,6 +707,7 @@
+  */
+ static int __init nss_init(void)
+ {
++	int ret;
+ #if defined(NSS_DRV_POINT_OFFLOAD)
+ 	struct device_node *pof = NULL;
+ #endif
+@@ -839,6 +842,18 @@
+ 	spin_lock_init(&(nss_top_main.lock));
+ 	spin_lock_init(&(nss_top_main.stats_lock));
+ 	mutex_init(&(nss_top_main.wq_lock));
++
++	nss_wq = create_workqueue("nss_freq_queue");
++	if (!nss_wq) {
++		ret = -ENOMEM;
++		goto err_data_plane_work;
++	}
++	ret = nss_coredump_init_delay_work();
++	if (ret) {
++		destroy_workqueue(nss_wq);
++		nss_wq = NULL;
++		goto err_data_plane_work;
++	}
+ 
+ 	/*
+ 	 * Enable NSS statistics
+@@ -926,7 +941,6 @@
+ 	/*
+ 	 * Initial Workqueue
+ 	 */
+-	nss_wq = create_workqueue("nss_freq_queue");
+ 
+ #if (NSS_PM_SUPPORT == 1)
+ 	/*
+@@ -952,7 +966,6 @@
+ 	 * register panic handler and timeout control
+ 	 */
+ 	nss_coredump_notify_register();
+-	nss_coredump_init_delay_work();
+ 
+ #ifdef NSS_DRV_CAPWAP_ENABLE
+ 	/*
+@@ -1017,15 +1030,34 @@
+ 	/*
+ 	 * Register platform_driver
+ 	 */
+-	return platform_driver_register(&nss_driver);
++	nss_globals_initialized = true;
++	ret = platform_driver_register(&nss_driver);
++	if (ret) {
++		nss_cleanup_globals();
++		return ret;
++	}
++	nss_driver_registered = true;
++	return 0;
++
++err_data_plane_work:
++#ifdef NSS_DATA_PLANE_LITE_SUPPORT
++	nss_data_plane_lite_destroy_delay_work();
++#endif
++#ifdef NSS_DATA_PLANE_GENERIC_SUPPORT
++	nss_data_plane_destroy_delay_work();
++#endif
++	return ret;
+ }
+ 
+ /*
+  * nss_cleanup()
+  *	Unregisters nss driver
+  */
+-static void __exit nss_cleanup(void)
+-{
++static void nss_cleanup_globals(void)
++{
++	if (!nss_globals_initialized)
++		return;
++	nss_globals_initialized = false;
+ 	nss_info("Exit NSS driver");
+ 
+ #ifdef NSS_DRV_RMNET_ENABLE
+@@ -1107,7 +1139,10 @@
+ 	nss_ppe_free();
+ #endif
+ 
+-	platform_driver_unregister(&nss_driver);
++	if (nss_driver_registered) {
++		platform_driver_unregister(&nss_driver);
++		nss_driver_registered = false;
++	}
+ 
+ 	/*
+ 	 * The debugfs tree is created at init but nss_stats_clean() only runs
+@@ -1121,6 +1156,15 @@
+ 	 * the coredump wait workqueue registered at init.
+ 	 */
+ 	nss_coredump_notify_unregister();
++	if (nss_wq) {
++		destroy_workqueue(nss_wq);
++		nss_wq = NULL;
++	}
++}
++
++static void __exit nss_cleanup(void)
++{
++	nss_cleanup_globals();
+ }
+ 
+ module_init(nss_init);
+--- a/nss_ipv4.c
++++ b/nss_ipv4.c
+@@ -12,6 +12,7 @@
+  */
+ #include <linux/sysctl.h>
+ #include "nss_dscp_map.h"
++#include "nss_control.h"
+ #include "nss_ipv4_stats.h"
+ #include "nss_ipv4_strings.h"
+ 
+@@ -102,7 +103,36 @@
+ 	/*
+ 	 * Trace messages.
+ 	 */
+-	nss_ipv4_log_rx_msg(nim);
++	if (ncm->type == NSS_IPV4_TX_RPS_HASH_BITMAP_CFG_MSG &&
++	    ncm->response != NSS_CMN_RESPONSE_NOTIFY) {
++		if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_RPS, NULL))
++			return;
++	}
++	/* Validate the actual receive geometry before logging or reading stats.
++	 * Firmware may retain the request length in SYNC_MANY responses.
++	 */
++	{
++		u32 required = sizeof(*ncm);
++		u32 actual = nss_core_rx_msg_buf_len(nss_ctx);
++
++		switch (ncm->type) {
++		case NSS_IPV4_RX_NODE_STATS_SYNC_MSG:
++			required = offsetof(struct nss_ipv4_msg, msg.node_stats) +
++				   sizeof(nim->msg.node_stats);
++			break;
++		case NSS_IPV4_RX_CONN_STATS_SYNC_MSG:
++			required = offsetof(struct nss_ipv4_msg, msg.conn_stats) +
++				   sizeof(nim->msg.conn_stats);
++			break;
++		case NSS_IPV4_TX_CONN_STATS_SYNC_MANY_MSG:
++			required = offsetof(struct nss_ipv4_msg, msg.conn_stats_many.conn_sync);
++			break;
++		}
++		if (actual < required)
++			return;
++		if (actual >= sizeof(*nim))
++			nss_ipv4_log_rx_msg(nim);
++	}
+ 
+ 	switch (nim->cm.type) {
+ 	case NSS_IPV4_RX_NODE_STATS_SYNC_MSG:
+@@ -132,13 +162,13 @@
+ 		 * test of its own.
+ 		 */
+ 		uint32_t hdr = offsetof(struct nss_ipv4_msg, msg.conn_stats_many.conn_sync);
+-		uint32_t buf = nss_ctx->rx_msg_buf_len;
++		uint32_t buf = nss_core_rx_msg_buf_len(nss_ctx);
+ 		uint32_t max = (buf < hdr) ? 0 : (buf - hdr) / sizeof(struct nss_ipv4_conn_sync);
+ 
+ 		if (nim->msg.conn_stats_many.count > max) {
+ 			pr_warn_ratelimited("%px: conn_sync_many count %u exceeds buffer capacity %u\n",
+ 					nss_ctx, nim->msg.conn_stats_many.count, max);
+-			nim->msg.conn_stats_many.count = max;
++			return;
+ 		}
+ 
+ 		/*
+--- a/nss_ipv6.c
++++ b/nss_ipv6.c
+@@ -20,6 +20,7 @@
+  */
+ #include "linux/ipv6.h"
+ #include <nss_core.h>
++#include "nss_control.h"
+ #include "nss_dscp_map.h"
+ #include "nss_ipv6_stats.h"
+ #include "nss_ipv6_strings.h"
+@@ -97,7 +98,36 @@
+ 	/*
+ 	 * Trace messages.
+ 	 */
+-	nss_ipv6_log_rx_msg(nim);
++	if (ncm->type == NSS_IPV6_TX_RPS_HASH_BITMAP_CFG_MSG &&
++	    ncm->response != NSS_CMN_RESPONSE_NOTIFY) {
++		if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_RPS, NULL))
++			return;
++	}
++	/* Validate the actual receive geometry before logging or reading stats.
++	 * Firmware may retain the request length in SYNC_MANY responses.
++	 */
++	{
++		u32 required = sizeof(*ncm);
++		u32 actual = nss_core_rx_msg_buf_len(nss_ctx);
++
++		switch (ncm->type) {
++		case NSS_IPV6_RX_NODE_STATS_SYNC_MSG:
++			required = offsetof(struct nss_ipv6_msg, msg.node_stats) +
++				   sizeof(nim->msg.node_stats);
++			break;
++		case NSS_IPV6_RX_CONN_STATS_SYNC_MSG:
++			required = offsetof(struct nss_ipv6_msg, msg.conn_stats) +
++				   sizeof(nim->msg.conn_stats);
++			break;
++		case NSS_IPV6_TX_CONN_STATS_SYNC_MANY_MSG:
++			required = offsetof(struct nss_ipv6_msg, msg.conn_stats_many.conn_sync);
++			break;
++		}
++		if (actual < required)
++			return;
++		if (actual >= sizeof(*nim))
++			nss_ipv6_log_rx_msg(nim);
++	}
+ 
+ 	/*
+ 	 * Handle deprecated messages. Eventually these messages should be removed.
+@@ -130,13 +160,13 @@
+ 		 * test of its own.
+ 		 */
+ 		uint32_t hdr = offsetof(struct nss_ipv6_msg, msg.conn_stats_many.conn_sync);
+-		uint32_t buf = nss_ctx->rx_msg_buf_len;
++		uint32_t buf = nss_core_rx_msg_buf_len(nss_ctx);
+ 		uint32_t max = (buf < hdr) ? 0 : (buf - hdr) / sizeof(struct nss_ipv6_conn_sync);
+ 
+ 		if (nim->msg.conn_stats_many.count > max) {
+ 			pr_warn_ratelimited("%px: conn_sync_many count %u exceeds buffer capacity %u\n",
+ 					nss_ctx, nim->msg.conn_stats_many.count, max);
+-			nim->msg.conn_stats_many.count = max;
++			return;
+ 		}
+ 
+ 		/*
+--- a/nss_log.c
++++ b/nss_log.c
+@@ -403,6 +403,13 @@
+ 	void *addr = NULL;
+ 	nss_tx_status_t status;
+ 
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++	/* Keep the boot meminfo ring. A live replacement has no proven DMA
++	 * fence on timeout and also races coredump readers of the old ring.
++	 */
++	return false;
++#endif
++
+ 	if (nss_id >= nss_top_main.num_nss) {
+ 		return false;
+ 	}
+@@ -536,6 +543,11 @@
+ 	int core_status;
+ 	int i;
+ 
++#if defined(NSS_HAL_IPQ50XX_SUPPORT)
++	if (write)
++		return -EOPNOTSUPP;
++#endif
++
+ 	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
+ 	if (ret)  {
+ 		return ret;
+--- a/nss_n2h.c
++++ b/nss_n2h.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ #include "nss_n2h_stats.h"
+ #include "nss_n2h_strings.h"
+ #include "nss_drv_strings.h"
+@@ -91,6 +92,12 @@
+ 		return;
+ 	}
+ 
++	if ((ncm->type == NSS_TX_METADATA_TYPE_N2H_RPS_CFG ||
++	     ncm->type == NSS_TX_METADATA_TYPE_N2H_RPS_PRI_MAP_CFG) &&
++	    ncm->response != NSS_CMN_RESPONSE_NOTIFY) {
++		if (nss_control_receive(nss_ctx, ncm, NSS_CONTROL_RPS, NULL))
++			return;
++	}
+ 	switch (nnm->cm.type) {
+ 	case NSS_TX_METADATA_TYPE_N2H_RPS_CFG:
+ 		nss_info("NSS N2H rps_en %d \n",nnm->msg.rps_cfg.enable);
+--- a/nss_rps.c
++++ b/nss_rps.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ 
+ #define NSS_RPS_MAX_CORE_HASH_BITMAP  ((1 << (NSS_HOST_CORES)) - 1)
+ 			/**< Maximum value that when all cores are available. */
+@@ -43,15 +44,45 @@
+ /*
+  * Private data structure.
+  */
+-struct nss_rps_pvt {
+-	struct semaphore sem;		/* Semaphore structure. */
+-	struct completion complete;	/* Completion structure. */
+-	int response;			/* Response from FW. */
+-	void *cb;			/* Original cb for sync msgs. */
+-	void *app_data;			/* Original app_data for sync msgs. */
+-};
+-
+-static struct nss_rps_pvt nss_rps_cfg_pvt;
++static DEFINE_MUTEX(nss_rps_mutex);
++static int nss_rps_uncertain;
++#define NSS_RPS_UNCERTAIN_ENABLE BIT(0)
++#define NSS_RPS_UNCERTAIN_HASH BIT(1)
++#define NSS_RPS_UNCERTAIN_PRI BIT(2)
++
++struct nss_rps_request { struct completion complete; int result; };
++
++static void nss_rps_response(void *data, struct nss_cmn_msg *cm)
++{
++	struct nss_rps_request *request = data;
++	request->result = cm->response == NSS_CMN_RESPONSE_ACK && !cm->error ? 0 : -EIO;
++	complete(&request->complete);
++}
++
++static int nss_rps_exchange(struct nss_ctx_instance *ctx, void *msg, u32 size)
++{
++	struct nss_rps_request request = { .result = -ETIMEDOUT };
++	struct nss_cmn_msg *cm = msg;
++	u32 cookie = 0;
++	unsigned long waited;
++	nss_tx_status_t status;
++
++	lockdep_assert_held(&nss_rps_mutex);
++	if (!nss_control_open(ctx, NSS_CONTROL_RPS, cm->interface))
++		return -ESHUTDOWN;
++	init_completion(&request.complete);
++	cm->cb = (nss_ptr_t)nss_rps_response;
++	cm->app_data = (nss_ptr_t)&request;
++	status = nss_control_send(ctx, msg, size, NSS_NBUF_PAYLOAD_SIZE,
++				  NSS_CONTROL_RPS, &cookie);
++	if (status != NSS_TX_SUCCESS)
++		return -EIO;
++	waited = wait_for_completion_timeout(&request.complete,
++					     msecs_to_jiffies(NSS_CONN_CFG_TIMEOUT));
++	nss_control_cancel(cookie);
++	return !waited && !completion_done(&request.complete) ? -ETIMEDOUT : request.result;
++}
++
+ 
+ /*
+  * nss_rps_pri_map_usage()
+@@ -167,106 +198,29 @@
+  * nss_rps_cfg_callback()
+  *	Callback function for rps configuration.
+  */
+-static void nss_rps_cfg_callback(void *app_data, struct nss_n2h_msg *nnm)
+-{
+-	struct nss_ctx_instance *nss_ctx =  (struct nss_ctx_instance *)app_data;
+-	if (nnm->cm.response != NSS_CMN_RESPONSE_ACK) {
+-
+-		/*
+-		 * Error, hence we are not updating the nss_rps
+-		 * Send a FAILURE to restore the current value
+-		 * to its previous state.
+-		 */
+-		nss_rps_cfg_pvt.response = NSS_FAILURE;
+-		complete(&nss_rps_cfg_pvt.complete);
+-		nss_warning("%px: RPS configuration failed : %d\n", nss_ctx,
+-								   nnm->cm.error);
+-		return;
+-	}
+-
+-	nss_info("%px: RPS configuration succeeded: %d\n", nss_ctx,
+-							   nnm->cm.error);
+-	nss_ctx->rps_en = nnm->msg.rps_cfg.enable;
+-	nss_rps_cfg_pvt.response = NSS_SUCCESS;
+-	complete(&nss_rps_cfg_pvt.complete);
+-}
++
+ 
+ /*
+  * nss_rps_pri_map_cfg_callback()
+  *	Callback function for rps pri map configuration.
+  */
+-static void nss_rps_pri_map_cfg_callback(void *app_data, struct nss_n2h_msg *nnm)
+-{
+-	if (nnm->cm.response != NSS_CMN_RESPONSE_ACK) {
+-
+-		/*
+-		 * Error, hence we are not updating the nss_pri_map
+-		 * Send a failure to restore the current value
+-		 * to its previous state.
+-		 */
+-		nss_rps_cfg_pvt.response = NSS_FAILURE;
+-		complete(&nss_rps_cfg_pvt.complete);
+-		nss_warning("%px: RPS pri_map configuration failed : %d\n",
+-				app_data, nnm->cm.error);
+-		return;
+-	}
+-
+-	nss_info("%px: RPS pri_map configuration succeeded: %d\n",
+-			app_data, nnm->cm.error);
+-
+-	nss_rps_cfg_pvt.response = NSS_SUCCESS;
+-	complete(&nss_rps_cfg_pvt.complete);
+-}
++
+ 
+ /*
+  * nss_rps_cfg()
+  *	Send Message to NSS to enable RPS.
+  */
+-static nss_tx_status_t nss_rps_cfg(struct nss_ctx_instance *nss_ctx, int enable_rps)
+-{
+-	struct nss_n2h_msg nnm;
+-	nss_tx_status_t nss_tx_status;
++static int nss_rps_cfg(struct nss_ctx_instance *ctx, int enable)
++{
++	struct nss_n2h_msg msg = {};
+ 	int ret;
+-
+-	down(&nss_rps_cfg_pvt.sem);
+-	nss_n2h_msg_init(&nnm, NSS_N2H_INTERFACE, NSS_TX_METADATA_TYPE_N2H_RPS_CFG,
+-			sizeof(struct nss_n2h_rps),
+-			nss_rps_cfg_callback,
+-			(void *)nss_ctx);
+-
+-	nnm.msg.rps_cfg.enable = enable_rps;
+-
+-	nss_tx_status = nss_n2h_tx_msg(nss_ctx, &nnm);
+-
+-	if (nss_tx_status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: nss_tx error setting rps\n", nss_ctx);
+-
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * Blocking call, wait till we get ACK for this msg.
+-	 */
+-	ret = wait_for_completion_timeout(&nss_rps_cfg_pvt.complete, msecs_to_jiffies(NSS_CONN_CFG_TIMEOUT));
+-	if (ret == 0) {
+-		nss_warning("%px: Waiting for ack timed out\n", nss_ctx);
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * ACK/NACK received from NSS FW
+-	 * If NACK: Handler function will restore nss_rps_config
+-	 * to previous state.
+-	 */
+-	if (NSS_FAILURE == nss_rps_cfg_pvt.response) {
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	up(&nss_rps_cfg_pvt.sem);
+-	return NSS_TX_SUCCESS;
++	nss_n2h_msg_init(&msg, NSS_N2H_INTERFACE, NSS_TX_METADATA_TYPE_N2H_RPS_CFG,
++			 sizeof(struct nss_n2h_rps), NULL, NULL);
++	msg.msg.rps_cfg.enable = enable;
++	ret = nss_rps_exchange(ctx, &msg, sizeof(msg));
++	if (!ret)
++		ctx->rps_en = enable;
++	return ret;
+ }
+ 
+ #ifdef NSS_DRV_IPV4_ENABLE
+@@ -274,29 +228,13 @@
+  * nss_rps_ipv4_hash_bitmap_cfg()
+  *	Send Message to NSS to configure hash_bitmap.
+  */
+-static nss_tx_status_t nss_rps_ipv4_hash_bitmap_cfg(struct nss_ctx_instance *nss_ctx, int hash_bitmap)
+-{
+-	struct nss_ipv4_msg nim;
+-	nss_tx_status_t nss_tx_status;
+-
+-	down(&nss_rps_cfg_pvt.sem);
+-	nss_ipv4_msg_init(&nim, NSS_IPV4_RX_INTERFACE, NSS_IPV4_TX_RPS_HASH_BITMAP_CFG_MSG,
+-			sizeof(struct nss_ipv4_rps_hash_bitmap_cfg_msg),
+-			  NULL, NULL);
+-
+-	nim.msg.rps_hash_bitmap.hash_bitmap = hash_bitmap;
+-
+-	nss_tx_status = nss_ipv4_tx_sync(nss_ctx, &nim);
+-
+-	if (nss_tx_status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: nss_tx error setting rps\n", nss_ctx);
+-
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	up(&nss_rps_cfg_pvt.sem);
+-	return NSS_TX_SUCCESS;
++static int nss_rps_ipv4_hash_bitmap_cfg(struct nss_ctx_instance *ctx, int bitmap)
++{
++	struct nss_ipv4_msg msg = {};
++	nss_ipv4_msg_init(&msg, NSS_IPV4_RX_INTERFACE, NSS_IPV4_TX_RPS_HASH_BITMAP_CFG_MSG,
++			   sizeof(msg.msg.rps_hash_bitmap), NULL, NULL);
++	msg.msg.rps_hash_bitmap.hash_bitmap = bitmap;
++	return nss_rps_exchange(ctx, &msg, sizeof(msg));
+ }
+ #endif
+ 
+@@ -305,29 +243,13 @@
+  * nss_rps_ipv6_hash_bitmap_cfg()
+  *	Send Message to NSS to configure hash_bitmap.
+  */
+-static nss_tx_status_t nss_rps_ipv6_hash_bitmap_cfg(struct nss_ctx_instance *nss_ctx, int hash_bitmap)
+-{
+-	struct nss_ipv6_msg nim;
+-	nss_tx_status_t nss_tx_status;
+-
+-	down(&nss_rps_cfg_pvt.sem);
+-	nss_ipv6_msg_init(&nim, NSS_IPV6_RX_INTERFACE, NSS_IPV6_TX_RPS_HASH_BITMAP_CFG_MSG,
+-			sizeof(struct nss_ipv4_rps_hash_bitmap_cfg_msg),
+-			  NULL, NULL);
+-
+-	nim.msg.rps_hash_bitmap.hash_bitmap = hash_bitmap;
+-
+-	nss_tx_status = nss_ipv6_tx_sync(nss_ctx, &nim);
+-
+-	if (nss_tx_status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: nss_tx error setting rps\n", nss_ctx);
+-
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	up(&nss_rps_cfg_pvt.sem);
+-	return NSS_TX_SUCCESS;
++static int nss_rps_ipv6_hash_bitmap_cfg(struct nss_ctx_instance *ctx, int bitmap)
++{
++	struct nss_ipv6_msg msg = {};
++	nss_ipv6_msg_init(&msg, NSS_IPV6_RX_INTERFACE, NSS_IPV6_TX_RPS_HASH_BITMAP_CFG_MSG,
++			   sizeof(msg.msg.rps_hash_bitmap), NULL, NULL);
++	msg.msg.rps_hash_bitmap.hash_bitmap = bitmap;
++	return nss_rps_exchange(ctx, &msg, sizeof(msg));
+ }
+ #endif
+ 
+@@ -335,59 +257,15 @@
+  * nss_rps_pri_map_cfg()
+  *	Send Message to NSS to configure pri_map.
+  */
+-static nss_tx_status_t nss_rps_pri_map_cfg(struct nss_ctx_instance *nss_ctx, int *pri_map)
+-{
+-	struct nss_n2h_msg nnm;
+-	struct nss_n2h_rps_pri_map *rps_pri_map;
+-	nss_tx_status_t nss_tx_status;
+-	int ret, i;
+-
+-	down(&nss_rps_cfg_pvt.sem);
+-	nss_n2h_msg_init(&nnm, NSS_N2H_INTERFACE, NSS_TX_METADATA_TYPE_N2H_RPS_PRI_MAP_CFG,
+-			sizeof(struct nss_n2h_rps_pri_map),
+-			nss_rps_pri_map_cfg_callback,
+-			(void *)nss_ctx);
+-
+-	rps_pri_map = &nnm.msg.rps_pri_map;
+-
+-	/*
+-	 * Fill entries at pri_map.
+-	 */
+-	for (i = 0; i < NSS_MAX_NUM_PRI; i++) {
+-		rps_pri_map->pri_map[i] = pri_map[i];
+-	}
+-
+-	nss_tx_status = nss_n2h_tx_msg(nss_ctx, &nnm);
+-
+-	if (nss_tx_status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: nss_tx error setting rps\n", nss_ctx);
+-
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * Blocking call, wait till we get ACK for this msg.
+-	 */
+-	ret = wait_for_completion_timeout(&nss_rps_cfg_pvt.complete, msecs_to_jiffies(NSS_CONN_CFG_TIMEOUT));
+-	if (ret == 0) {
+-		nss_warning("%px: Waiting for ack timed out\n", nss_ctx);
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	/*
+-	 * ACK/NACK received from NSS FW
+-	 * If NACK: Handler function will restore nss_rps_config
+-	 * to previous state.
+-	 */
+-	if (NSS_FAILURE == nss_rps_cfg_pvt.response) {
+-		up(&nss_rps_cfg_pvt.sem);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	up(&nss_rps_cfg_pvt.sem);
+-	return NSS_TX_SUCCESS;
++static int nss_rps_pri_map_cfg(struct nss_ctx_instance *ctx, const int *map)
++{
++	struct nss_n2h_msg msg = {};
++	int i;
++	nss_n2h_msg_init(&msg, NSS_N2H_INTERFACE, NSS_TX_METADATA_TYPE_N2H_RPS_PRI_MAP_CFG,
++			 sizeof(struct nss_n2h_rps_pri_map), NULL, NULL);
++	for (i = 0; i < NSS_MAX_NUM_PRI; i++)
++		msg.msg.rps_pri_map.pri_map[i] = map[i];
++	return nss_rps_exchange(ctx, &msg, sizeof(msg));
+ }
+ 
+ /*
+@@ -395,56 +273,35 @@
+  *	Enable NSS RPS.
+  */
+ static int nss_rps_cfg_handler(compat_const struct ctl_table *ctl, int write,
+-				void *buffer, size_t *lenp, loff_t *ppos)
+-{
+-	struct nss_top_instance *nss_top = &nss_top_main;
+-	struct nss_ctx_instance *nss_ctx;
+-	int ret, ret_rps, current_state, i;
+-	current_state = nss_rps_config;
+-	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
+-
+-	if (ret != NSS_SUCCESS) {
+-		return ret;
+-	}
+-
+-	if (!write) {
+-		return ret;
+-	}
+-
+-	if (nss_rps_config != 0 && nss_rps_config != 1) {
+-		nss_rps_config = current_state;
+-		nss_info_always("Invalid input value. Valid values are 0 and 1\n");
+-		return -EINVAL;
+-	}
+-
+-	if (nss_rps_config == 0) {
+-		if (current_state) {
+-			/* Firmware queues cannot be disabled without reinitialization. */
+-			nss_rps_config = current_state;
+-			nss_info_always("Runtime disabling of NSS RPS not supported\n");
+-			return -EOPNOTSUPP;
++			     void *buffer, size_t *lenp, loff_t *ppos)
++{
++	struct ctl_table local = *ctl;
++	int value, ret, i;
++	mutex_lock(&nss_rps_mutex);
++	value = nss_rps_config;
++	local.data = &value;
++	ret = proc_dointvec(&local, write, buffer, lenp, ppos);
++	if (ret || !write)
++		goto out;
++	if (value != 0 && value != 1) { ret = -EINVAL; goto out; }
++	if (!value) {
++		ret = nss_rps_config || (nss_rps_uncertain & NSS_RPS_UNCERTAIN_ENABLE) ?
++		      -EOPNOTSUPP : 0;
++		goto out;
++	}
++	for (i = 0; i < nss_top_main.num_nss; i++) {
++		ret = nss_rps_cfg(&nss_top_main.nss[i], value);
++		if (ret) {
++			if (i || ret == -ETIMEDOUT)
++				nss_rps_uncertain |= NSS_RPS_UNCERTAIN_ENABLE;
++			goto out;
+ 		}
+-		return NSS_SUCCESS;
+-	}
+-
+-	for (i = 0; i < nss_top_main.num_nss; i++) {
+-		nss_ctx = &nss_top->nss[i];
+-		nss_info("Enabling NSS RPS\n");
+-		ret_rps = nss_rps_cfg(nss_ctx, 1);
+-
+-		/*
+-		 * In here, we also need to revert the state of the previously enabled cores.
+-		 * However, runtime disabling is currently not supported since queues are not
+-		 * flushed in NSS FW.
+-		 * TODO: Flush queues in NSS FW.
+-		 */
+-		if (ret_rps != NSS_SUCCESS) {
+-			nss_warning("%px: rps enabling failed\n", nss_ctx);
+-			nss_rps_config = current_state;
+-			return -EIO;
+-		}
+-	}
+-	return NSS_SUCCESS;
++	}
++	nss_rps_config = value;
++	nss_rps_uncertain &= ~NSS_RPS_UNCERTAIN_ENABLE;
++out:
++	mutex_unlock(&nss_rps_mutex);
++	return ret;
+ }
+ 
+ /*
+@@ -452,104 +309,84 @@
+  *	Configure NSS rps_hash_bitmap
+  */
+ static int nss_rps_hash_bitmap_cfg_handler(compat_const struct ctl_table *ctl, int write,
+-				void *buffer, size_t *lenp, loff_t *ppos)
+-{
+-	struct nss_top_instance *nss_top = &nss_top_main;
+-	struct nss_ctx_instance *nss_ctx __attribute__((unused)) = &nss_top->nss[0];
+-	int ret, current_state;
+-
+-	current_state = nss_rps_hash_bitmap;
+-	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
+-
+-	if (ret != NSS_SUCCESS) {
+-		nss_rps_hash_bitmap = current_state;
+-		return ret;
+-	}
+-
+-	if (!write) {
+-		return ret;
+-	}
+-
+-#if !defined(NSS_DRV_IPV4_ENABLE) || !defined(NSS_DRV_IPV6_ENABLE)
+-	nss_rps_hash_bitmap = current_state;
+-	nss_info_always("%px: Feature is not supported\n", nss_ctx);
+-	return -EOPNOTSUPP;
++					 void *buffer, size_t *lenp, loff_t *ppos)
++{
++	struct ctl_table local = *ctl;
++	int value, ret;
++#if defined(NSS_DRV_IPV4_ENABLE) && defined(NSS_DRV_IPV6_ENABLE)
++	int old;
++#endif
++	mutex_lock(&nss_rps_mutex);
++	value = nss_rps_hash_bitmap;
++#if defined(NSS_DRV_IPV4_ENABLE) && defined(NSS_DRV_IPV6_ENABLE)
++	old = value;
++#endif
++	local.data = &value;
++	ret = proc_dointvec(&local, write, buffer, lenp, ppos);
++	if (ret || !write)
++		goto out;
++	if (value < 0 || value > NSS_RPS_MAX_CORE_HASH_BITMAP) { ret = -EINVAL; goto out; }
++#if defined(NSS_DRV_IPV4_ENABLE) && defined(NSS_DRV_IPV6_ENABLE)
++	ret = nss_rps_ipv4_hash_bitmap_cfg(&nss_top_main.nss[0], value);
++	if (ret) {
++		if (ret == -ETIMEDOUT)
++			nss_rps_uncertain |= NSS_RPS_UNCERTAIN_HASH;
++		goto out;
++	}
++	ret = nss_rps_ipv6_hash_bitmap_cfg(&nss_top_main.nss[0], value);
++	if (ret) {
++		int rollback = nss_rps_ipv4_hash_bitmap_cfg(&nss_top_main.nss[0], old);
++		if (ret == -ETIMEDOUT || rollback)
++			nss_rps_uncertain |= NSS_RPS_UNCERTAIN_HASH;
++		goto out;
++	}
++	nss_rps_hash_bitmap = value;
++	nss_rps_uncertain &= ~NSS_RPS_UNCERTAIN_HASH;
+ #else
+-	if (nss_rps_hash_bitmap >= 0 &&
+-	    nss_rps_hash_bitmap <= NSS_RPS_MAX_CORE_HASH_BITMAP) {
+-		nss_info("Configuring NSS RPS hash_bitmap\n");
+-#ifdef NSS_DRV_IPV4_ENABLE
+-		{
+-			int ret_ipv4;
+-			ret_ipv4 = nss_rps_ipv4_hash_bitmap_cfg(nss_ctx, nss_rps_hash_bitmap);
+-
+-			if (ret_ipv4 != NSS_SUCCESS) {
+-				nss_warning("%px: ipv4 hash_bitmap config message failed\n", nss_ctx);
+-				nss_rps_hash_bitmap = current_state;
+-				return -EIO;
+-			}
+-		}
+-#endif
+-#ifdef NSS_DRV_IPV6_ENABLE
+-		{
+-			int ret_ipv6;
+-			ret_ipv6 = nss_rps_ipv6_hash_bitmap_cfg(nss_ctx, nss_rps_hash_bitmap);
+-
+-			if (ret_ipv6 != NSS_SUCCESS) {
+-				nss_warning("%px: ipv6 hash_bitmap config message failed\n", nss_ctx);
+-				nss_rps_hash_bitmap = current_state;
+-				if (nss_rps_ipv4_hash_bitmap_cfg(nss_ctx, nss_rps_hash_bitmap) != NSS_SUCCESS) {
+-					nss_warning("%px: ipv4 and ipv6 have different hash_bitmaps.\n", nss_ctx);
+-				}
+-				return -EIO;
+-			}
+-		}
+-#endif
+-		return 0;
+-	}
+-
+-	nss_rps_hash_bitmap = current_state;
+-	nss_info_always("Invalid input value. Valid bitmaps are 0 through %d\n", NSS_RPS_MAX_CORE_HASH_BITMAP);
+-	return -EINVAL;
+-#endif
++	ret = -EOPNOTSUPP;
++#endif
++out:
++	mutex_unlock(&nss_rps_mutex);
++	return ret;
+ }
+ 
+ /* nss_rps_pri_map_cfg_handler()
+  *	Configure NSS rps_pri_map
+  */
+ static int nss_rps_pri_map_cfg_handler(compat_const struct ctl_table *ctl, int write,
+-				void *buffer, size_t *lenp, loff_t *ppos)
+-{
+-	struct nss_top_instance *nss_top = &nss_top_main;
+-	struct nss_ctx_instance *nss_ctx = &nss_top->nss[0];
+-
+-	int ret, ret_pri_map;
+-	struct nss_rps_pri_map_parse_data out, current_state;
++				     void *buffer, size_t *lenp, loff_t *ppos)
++{
++	struct nss_rps_pri_map_parse_data out;
++	int map[NSS_MAX_NUM_PRI], ret;
++	mutex_lock(&nss_rps_mutex);
+ 	if (!write) {
+-		return nss_rps_pri_map_print(buffer, lenp, ppos, nss_rps_pri_map);
+-	}
+-
++		ret = nss_rps_pri_map_print(buffer, lenp, ppos, nss_rps_pri_map);
++		goto unlock;
++	}
+ 	ret = nss_rps_pri_map_parse(buffer, lenp, &out);
+-
+-	if (ret != NSS_SUCCESS) {
+-		nss_rps_pri_map_usage();
+-		return ret;
+-	}
+-
+-	nss_info("Configuring NSS RPS Priority Map\n");
+-	current_state.pri = out.pri;
+-	current_state.core = nss_rps_pri_map[out.pri];
+-	nss_rps_pri_map[out.pri] = out.core;
+-	ret_pri_map = nss_rps_pri_map_cfg(nss_ctx, nss_rps_pri_map);
+-	if (ret_pri_map != NSS_SUCCESS) {
+-		nss_rps_pri_map[current_state.pri] = current_state.core;
+-		nss_warning("%px: pri_map config message failed\n", nss_ctx);
+-	}
+-
+-	return ret_pri_map == NSS_SUCCESS ? NSS_SUCCESS : -EIO;
++	if (ret) { nss_rps_pri_map_usage(); goto unlock; }
++	memcpy(map, nss_rps_pri_map, sizeof(map));
++	map[out.pri] = out.core;
++	ret = nss_rps_pri_map_cfg(&nss_top_main.nss[0], map);
++	if (!ret) {
++		memcpy(nss_rps_pri_map, map, sizeof(map));
++		nss_rps_uncertain &= ~NSS_RPS_UNCERTAIN_PRI;
++	} else if (ret == -ETIMEDOUT) {
++		nss_rps_uncertain |= NSS_RPS_UNCERTAIN_PRI;
++	}
++unlock:
++	mutex_unlock(&nss_rps_mutex);
++	return ret;
+ }
+ 
+ static struct ctl_table nss_rps_table[] = {
++	{
++		.procname = "uncertain",
++		.data = &nss_rps_uncertain,
++		.maxlen = sizeof(nss_rps_uncertain),
++		.mode = 0444,
++		.proc_handler = proc_dointvec,
++	},
+ 	{
+ 		.procname	= "enable",
+ 		.data		= &nss_rps_config,
+@@ -631,8 +468,6 @@
+ 	/*
+ 	 * rps sema init.
+ 	 */
+-	sema_init(&nss_rps_cfg_pvt.sem, 1);
+-	init_completion(&nss_rps_cfg_pvt.complete);
+ 
+ 	nss_rps_pri_map_init_handler();
+ 
+--- a/nss_wifi_ext_vdev.c
++++ b/nss_wifi_ext_vdev.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "nss_tx_rx_common.h"
++#include "nss_control.h"
+ #include "nss_wifi_ext_vdev_stats.h"
+ #include "nss_wifi_ext_vdev_log.h"
+ 
+@@ -25,13 +26,14 @@
+ /*
+  * Private data structure
+  */
+-static struct nss_wifi_ext_vdev_pvt {
+-	struct semaphore sem;
++static DEFINE_MUTEX(nss_wifi_ext_vdev_registration_lock);
++
++struct nss_wifi_ext_vdev_wait {
+ 	struct completion complete;
+-	int response;
+-	void *cb;
++	nss_tx_status_t response;
++	nss_wifi_ext_vdev_msg_callback_t cb;
+ 	void *app_data;
+-} wifi_ext_vdev_pvt;
++};
+ 
+ /*
+  * nss_wifi_ext_vdev_verify_if_num()
+@@ -39,7 +41,12 @@
+  */
+ static bool nss_wifi_ext_vdev_verify_if_num(uint32_t if_num)
+ {
+-	uint32_t type = nss_dynamic_interface_get_type(nss_wifi_ext_vdev_get_ctx(), if_num);
++	uint32_t type;
++
++	if (if_num < NSS_DYNAMIC_IF_START ||
++	    if_num >= NSS_DYNAMIC_IF_START + NSS_MAX_DYNAMIC_INTERFACES)
++		return false;
++	type = nss_dynamic_interface_get_type(nss_wifi_ext_vdev_get_ctx(), if_num);
+ 
+ 	switch (type) {
+ 	case NSS_DYNAMIC_INTERFACE_TYPE_WIFI_EXT_VDEV_WDS:
+@@ -50,6 +57,37 @@
+ 	}
+ }
+ 
++/* Only notifications and outbound commands require a complete body. ACK/NACK
++ * may consist solely of a common header; their identity is owned by the broker.
++ */
++static bool nss_wifi_ext_vdev_payload_valid(struct nss_wifi_ext_vdev_msg *msg)
++{
++	uint32_t minimum;
++
++	if (msg->cm.len > sizeof(msg->msg))
++		return false;
++	switch (msg->cm.type) {
++	case NSS_WIFI_EXT_VDEV_MSG_CONFIGURE_IF:
++		minimum = sizeof(msg->msg.cmsg);
++		break;
++	case NSS_WIFI_EXT_VDEV_MSG_CONFIGURE_WDS:
++		minimum = sizeof(msg->msg.wmsg);
++		break;
++	case NSS_WIFI_EXT_VDEV_SET_NEXT_HOP:
++		minimum = sizeof(msg->msg.wnhm);
++		break;
++	case NSS_WIFI_EXT_VDEV_MSG_STATS_SYNC:
++		minimum = sizeof(msg->msg.stats);
++		break;
++	case NSS_WIFI_EXT_VDEV_MSG_CONFIGURE_VLAN:
++		minimum = sizeof(msg->msg.vmsg);
++		break;
++	default:
++		return msg->cm.type < NSS_IF_MAX_MSG_TYPES;
++	}
++	return msg->cm.len >= minimum;
++}
++
+ /*
+  * nss_wifi_ext_vdev_handler()
+  *	Handle NSS -> HLOS messages for wifi_ext_vdev
+@@ -57,64 +95,47 @@
+ static void nss_wifi_ext_vdev_handler(struct nss_ctx_instance *nss_ctx, struct nss_cmn_msg *ncm, void *app_data)
+ {
+ 	struct nss_wifi_ext_vdev_msg *nwevm = (struct nss_wifi_ext_vdev_msg *)ncm;
+-	void *ctx;
+-
+ 	nss_wifi_ext_vdev_msg_callback_t cb;
+ 
+ 	NSS_VERIFY_CTX_MAGIC(nss_ctx);
+-	BUG_ON(!nss_wifi_ext_vdev_verify_if_num(ncm->interface));
+-
+-	/*
+-	 * Trace Messages
+-	 */
++	if (nss_ctx != nss_wifi_ext_vdev_get_ctx() ||
++	    !nss_wifi_ext_vdev_verify_if_num(ncm->interface) ||
++	    ncm->type >= NSS_WIFI_EXT_VDEV_MSG_MAX ||
++	    ncm->type == NSS_IF_MAX_MSG_TYPES ||
++	    ncm->response >= NSS_CMN_RESPONSE_LAST ||
++	    !READ_ONCE(nss_ctx->subsys_dp_register[ncm->interface].ndev))
++		return;
++
++	if (ncm->response != NSS_CMN_RESPONSE_NOTIFY) {
++		/* OPEN/CLOSE use base type numbers but belong to the EXT sender.
++		 * Independent shaper/SQM requests still belong to BASE_IF.
++		 */
++		if (ncm->len <= sizeof(nwevm->msg) &&
++		    nss_control_receive(nss_ctx, ncm, NSS_CONTROL_WIFI_EXT_VDEV, NULL))
++			return;
++		if (ncm->type < NSS_IF_MAX_MSG_TYPES)
++			nss_if_msg_handler(nss_ctx, ncm, app_data);
++		return;
++	}
++
++	if (ncm->type < NSS_IF_MAX_MSG_TYPES) {
++		if (ncm->len > sizeof(nwevm->msg))
++			return;
++		goto notify;
++	}
++	if (!nss_wifi_ext_vdev_payload_valid(nwevm))
++		return;
+ 	nss_wifi_ext_vdev_log_rx_msg(nwevm);
+-
+-	/*
+-	 * Is this a valid request/response packet?
+-	 */
+-	if (ncm->type >= NSS_WIFI_EXT_VDEV_MSG_MAX) {
+-		nss_warning("%px: received invalid message %d for WiFi extended VAP interface %d", nss_ctx, ncm->type, ncm->interface);
+-		return;
+-	}
+-
+-	if (nss_cmn_get_msg_len(ncm) > sizeof(struct nss_wifi_ext_vdev_msg)) {
+-		nss_warning("%px: wifi_ext_vdev message length is invalid: %d", nss_ctx, ncm->len);
+-		return;
+-	}
+-
+-	/*
+-	 * Check messages
+-	 */
+-	switch (nwevm->cm.type) {
+-	case NSS_WIFI_EXT_VDEV_MSG_STATS_SYNC:
++	nss_core_log_msg_failures(nss_ctx, ncm);
++	if (ncm->type == NSS_WIFI_EXT_VDEV_MSG_STATS_SYNC)
+ 		nss_wifi_ext_vdev_stats_sync(nss_ctx, &nwevm->msg.stats, ncm->interface);
+-		break;
+-	}
+-
+-	/*
+-	 * Update the callback and app_data for NOTIFY messages
+-	 */
+-	if (ncm->response == NSS_CMN_RESPONSE_NOTIFY) {
+-		ncm->cb = (nss_ptr_t)nss_core_get_msg_handler(nss_ctx, ncm->interface);
+-		ncm->app_data = (nss_ptr_t)nss_ctx->subsys_dp_register[ncm->interface].app_data;
+-	}
+-
+-	nss_core_log_msg_failures(nss_ctx, ncm);
+-
+-	/*
+-	 * callback
+-	 */
+-	cb = (nss_wifi_ext_vdev_msg_callback_t)ncm->cb;
+-	ctx = (void *)ncm->app_data;
+-
+-	/*
+-	 * call the callback
+-	 */
+-	if (!cb) {
+-		return;
+-	}
+-
+-	cb(ctx, ncm);
++notify:
++	/* Never execute callback pointers received from firmware notifications. */
++	cb = (nss_wifi_ext_vdev_msg_callback_t)nss_core_get_msg_handler(nss_ctx, ncm->interface);
++	ncm->cb = (nss_ptr_t)cb;
++	ncm->app_data = (nss_ptr_t)nss_ctx->subsys_dp_register[ncm->interface].app_data;
++	if (cb)
++		cb((void *)ncm->app_data, ncm);
+ }
+ 
+ /*
+@@ -133,25 +154,34 @@
+  * nss_wifi_ext_vdev_tx_msg()
+  *	Transmit a wifi vdev message to NSSFW
+  */
++nss_tx_status_t nss_wifi_ext_vdev_tx_msg_tracked(struct nss_ctx_instance *nss_ctx,
++			struct nss_wifi_ext_vdev_msg *msg, uint32_t *cookie)
++{
++	struct nss_cmn_msg *ncm = &msg->cm;
++
++	if (cookie)
++		*cookie = 0;
++	if (nss_ctx != nss_wifi_ext_vdev_get_ctx() ||
++	    !nss_wifi_ext_vdev_verify_if_num(ncm->interface) ||
++	    !nss_wifi_ext_vdev_payload_valid(msg))
++		return NSS_TX_FAILURE_BAD_PARAM;
++	nss_wifi_ext_vdev_log_tx_msg(msg);
++	return nss_control_send(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE,
++				NSS_CONTROL_WIFI_EXT_VDEV, cookie);
++}
++EXPORT_SYMBOL(nss_wifi_ext_vdev_tx_msg_tracked);
++
+ nss_tx_status_t nss_wifi_ext_vdev_tx_msg(struct nss_ctx_instance *nss_ctx, struct nss_wifi_ext_vdev_msg *msg)
+ {
+-	struct nss_cmn_msg *ncm = &msg->cm;
+-
+-	/*
+-	 * Trace Messages
+-	 */
+-	nss_wifi_ext_vdev_log_tx_msg(msg);
+-
+-	if (ncm->type >= NSS_WIFI_EXT_VDEV_MSG_MAX) {
+-		nss_warning("%px: wifi vdev message type out of range: %d", nss_ctx, ncm->type);
+-		return NSS_TX_FAILURE;
+-	}
+-
+-	BUG_ON(!nss_wifi_ext_vdev_verify_if_num(ncm->interface));
+-
+-	return nss_core_send_cmd(nss_ctx, msg, sizeof(*msg), NSS_NBUF_PAYLOAD_SIZE);
++	return nss_wifi_ext_vdev_tx_msg_tracked(nss_ctx, msg, NULL);
+ }
+ EXPORT_SYMBOL(nss_wifi_ext_vdev_tx_msg);
++
++void nss_wifi_ext_vdev_cancel_msg(uint32_t cookie)
++{
++	nss_control_cancel(cookie);
++}
++EXPORT_SYMBOL(nss_wifi_ext_vdev_cancel_msg);
+ 
+ /*
+  * nss_wifi_ext_vdev_callback()
+@@ -159,22 +189,16 @@
+  */
+ static void nss_wifi_ext_vdev_callback(void *app_data, struct nss_cmn_msg *ncm)
+ {
+-	nss_wifi_ext_vdev_msg_callback_t callback = (nss_wifi_ext_vdev_msg_callback_t)wifi_ext_vdev_pvt.cb;
+-	void *data = wifi_ext_vdev_pvt.app_data;
+-
+-	wifi_ext_vdev_pvt.response = NSS_TX_SUCCESS;
+-	wifi_ext_vdev_pvt.cb = NULL;
+-	wifi_ext_vdev_pvt.app_data = NULL;
+-
+-	if (ncm->response != NSS_CMN_RESPONSE_ACK) {
+-		nss_warning("WiFi extension vap Error response %d\n", ncm->response);
+-		wifi_ext_vdev_pvt.response = NSS_TX_FAILURE;
+-	}
+-
+-	if (callback) {
+-		callback(data, ncm);
+-	}
+-	complete(&wifi_ext_vdev_pvt.complete);
++	struct nss_wifi_ext_vdev_wait *wait = app_data;
++
++	wait->response = ncm->response == NSS_CMN_RESPONSE_ACK ?
++		NSS_TX_SUCCESS : NSS_TX_FAILURE;
++	if (wait->cb) {
++		ncm->cb = (nss_ptr_t)wait->cb;
++		ncm->app_data = (nss_ptr_t)wait->app_data;
++		wait->cb(wait->app_data, ncm);
++	}
++	complete(&wait->complete);
+ }
+ 
+ /*
+@@ -183,34 +207,28 @@
+  */
+ nss_tx_status_t nss_wifi_ext_vdev_tx_msg_sync(struct nss_ctx_instance *nss_ctx, struct nss_wifi_ext_vdev_msg *nwevm)
+ {
++	struct nss_wifi_ext_vdev_wait wait;
++	nss_ptr_t saved_cb = nwevm->cm.cb, saved_data = nwevm->cm.app_data;
+ 	nss_tx_status_t status;
+-	int ret = 0;
+-
+-	down(&wifi_ext_vdev_pvt.sem);
+-	wifi_ext_vdev_pvt.cb = (void *)nwevm->cm.cb;
+-	wifi_ext_vdev_pvt.app_data = (void *)nwevm->cm.app_data;
+-
++	uint32_t cookie = 0;
++	bool replied = false;
++
++	init_completion(&wait.complete);
++	wait.response = NSS_TX_FAILURE;
++	wait.cb = (nss_wifi_ext_vdev_msg_callback_t)saved_cb;
++	wait.app_data = (void *)saved_data;
+ 	nwevm->cm.cb = (nss_ptr_t)nss_wifi_ext_vdev_callback;
+-	nwevm->cm.app_data = (nss_ptr_t)NULL;
+-
+-	status = nss_wifi_ext_vdev_tx_msg(nss_ctx, nwevm);
+-	if (status != NSS_TX_SUCCESS) {
+-		nss_warning("%px: wifi_ext_vdev_tx_msg failed\n", nss_ctx);
+-		up(&wifi_ext_vdev_pvt.sem);
+-		return status;
+-	}
+-
+-	/*
+-	 * Wait for the acknowledgement
+-	 */
+-	ret = wait_for_completion_timeout(&wifi_ext_vdev_pvt.complete, msecs_to_jiffies(NSS_WIFI_EXT_VDEV_TX_TIMEOUT));
+-	if (!ret) {
+-		nss_warning("%px: WiFi extended vap msg tx failed due to timeout\n", nss_ctx);
+-		wifi_ext_vdev_pvt.response = NSS_TX_FAILURE;
+-	}
+-
+-	status = wifi_ext_vdev_pvt.response;
+-	up(&wifi_ext_vdev_pvt.sem);
++	nwevm->cm.app_data = (nss_ptr_t)&wait;
++	status = nss_wifi_ext_vdev_tx_msg_tracked(nss_ctx, nwevm, &cookie);
++	nwevm->cm.cb = saved_cb;
++	nwevm->cm.app_data = saved_data;
++	if (status == NSS_TX_SUCCESS)
++		replied = wait_for_completion_timeout(&wait.complete,
++				msecs_to_jiffies(NSS_WIFI_EXT_VDEV_TX_TIMEOUT)) != 0;
++	if (cookie)
++		nss_wifi_ext_vdev_cancel_msg(cookie);
++	if (status == NSS_TX_SUCCESS)
++		status = (replied || completion_done(&wait.complete)) ? wait.response : NSS_TX_FAILURE;
+ 	return status;
+ }
+ EXPORT_SYMBOL(nss_wifi_ext_vdev_tx_msg_sync);
+@@ -267,6 +285,12 @@
+ 	return (struct nss_ctx_instance *)&nss_top_main.nss[nss_top_main.wifi_handler_id];
+ }
+ EXPORT_SYMBOL(nss_wifi_ext_vdev_get_ctx);
++
++static void nss_wifi_ext_vdev_ignore_notify(void *app_data, struct nss_cmn_msg *ncm)
++{
++	(void)app_data;
++	(void)ncm;
++}
+ 
+ /*
+  * nss_wifi_ext_vdev_register_if()
+@@ -279,18 +303,37 @@
+ 				uint32_t features, void *app_data)
+ {
+ 	struct nss_ctx_instance *nss_ctx = nss_wifi_ext_vdev_get_ctx();
+-
+-	BUG_ON(!nss_wifi_ext_vdev_verify_if_num(if_num));
+-
++	uint32_t status;
++
++	if (!netdev || !nss_wifi_ext_vdev_verify_if_num(if_num))
++		return NULL;
++	if (!event_callback)
++		event_callback = nss_wifi_ext_vdev_ignore_notify;
++	mutex_lock(&nss_wifi_ext_vdev_registration_lock);
++	if (nss_ctx->subsys_dp_register[if_num].ndev)
++		goto fail;
++	status = nss_core_register_msg_handler(nss_ctx, if_num, event_callback);
++	if (status != NSS_CORE_STATUS_SUCCESS)
++		goto fail;
++	status = nss_core_register_handler(nss_ctx, if_num, nss_wifi_ext_vdev_handler, app_data);
++	if (status != NSS_CORE_STATUS_SUCCESS) {
++		nss_core_unregister_msg_handler(nss_ctx, if_num);
++		goto fail;
++	}
++	nss_wifi_ext_vdev_stats_register(if_num, netdev);
+ 	nss_core_register_subsys_dp(nss_ctx, if_num, data_callback, ext_callback, app_data, netdev, features);
+-
+-	nss_core_register_msg_handler(nss_ctx, if_num, event_callback);
+-
+-	nss_core_register_handler(nss_ctx, if_num, nss_wifi_ext_vdev_handler, app_data);
+-
+-	nss_wifi_ext_vdev_stats_register(if_num, netdev);
+-
++	if (!nss_control_open(nss_ctx, NSS_CONTROL_WIFI_EXT_VDEV, if_num)) {
++		nss_core_unregister_msg_handler(nss_ctx, if_num);
++		nss_core_unregister_handler(nss_ctx, if_num);
++		nss_core_unregister_subsys_dp(nss_ctx, if_num);
++		nss_wifi_ext_vdev_stats_unregister(if_num, netdev);
++		goto fail;
++	}
++	mutex_unlock(&nss_wifi_ext_vdev_registration_lock);
+ 	return nss_ctx;
++fail:
++	mutex_unlock(&nss_wifi_ext_vdev_registration_lock);
++	return NULL;
+ }
+ EXPORT_SYMBOL(nss_wifi_ext_vdev_register_if);
+ 
+@@ -302,22 +345,20 @@
+ 	struct nss_ctx_instance *nss_ctx = nss_wifi_ext_vdev_get_ctx();
+ 	struct net_device *netdev;
+ 
+-	BUG_ON(!nss_wifi_ext_vdev_verify_if_num(if_num));
+-
+-	nss_assert(nss_ctx);
+-
++	if (!nss_wifi_ext_vdev_verify_if_num(if_num))
++		return false;
++	mutex_lock(&nss_wifi_ext_vdev_registration_lock);
++	nss_control_close(nss_ctx, NSS_CONTROL_WIFI_EXT_VDEV, if_num);
+ 	netdev = nss_cmn_get_interface_dev(nss_ctx, if_num);
+ 	if (!netdev) {
+-		nss_warning("%px: Unable to find net device for the interface %d\n", nss_ctx, if_num);
+-		return false;
+-	}
++		mutex_unlock(&nss_wifi_ext_vdev_registration_lock);
++		return false;
++	}
++	nss_core_unregister_msg_handler(nss_ctx, if_num);
++	nss_core_unregister_handler(nss_ctx, if_num);
+ 	nss_core_unregister_subsys_dp(nss_ctx, if_num);
+-
+-	nss_core_unregister_msg_handler(nss_ctx, if_num);
+-
+-	nss_core_unregister_handler(nss_ctx, if_num);
+-
+ 	nss_wifi_ext_vdev_stats_unregister(if_num, netdev);
++	mutex_unlock(&nss_wifi_ext_vdev_registration_lock);
+ 	return true;
+ }
+ EXPORT_SYMBOL(nss_wifi_ext_vdev_unregister_if);
+@@ -331,8 +372,6 @@
+ 	struct nss_ctx_instance *nss_ctx = nss_wifi_ext_vdev_get_ctx();
+ 
+ 	nss_info("nss_wifi_ext_vdev_handler");
+-	sema_init(&wifi_ext_vdev_pvt.sem, 1);
+-	init_completion(&wifi_ext_vdev_pvt.complete);
+ 	nss_core_register_handler(nss_ctx, NSS_WIFI_EXT_VDEV_INTERFACE, nss_wifi_ext_vdev_handler, NULL);
+ 	nss_wifi_ext_vdev_stats_dentry_create();
+ }
+--- a/nss_wifi_vdev.c
++++ b/nss_wifi_vdev.c
+@@ -286,7 +286,8 @@
+ {
+ 	struct nss_wifi_vdev_next_hop_wait *wait = data;
+ 
+-	wait->response = cm->response == NSS_CMN_RESPONSE_ACK && !cm->error ?
++	/* error is specified only for EMSG; ACK may leave it unchanged. */
++	wait->response = cm->response == NSS_CMN_RESPONSE_ACK ?
+ 		NSS_TX_SUCCESS : NSS_TX_FAILURE;
+ 	complete(&wait->done);
+ }
+@@ -322,7 +323,8 @@
+ 	if (cookie)
+ 		nss_wifi_vdev_cancel_msg(cookie);
+ 	if (status == NSS_TX_SUCCESS)
+-		status = replied ? wait.response : NSS_TX_FAILURE;
++		status = replied || completion_done(&wait.done) ?
++			READ_ONCE(wait.response) : NSS_TX_FAILURE;
+ 	kfree(msg);
+ 	return status;
+ }
+--- a/nss_wifili.c
++++ b/nss_wifili.c
+@@ -387,6 +387,22 @@
+ 	/*
+ 	 * Trace messages.
+ 	 */
++	if (ncm->type == NSS_WIFILI_PEER_STATS_MSG) {
++		u32 header = offsetof(struct nss_wifili_msg, msg.peer_stats.stats.wpcs);
++		/* Firmware keeps cm.len at the single-peer request size when a
++		 * notification contains more peers. The received extent owns the
++		 * variable array, just as it does for shaper sync-many responses.
++		 */
++		u32 available = nss_core_rx_msg_buf_len(nss_ctx);
++
++		if (available < header ||
++		    ntm->msg.peer_stats.stats.npeers >
++		    (available - header) / sizeof(struct nss_wifili_peer_ctrl_stats)) {
++			pr_warn_ratelimited("nss: malformed WIFILI peer stats length=%u\n",
++					    available);
++			return;
++		}
++	}
+ 	nss_wifili_log_rx_msg(ntm);
+ 
+ 	/*

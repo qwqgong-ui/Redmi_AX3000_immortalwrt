@@ -41,12 +41,14 @@ setup_rx_queues() {
 }
 
 start() {
-	local enabled monitor_test ready=0 attempts=0 failed=0
+	local enabled monitor_test relay_trace ready=0 attempts=0 failed=0
 	. /lib/functions.sh
 	config_load nss-wifi
 	config_get_bool enabled main enabled 1
 	# Explicit target validation; normal boot keeps concurrent monitor off.
 	config_get_bool monitor_test main monitor_test 0
+	# Rate-limited EAPOL/relay trace from the first association onward.
+	config_get_bool relay_trace main relay_trace 0
 
 	# Parameters are sampled when ath11k probes; do not reload live radios.
 	if [ -d /sys/module/ath11k ]; then
@@ -87,7 +89,7 @@ start() {
 		if [ -f "/lib/modules/$(uname -r)/qca-nss-pppoe.ko" ]; then
 			modprobe qca-nss-pppoe || failed=1
 		fi
-		insmod ath11k nss_offload=1 frame_mode=2 nss_monitor_test="$monitor_test" || return 1
+		insmod ath11k nss_offload=1 frame_mode=2 nss_relay_trace="$relay_trace" nss_monitor_test="$monitor_test" || return 1
 		logger -t nss-wifi 'NSS core ready; loading ath11k with wireless offload'
 	else
 		# Keep ath11k's default Ethernet decapsulation on the host path.

@@ -1,0 +1,54 @@
+#!/bin/sh
+# Snapshot the 5 GHz uplink datapath on every association, again 8 s later with
+# the null-queue delta and TID 0 hardware use, and once when the NSS 5 GHz RX
+# counter first leaves zero, so a failing boot can be diffed against a good one.
+D=/sys/kernel/debug/ath11k/ahb-b00a040.wifi
+W=/sys/kernel/debug/qca-nss-drv/stats/wifili
+OUT=/root/assoc-probe
+MAX=16
+mkdir -p $OUT
+trap 'trap - TERM; kill 0' EXIT INT TERM
+
+nullq() { awk '/Desc addr zero/{print $4}' $D/soc_dp_stats; }
+bssid() { iw dev phy1-sta0 link | awk '/^Connected/{print $3}'; }
+
+rx5g() { awk '/ATTACH 0:/{s=1} s&&/wifili\[0\]_rx_deliverd /{print $3; exit}' $W; }
+
+snap() {
+	seq=$(($(cat $OUT/.seq 2>/dev/null || echo 0) + 1))
+	echo $seq > $OUT/.seq
+	f=$OUT/$(printf %06d $seq)-$(cut -c1-8 /proc/sys/kernel/random/boot_id)-$(cut -d. -f1 /proc/uptime)-$1.txt
+	AP=$(bssid)
+	{
+		echo "## $1 uptime $(cut -d. -f1 /proc/uptime) bssid ${AP:-none} nullq $(nullq) $2"
+		for tid in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+			echo "0 $tid $AP" > $D/reo_queue_query 2>/dev/null || continue
+			echo "## reo tid $tid"
+			grep -vE "_raw|^$" $D/reo_queue_query
+		done
+		echo "## targets"; cat $D/reo_queue_targets
+		echo "## wifili 5g"; awk '/ATTACH 0:/{s=1} s' $W | awk 'NF>=3 && $2=="=" && $3!=0'
+		for s in nss_reoq_stats reo_update_stats reo_cmd_stats; do echo "## $s"; cat $D/$s; done
+		for t in 18 2 15; do
+			echo "## htt $t"
+			echo $t > $D/mac0/htt_stats_type && cat $D/mac0/htt_stats
+		done
+		echo "## link"; iw dev phy1-sta0 link; iw dev phy1-sta0 station dump
+	} > $f 2>&1
+	ls $OUT/*.txt | sort -r | tail -n +$((MAX + 1)) | xargs rm -f
+}
+
+(
+	until [ "$(rx5g 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; do sleep 2; done
+	snap alive
+) &
+
+logread -f -e "phy1-sta0: associated" | while read -r line; do
+	q0=$(nullq)
+	snap assoc
+	sleep 8
+	AP=$(bssid)
+	[ -n "$AP" ] || continue
+	echo "0 0 $AP" > $D/reo_queue_query 2>/dev/null
+	snap settle "nullq_delta $(($(nullq) - q0)) tid0_$(grep processed_mpdu $D/reo_queue_query | tr -d ' ')"
+done

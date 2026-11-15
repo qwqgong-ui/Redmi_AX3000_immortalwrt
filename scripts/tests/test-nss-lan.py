@@ -51,6 +51,7 @@ static int nss_vlan_tx_add_tag_msg(int n,unsigned tag,int next,int phys) {
 static void nss_vlan_publish_if(int n,void *cb,struct net_device *d,int f,void *p) {
  assert(config_count==3 && !fail_config); ++publications;
 }
+static void node_receive(void) {}
 static int nss_bridge_mgr_offload_port_join(struct net_device *d) { ++joins; return fail_join; }
 static int nss_bridge_mgr_offload_port_revoke(struct net_device *d,int n) {
  assert(n==32); return fail_leave;

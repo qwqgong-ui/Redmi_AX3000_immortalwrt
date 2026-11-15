@@ -1,0 +1,396 @@
+Subject: [PATCH] ecm: preserve conntrack, SYN and stats generation contracts
+
+--- a/ecm_classifier_pcc.c
++++ b/ecm_classifier_pcc.c
+@@ -113,7 +113,7 @@
+ /*
+  * Operational control
+  */
+-static bool ecm_classifier_pcc_enabled = false;			/* Enable / disable state of the classifier function */
++static u32 ecm_classifier_pcc_enabled;				/* Enable / disable state of the classifier function */
+ 
+ /*
+  * Debugfs dentry object.
+@@ -828,7 +828,7 @@
+ 	/*
+ 	 * Not relevant to the connection if not enabled.
+ 	 */
+-	if (unlikely(!ecm_classifier_pcc_enabled)) {
++	if (unlikely(!ecm_classifier_pcc_enabled || !ecm_classifier_registrant)) {
+ 		/*
+ 		 * Not relevant.
+ 		 */
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -9197,51 +9197,13 @@
+ 	cancel_work_sync(&ecm_interface_multicast_work);
+ }
+ 
+-/*
+- * SYNC_MANY is a tagged scan of active firmware slots.  Snapshot only rules
+- * already ACKed when this request is submitted.  A later CREATE, a new CI
+- * using the same tuple, or a topology change cannot inherit this request.
+- */
+-void ecm_interface_multicast_stats_snapshot(int ip_version, unsigned long request)
+-{
+-	struct ecm_db_connection_instance *ci;
+-
+-	ci = ecm_db_connections_get_and_ref_first();
+-	while (ci) {
+-		struct ecm_db_connection_instance *next;
+-
+-		next = ecm_db_connection_get_and_ref_next(ci);
+-		if (ecm_db_connection_ip_version_get(ci) == ip_version &&
+-		    ecm_db_multicast_connection_to_interfaces_set_check(ci)) {
+-			struct ecm_front_end_connection_instance *feci;
+-
+-			feci = ecm_db_connection_front_end_get_and_ref(ci);
+-			spin_lock_bh(&feci->lock);
+-			feci->multicast_stats_request = 0;
+-			if (!feci->is_defunct &&
+-			    feci->accel_engine == ECM_FRONT_END_ENGINE_NSS &&
+-			    feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL &&
+-			    feci->multicast_generation == ecm_interface_multicast_generation_get()) {
+-				feci->multicast_stats_request = request;
+-				feci->multicast_stats_rule_generation = feci->multicast_rule_generation;
+-				feci->multicast_stats_route_cookie = feci->multicast_route_cookie;
+-			}
+-			spin_unlock_bh(&feci->lock);
+-			ecm_front_end_connection_deref(feci);
+-		}
+-		ecm_db_connection_deref(ci);
+-		ci = next;
+-		cond_resched();
+-	}
+-}
+-
+ bool ecm_interface_multicast_stats_valid(struct ecm_front_end_connection_instance *feci,
+ 					unsigned long request, u64 *route_cookie)
+ {
+ 	bool valid;
+ 
+ 	spin_lock_bh(&feci->lock);
+-	valid = request && request == feci->multicast_stats_request &&
++	valid = request && (long)(request - feci->multicast_stats_after) > 0 &&
+ 		!feci->is_defunct &&
+ 		feci->accel_mode == ECM_FRONT_END_ACCELERATION_MODE_ACCEL &&
+ 		feci->multicast_rule_generation == feci->multicast_stats_rule_generation &&
+--- a/ecm_interface.h
++++ b/ecm_interface.h
+@@ -115,7 +115,6 @@
+ u64 ecm_interface_multicast_generation_get(void);
+ void ecm_interface_multicast_invalidate(void);
+ void ecm_interface_multicast_quiesce(void);
+-void ecm_interface_multicast_stats_snapshot(int ip_version, unsigned long request);
+ bool ecm_interface_multicast_stats_valid(struct ecm_front_end_connection_instance *feci,
+ 					unsigned long request, u64 *route_cookie);
+ 
+--- a/frontends/cmn/ecm_ported_ipv4.c
++++ b/frontends/cmn/ecm_ported_ipv4.c
+@@ -119,6 +119,7 @@
+ 							ip_addr_t ip_src_addr_nat, ip_addr_t ip_dest_addr_nat, uint16_t l2_encap_proto)
+ {
+ 	struct tcphdr *tcp_hdr;
++	bool tcp_syn = false;
+ 	struct tcphdr tcp_hdr_buff;
+ 	struct udphdr *udp_hdr;
+ 	struct udphdr udp_hdr_buff;
+@@ -182,6 +183,7 @@
+ 			return NF_ACCEPT;
+ 		}
+ 
++		tcp_syn = tcp_hdr->syn;
+ 		layer4hdr = (__be16 *)tcp_hdr;
+ 
+ 		/*
+@@ -984,11 +986,9 @@
+ 	 */
+ 	if (ecm_db_connection_defunct_timer_no_touch_get(ci)) {
+ 		DEBUG_TRACE("%px: No touch timer is set for this ci\n", ci);
+-		if (protocol == IPPROTO_TCP) {
+-			if (tcp_hdr->syn) {
++		if (tcp_syn) {
+ 				DEBUG_TRACE("%px: TCP SYN Flag is seen in No Touch timer state, defunct connection\n", ci);
+-				ecm_db_connection_make_defunct(ci);
+-			}
++			ecm_db_connection_make_defunct(ci);
+ 		}
+ 		ecm_db_connection_deref(ci);
+ 		ecm_stats_v4_inc(ECM_STATS_V4_EXCEPTION_PORTED, ECM_STATS_V4_EXCEPTION_PORTED_TOUCH_TIMER_NOT_SET);
+--- a/frontends/cmn/ecm_ported_ipv6.c
++++ b/frontends/cmn/ecm_ported_ipv6.c
+@@ -118,6 +118,7 @@
+ 							ip_addr_t ip_src_addr, ip_addr_t ip_dest_addr,
+ 							ip_addr_t ip_src_addr_nat, ip_addr_t ip_dest_addr_nat, uint16_t l2_encap_proto){
+ 	struct tcphdr *tcp_hdr;
++	bool tcp_syn = false;
+ 	struct tcphdr tcp_hdr_buff;
+ 	struct udphdr *udp_hdr;
+ 	struct udphdr udp_hdr_buff;
+@@ -181,6 +182,7 @@
+ 			return NF_ACCEPT;
+ 		}
+ 
++		tcp_syn = tcp_hdr->syn;
+ 		layer4hdr = (__be16 *)tcp_hdr;
+ 
+ 		/*
+@@ -1011,11 +1013,9 @@
+ 	 */
+ 	if (ecm_db_connection_defunct_timer_no_touch_get(ci)) {
+ 		DEBUG_TRACE("%px: No touch timer is set for this ci\n", ci);
+-		if (protocol == IPPROTO_TCP) {
+-			if (tcp_hdr->syn) {
++		if (tcp_syn) {
+ 				DEBUG_TRACE("%px: TCP SYN Flag is seen in No Touch timer state, defunct connection\n", ci);
+-				ecm_db_connection_make_defunct(ci);
+-			}
++			ecm_db_connection_make_defunct(ci);
+ 		}
+ 		ecm_db_connection_deref(ci);
+ 		ecm_stats_v6_inc(ECM_STATS_V6_EXCEPTION_PORTED, ECM_STATS_V6_EXCEPTION_PORTED_TOUCH_TIMER_NOT_SET);
+--- a/frontends/include/ecm_front_end_types.h
++++ b/frontends/include/ecm_front_end_types.h
+@@ -305,7 +305,7 @@
+ 	u64 multicast_generation;		/* RO: topology snapshot used to construct this CI */
+ 	u64 multicast_route_cookie;		/* RO: MFC lifetime, zero for bridge-only traffic */
+ 	u64 multicast_rule_generation;		/* Protected by lock: each CREATE attempt */
+-	unsigned long multicast_stats_request;
++	unsigned long multicast_stats_after;
+ 	u64 multicast_stats_rule_generation;
+ 	u64 multicast_stats_route_cookie;
+ #endif
+@@ -314,7 +314,6 @@
+ 	bool destroy_fail_handle_pending;			/* Set while handling the connection destroy failure */
+ 	bool udp_flow_dir_accel;				/* If the UDP flow is accelerated in flow direction. */
+ 	bool udp_return_dir_accel;				/* If the UDP flow is accelerated in return direction. */
+-	bool tcp_be_liberal_set;				/* True once we marked this connection's conntrack liberal */
+ 	atomic64_t unidir_accel_fail_reason;				/* Unidirection accel fail reason */
+ #ifdef ECM_FRONT_END_PPE_ENABLE
+ 	atomic64_t ppe_accel_fail_reason;			/* PPE accel fail reason */
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -150,6 +150,18 @@
+ static unsigned long int ecm_nss_ipv4_stats_request_nack = 0;		/* Number of NACK'd stats request */
+ static unsigned long int ecm_nss_ipv4_stats_request_timeout = 0;	/* Number of stats request left unanswered */
+ static unsigned long int ecm_nss_ipv4_sync_req_seq;			/* Tag of the latest stats request */
++
++#ifdef ECM_MULTICAST_ENABLE
++/* Caller holds both locks, ordering CREATE ACK against request allocation. */
++void ecm_nss_ipv4_multicast_stats_arm(struct ecm_front_end_connection_instance *feci)
++{
++	lockdep_assert_held(&feci->lock);
++	lockdep_assert_held(&ecm_nss_ipv4_lock);
++	feci->multicast_stats_after = ecm_nss_ipv4_sync_req_seq;
++	feci->multicast_stats_rule_generation = feci->multicast_rule_generation;
++	feci->multicast_stats_route_cookie = feci->multicast_route_cookie;
++}
++#endif
+ static unsigned long int ecm_nss_ipv4_sync_req_jiffies;		/* When that request was sent */
+ static bool ecm_nss_ipv4_sync_req_pending;				/* A stats request is awaiting its reply */
+ 
+@@ -817,14 +829,13 @@
+ 		}
+ 
+ 		spin_lock_bh(&ecm_nss_ipv4_lock);
+-		ecm_nss_ipv4_sync_req_msg->cm.app_data = (nss_ptr_t)++ecm_nss_ipv4_sync_req_seq;
++		if (!++ecm_nss_ipv4_sync_req_seq)
++			++ecm_nss_ipv4_sync_req_seq;
++		ecm_nss_ipv4_sync_req_msg->cm.app_data = (nss_ptr_t)ecm_nss_ipv4_sync_req_seq;
+ 		ecm_nss_ipv4_sync_req_jiffies = jiffies;
+ 		ecm_nss_ipv4_sync_req_pending = true;
+ 		spin_unlock_bh(&ecm_nss_ipv4_lock);
+ 
+-#ifdef ECM_MULTICAST_ENABLE
+-		ecm_interface_multicast_stats_snapshot(4, ecm_nss_ipv4_sync_req_seq);
+-#endif
+ 		nss_tx_status = nss_ipv4_tx_with_size(ecm_nss_ipv4_nss_ipv4_mgr, ecm_nss_ipv4_sync_req_msg, PAGE_SIZE);
+ 		if (nss_tx_status == NSS_TX_SUCCESS) {
+ 			ecm_nss_ipv4_stats_request_success++;
+--- a/frontends/nss/ecm_nss_ipv4.h
++++ b/frontends/nss/ecm_nss_ipv4.h
+@@ -190,4 +190,7 @@
+ extern void ecm_nss_ipv4_decel_done_time_update(struct ecm_front_end_connection_instance *feci);
+ extern int ecm_nss_ipv4_init(struct dentry *dentry);
+ extern void ecm_nss_ipv4_exit(void);
++#ifdef ECM_MULTICAST_ENABLE
++void ecm_nss_ipv4_multicast_stats_arm(struct ecm_front_end_connection_instance *feci);
++#endif
+ #endif //__ECM_NSS_IPV4_H
+--- a/frontends/nss/ecm_nss_ipv6.c
++++ b/frontends/nss/ecm_nss_ipv6.c
+@@ -138,6 +138,18 @@
+ static unsigned long int ecm_nss_ipv6_stats_request_nack = 0;		/* Number of NACK'd stats request */
+ static unsigned long int ecm_nss_ipv6_stats_request_timeout = 0;	/* Number of stats request left unanswered */
+ static unsigned long int ecm_nss_ipv6_sync_req_seq;			/* Tag of the latest stats request */
++
++#ifdef ECM_MULTICAST_ENABLE
++/* Caller holds both locks, ordering CREATE ACK against request allocation. */
++void ecm_nss_ipv6_multicast_stats_arm(struct ecm_front_end_connection_instance *feci)
++{
++	lockdep_assert_held(&feci->lock);
++	lockdep_assert_held(&ecm_nss_ipv6_lock);
++	feci->multicast_stats_after = ecm_nss_ipv6_sync_req_seq;
++	feci->multicast_stats_rule_generation = feci->multicast_rule_generation;
++	feci->multicast_stats_route_cookie = feci->multicast_route_cookie;
++}
++#endif
+ static unsigned long int ecm_nss_ipv6_sync_req_jiffies;		/* When that request was sent */
+ static bool ecm_nss_ipv6_sync_req_pending;				/* A stats request is awaiting its reply */
+ 
+@@ -793,14 +805,13 @@
+ 		}
+ 
+ 		spin_lock_bh(&ecm_nss_ipv6_lock);
+-		ecm_nss_ipv6_sync_req_msg->cm.app_data = (nss_ptr_t)++ecm_nss_ipv6_sync_req_seq;
++		if (!++ecm_nss_ipv6_sync_req_seq)
++			++ecm_nss_ipv6_sync_req_seq;
++		ecm_nss_ipv6_sync_req_msg->cm.app_data = (nss_ptr_t)ecm_nss_ipv6_sync_req_seq;
+ 		ecm_nss_ipv6_sync_req_jiffies = jiffies;
+ 		ecm_nss_ipv6_sync_req_pending = true;
+ 		spin_unlock_bh(&ecm_nss_ipv6_lock);
+ 
+-#ifdef ECM_MULTICAST_ENABLE
+-		ecm_interface_multicast_stats_snapshot(6, ecm_nss_ipv6_sync_req_seq);
+-#endif
+ 		nss_tx_status = nss_ipv6_tx_with_size(ecm_nss_ipv6_nss_ipv6_mgr, ecm_nss_ipv6_sync_req_msg, PAGE_SIZE);
+ 		if (nss_tx_status == NSS_TX_SUCCESS) {
+ 			ecm_nss_ipv6_stats_request_success++;
+--- a/frontends/nss/ecm_nss_ipv6.h
++++ b/frontends/nss/ecm_nss_ipv6.h
+@@ -190,4 +190,7 @@
+ extern void ecm_nss_ipv6_decel_done_time_update(struct ecm_front_end_connection_instance *feci);
+ extern int ecm_nss_ipv6_init(struct dentry *dentry);
+ extern void ecm_nss_ipv6_exit(void);
++#ifdef ECM_MULTICAST_ENABLE
++void ecm_nss_ipv6_multicast_stats_arm(struct ecm_front_end_connection_instance *feci);
++#endif
+ #endif //__ECM_NSS_IPV6_H
+--- a/frontends/nss/ecm_nss_multicast_ipv4.c
++++ b/frontends/nss/ecm_nss_multicast_ipv4.c
+@@ -344,6 +344,7 @@
+ 	ecm_nss_multicast_ipv4_accelerated_count++;	/* Protocol specific counter */
+ 	ecm_nss_ipv4_accelerated_count++;		/* General running counter */
+ 
++	ecm_nss_ipv4_multicast_stats_arm(feci);
+ 	if (!_ecm_nss_ipv4_accel_pending_clear(feci, ECM_FRONT_END_ACCELERATION_MODE_ACCEL)) {
+ 		/*
+ 		 * Increement the no-action counter, this is reset if offload action is seen
+--- a/frontends/nss/ecm_nss_multicast_ipv6.c
++++ b/frontends/nss/ecm_nss_multicast_ipv6.c
+@@ -350,6 +350,7 @@
+ 	ecm_nss_multicast_ipv6_accelerated_count++;	/* Protocol specific counter */
+ 	ecm_nss_ipv6_accelerated_count++;		/* General running counter */
+ 
++	ecm_nss_ipv6_multicast_stats_arm(feci);
+ 	if (!_ecm_nss_ipv6_accel_pending_clear(feci, ECM_FRONT_END_ACCELERATION_MODE_ACCEL)) {
+ 		/*
+ 		 * Increement the no-action counter, this is reset if offload action is seen
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -1405,9 +1405,8 @@
+ #else
+ 			if (tcp_be_liberal
+ #endif
+-					|| (!feci->tcp_be_liberal_set
+-						&& ((ct->proto.tcp.seen[flow_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)
+-							|| (ct->proto.tcp.seen[return_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)))) {
++						|| (ct->proto.tcp.seen[flow_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)
++						|| (ct->proto.tcp.seen[return_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)) {
+ 				nircm->rule_flags |= NSS_IPV4_RULE_CREATE_FLAG_NO_SEQ_CHECK;
+ 			}
+ 
+@@ -1418,9 +1417,7 @@
+ 			 * test above, and hidden from it, so that relaxing conntrack does not
+ 			 * also switch off the firmware's own sequence check.
+ 			 */
+-			ct->proto.tcp.seen[flow_dir].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+-			ct->proto.tcp.seen[return_dir].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+-			feci->tcp_be_liberal_set = true;
++				ct->proto.tcp.ecm_host_liberal = 1;
+ 			spin_unlock_bh(&ct->lock);
+ 		}
+ 
+@@ -1652,6 +1649,7 @@
+ 	uint32_t serial = (uint32_t)(ecm_ptr_t)app_data;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++	bool removed;
+ 
+ 	/*
+ 	 * Is this a response to a destroy message?
+@@ -1722,7 +1720,10 @@
+ 	}
+ 
+ 	DEBUG_TRACE("%px: response: %d\n", feci, nim->cm.response);
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++	removed = nim->cm.response == NSS_CMN_RESPONSE_ACK ||
++		(nim->cm.response == NSS_CMN_RESPONSE_EMSG &&
++		 nim->cm.error == NSS_IPV4_DR_NO_CONNECTION_ENTRY_ERROR);
++	if (!removed) {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DECEL;
+ 	} else {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+@@ -1743,7 +1744,7 @@
+ 	spin_lock_bh(&ecm_nss_ipv4_lock);
+ 	ecm_nss_ported_ipv4_accelerated_count[feci->ported_accelerated_count_index]--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_ported_ipv4_accelerated_count[feci->ported_accelerated_count_index] >= 0, "Bad udp accel counter\n");
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK)
++	if (!removed)
+ 		ecm_nss_ipv4_decel_unknown_count++;
+ 	ecm_nss_ipv4_accelerated_count--;		/* General running counter */
+ 	DEBUG_ASSERT(ecm_nss_ipv4_accelerated_count >= 0, "Bad accel counter\n");
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -1332,9 +1332,8 @@
+ #else
+ 			if (tcp_be_liberal
+ #endif
+-					|| (!feci->tcp_be_liberal_set
+-						&& ((ct->proto.tcp.seen[flow_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)
+-							|| (ct->proto.tcp.seen[return_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)))) {
++						|| (ct->proto.tcp.seen[flow_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)
++						|| (ct->proto.tcp.seen[return_dir].flags & IP_CT_TCP_FLAG_BE_LIBERAL)) {
+ 				nircm->rule_flags |= NSS_IPV6_RULE_CREATE_FLAG_NO_SEQ_CHECK;
+ 			}
+ 
+@@ -1345,9 +1344,7 @@
+ 			 * test above, and hidden from it, so that relaxing conntrack does not
+ 			 * also switch off the firmware's own sequence check.
+ 			 */
+-			ct->proto.tcp.seen[flow_dir].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+-			ct->proto.tcp.seen[return_dir].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+-			feci->tcp_be_liberal_set = true;
++				ct->proto.tcp.ecm_host_liberal = 1;
+ 			spin_unlock_bh(&ct->lock);
+ 		}
+ 
+@@ -1558,6 +1555,7 @@
+ 	uint32_t serial = (uint32_t)(ecm_ptr_t)app_data;
+ 	struct ecm_db_connection_instance *ci;
+ 	struct ecm_front_end_connection_instance *feci;
++	bool removed;
+ 	ip_addr_t flow_ip;
+ 	ip_addr_t return_ip;
+ 
+@@ -1633,7 +1631,10 @@
+ 	}
+ 
+ 	DEBUG_TRACE("%px: response: %d\n", feci, nim->cm.response);
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++	removed = nim->cm.response == NSS_CMN_RESPONSE_ACK ||
++		(nim->cm.response == NSS_CMN_RESPONSE_EMSG &&
++		 nim->cm.error == NSS_IPV6_DR_NO_CONNECTION_ENTRY_ERROR);
++	if (!removed) {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_FAIL_DECEL;
+ 	} else {
+ 		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
+@@ -1653,7 +1654,7 @@
+ 	spin_lock_bh(&ecm_nss_ipv6_lock);
+ 	ecm_nss_ported_ipv6_accelerated_count[feci->ported_accelerated_count_index]--;	/* Protocol specific counter */
+ 	DEBUG_ASSERT(ecm_nss_ported_ipv6_accelerated_count[feci->ported_accelerated_count_index] >= 0, "Bad udp accel counter\n");
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK)
++	if (!removed)
+ 		ecm_nss_ipv6_decel_unknown_count++;
+ 	ecm_nss_ipv6_accelerated_count--;		/* General running counter */
+ 	DEBUG_ASSERT(ecm_nss_ipv6_accelerated_count >= 0, "Bad accel counter\n");

@@ -1,0 +1,71 @@
+Subject: [PATCH] ath11k: preserve STA identity until residual peer cleanup
+
+DELETE failure can leave a peer on ar->peers. Keep its STA identity until
+sta_state's exact-match fallback unlinks it, then free statistics under the
+same base_lock used by completion readers. A failed early VDEV stop must
+also finish STA teardown because mac80211 frees the STA after this callback.
+MU users can refer to a different peer than the PPDU's main peer, including
+an entry detached by a failed add; validate that user's STA before use.
+
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -10863,17 +10863,14 @@
+ {
+ 	struct ath11k_base *ab = ar->ab;
+ 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
+-	struct ath11k_peer *peer;
+-	int ret;
++	int ret, stop_ret = 0;
+ 
+ 	if (ab->hw_params.vdev_start_delay &&
+ 	    arvif->is_started &&
+ 	    arvif->vdev_type != WMI_VDEV_TYPE_AP) {
+-		ret = ath11k_mac_stop_vdev_early(ar->hw, vif);
+-		if (ret) {
+-			ath11k_warn(ab, "failed to do early vdev stop: %d\n", ret);
+-			return ret;
+-		}
++		stop_ret = ath11k_mac_stop_vdev_early(ar->hw, vif);
++		if (stop_ret)
++			ath11k_warn(ab, "failed to do early vdev stop: %d\n", stop_ret);
+ 	}
+ 
+ 	ath11k_dp_peer_cleanup(ar, arvif->vdev_id, sta->addr);
+@@ -10887,14 +10884,8 @@
+ 			   sta->addr, arvif->vdev_id);
+ 
+ 	ath11k_mac_dec_num_stations(arvif, sta);
+-	spin_lock_bh(&ab->base_lock);
+-	peer = ath11k_peer_find(ar, arvif->vdev_id, sta->addr);
+-	if (peer && peer->sta == sta)
+-		peer->sta = NULL;
+-	ath11k_mac_station_cleanup(sta);
+-	spin_unlock_bh(&ab->base_lock);
+ 
+-	return ret;
++	return ret ?: stop_ret;
+ }
+ 
+ static int ath11k_mac_cfg_dyn_vlan(struct ath11k *ar,
+@@ -10979,6 +10970,9 @@
+ 			ath11k_peer_release(ar, peer);
+ 			ar->num_peers--;
+ 		}
++		/* Preserve the exact STA identity until residual peers are unlinked.
++		 * Completion readers share base_lock with statistics destruction. */
++		ath11k_mac_station_cleanup(sta);
+ 		spin_unlock_bh(&ar->ab->base_lock);
+ 		mutex_unlock(&ar->tbl_mtx_lock);
+ 	} else if (old_state == IEEE80211_STA_AUTH &&
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -4322,6 +4322,9 @@
+ 		return;
+ 	}
+ 
++	if (!peer->sta)
++		return;
++
+ 	arsta = ath11k_sta_to_arsta(peer->sta);
+ 	rx_stats = arsta->rx_stats;
+ 

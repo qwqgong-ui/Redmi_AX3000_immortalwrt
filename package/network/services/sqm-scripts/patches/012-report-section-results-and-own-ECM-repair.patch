@@ -1,0 +1,100 @@
+Subject: [PATCH] sqm: aggregate section results and serialize ECM ownership repair
+
+--- a/src/run-openwrt.sh
++++ b/src/run-openwrt.sh
+@@ -23,6 +23,7 @@
+ [ "$NSS_NONBLOCK" -eq 0 ] || [ -n "$RUN_IFACE" ] || exit 1
+ 
+ CLEANUP=0
++RUN_STATUS=0
+ if [ "$ACTION" = "cleanup" ]; then
+     CLEANUP=1
+     ACTION=stop
+@@ -36,7 +37,8 @@
+     f="$1"
+     # Source the state file prior to stopping; we need the variables saved in
+     # there.
+-    [ -f "$f" ] && ( . "$f";
++    [ -f "$f" ] || return 0
++    ( . "$f";
+                      if [ "$NSS_NONBLOCK" -eq 1 ]; then
+                          case "$SCRIPT" in nss-fq.qos|nss-edma.qos) ;; *) exit 0 ;; esac
+                      fi
+@@ -47,12 +49,27 @@
+                           OUTPUT_TARGET=$OUTPUT_TARGET ${SQM_LIB_DIR}/stop-sqm )
+ }
+ 
++nss_restore_denied() {
++    local script="$1" section="$2" download members
++    [ "$ACTION" = nss-reconcile ] && [ "$script" = nss-edma.qos ] || return 0
++    [ -e "/sys/class/net/$IFACE/phy80211" ] || return 0
++    download=$(config_get "$section" download)
++    [ "${download:-0}" -gt 0 ] || return 0
++    [ -w /proc/sys/net/ecm/interface_denied_list ] || return 0
++    members=''
++    read -r members < /proc/sys/net/ecm/interface_denied_list
++    case " $members " in *" $IFACE "*) return 0 ;; esac
++    # This repair shares the run lock with stop-sqm and its ownership cleanup.
++    printf 'add %s\n' "$IFACE" > /proc/sys/net/ecm/interface_denied_list || return 1
++    : > "${SQM_STATE_DIR}/${IFACE}.nss-ecm-owned"
++}
++
+ start_sqm_section() {
+     local section script healthy upload download ifb
+     section="$1"
+     export IFACE=$(config_get "$section" interface)
+ 
+-    [ -z "$RUN_IFACE" -o "$RUN_IFACE" = "$IFACE" ] || return
++    [ -z "$RUN_IFACE" -o "$RUN_IFACE" = "$IFACE" ] || return 0
+     [ "$(config_get "$section" enabled)" -eq 1 ] || return 0
+     script=$(config_get "$section" script)
+     if [ "$ACTION" = nss-reconcile ]; then
+@@ -72,10 +89,13 @@
+                     tc qdisc show dev "$ifb" 2>/dev/null | grep -q '^qdisc nsstbl .* root' || healthy=0
+                 fi
+             fi
+-            [ "$healthy" -eq 1 ] || stop_statefile "${SQM_STATE_DIR}/${IFACE}.state"
++            [ "$healthy" -eq 1 ] || stop_statefile "${SQM_STATE_DIR}/${IFACE}.state" || return
+         fi
+     fi
+-    [ -f "${SQM_STATE_DIR}/${IFACE}.state" ] && return
++    if [ -f "${SQM_STATE_DIR}/${IFACE}.state" ]; then
++        nss_restore_denied "$script" "$section"
++        return
++    fi
+ 
+     export UPLINK=$(config_get "$section" upload)
+     export DOWNLINK=$(config_get "$section" download)
+@@ -111,7 +131,13 @@
+     export SQM_VERBOSITY_MAX=${SQM_VERBOSITY_MAX:-$(config_get "$section" verbosity)}
+     export SQM_VERBOSITY_MIN
+ 
+-    "${SQM_LIB_DIR}/start-sqm"
++    "${SQM_LIB_DIR}/start-sqm" || return
++    nss_restore_denied "$script" "$section"
++}
++
++run_sqm_section() {
++    start_sqm_section "$@" || RUN_STATUS=$?
++    return 0
+ }
+ 
+ release_lock() {
+@@ -158,12 +184,13 @@
+     if [ -z "$RUN_IFACE" ]; then
+         # Stopping all active interfaces
+         for f in ${SQM_STATE_DIR}/*.state; do
+-            stop_statefile "$f"
++            stop_statefile "$f" || RUN_STATUS=$?
+         done
+     else
+-        stop_statefile "${SQM_STATE_DIR}/${RUN_IFACE}.state"
++        stop_statefile "${SQM_STATE_DIR}/${RUN_IFACE}.state" || RUN_STATUS=$?
+     fi
+ else
+-    config_load sqm
+-    config_foreach start_sqm_section
++    config_load sqm || exit 1
++    config_foreach run_sqm_section
+ fi
++exit "$RUN_STATUS"

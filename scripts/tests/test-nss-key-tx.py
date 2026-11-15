@@ -27,6 +27,9 @@ typedef uint32_t u32;typedef uint16_t u16;typedef int nss_tx_status_t;
 #define IEEE80211_TX_INTFL_NL80211_FRAME_TX 4
 #define WMI_TLV_SERVICE_QOS_NULL_FRAME_TX_OVER_WMI 0
 #define ATH11K_FLAG_MONITOR_VDEV_CREATED 0
+#define ATH11K_FLAG_CRASH_FLUSH 1
+#define WMI_VDEV_TYPE_MONITOR 3
+#define IEEE80211_TX_CTL_INJECTED 128
 #define ATH11K_SKB_CIPHER_SET 1
 #define ATH11K_SKB_HW_80211_ENCAP 2
 #define ATH11K_SKB_TX_STATUS 4
@@ -56,10 +59,10 @@ struct sk_buff { void *data;struct ath11k_skb_cb cb;struct ieee80211_tx_info inf
 #define ATH11K_SKB_CB(skb) (&(skb)->cb)
 #define IEEE80211_SKB_CB(skb) (&(skb)->info)
 struct ath11k_mgmt_frame_stats { unsigned tx_fail_cnt[16],tx_succ_cnt[16]; };
-struct ath11k_base { struct { bool enabled; } nss;struct { unsigned long svc_map[1]; } wmi_ab; };
+struct ath11k_base { unsigned long dev_flags;struct { bool enabled; } nss;struct { unsigned long svc_map[1]; } wmi_ab; };
 struct ieee80211_hw { struct ath11k *priv; };
 struct ath11k { struct ath11k_base *ab;struct ieee80211_hw *hw;int data_lock;unsigned long monitor_flags; };
-struct ath11k_vif { struct ath11k *ar;struct ieee80211_vif *vif;struct ath11k_mgmt_frame_stats mgmt_stats;struct { bool key_failed,ext_vdev_up,created,format_ready,format_failed;struct ath11k_vif *ap_vif;u32 if_num;void *ctx; } nss; };
+struct ath11k_vif { struct ath11k *ar;struct ieee80211_vif *vif;unsigned vdev_type;struct ath11k_mgmt_frame_stats mgmt_stats;struct { bool key_failed,ext_vdev_up,created,format_ready,format_failed;struct ath11k_vif *ap_vif;u32 if_num;void *ctx; } nss; };
 struct nss_if_open { int unused; };
 struct nss_wifi_ext_vdev_msg { char bytes[32]; };
 struct nss_wifi_vdev_msg { char bytes[32]; };
@@ -79,6 +82,27 @@ static int nss_wifi_ext_vdev_tx_msg_sync(void *ctx,struct nss_wifi_ext_vdev_msg 
 '''
 
 MAIN = r'''
+static void closed_entrances(bool nss,bool crash) {
+ struct ath11k_base ab={.nss.enabled=nss,.wmi_ab.svc_map={1}};
+ struct ath11k ar={.ab=&ab};struct ieee80211_hw hw={.priv=&ar};ar.hw=&hw;
+ struct ieee80211_vif vif={0};struct ath11k_vif av={.ar=&ar,.vif=&vif};vif.priv=&av;
+ struct ieee80211_hdr hdr;struct sk_buff skb={.data=&hdr,.info.control.vif=&vif};
+ struct ieee80211_tx_control ctl={0};
+ if(crash)ab.dev_flags=1UL<<ATH11K_FLAG_CRASH_FLUSH;else av.vdev_type=WMI_VDEV_TYPE_MONITOR;
+ freed=wmi_tx=nss_tx=dp_tx=0;
+ unsigned frames[]={8,0xc0,0xc8};
+ for(unsigned i=0;i<3;i++)for(unsigned eth=0;eth<2;eth++){
+  hdr.frame_control=frames[i];skb.info.flags=eth?IEEE80211_TX_CTL_HW_80211_ENCAP:0;
+  skb.cb.flags=0xa5;ath11k_mac_op_tx(&hw,&ctl,&skb);
+  assert(freed==i*2+eth+1&&!wmi_tx&&!nss_tx&&!dp_tx&&skb.cb.flags==0xa5);
+ }
+ /* A real AP/STA target remains usable while a monitor VIF also exists. */
+ ab.dev_flags=0;av.vdev_type=0;ar.monitor_flags=1UL<<ATH11K_FLAG_MONITOR_VDEV_CREATED;
+ hdr.frame_control=8;skb.info.flags=IEEE80211_TX_CTL_INJECTED;
+ ath11k_mac_op_tx(&hw,&ctl,&skb);
+ assert(freed==6&&(nss?nss_tx:dp_tx)==1&&(skb.cb.flags&ATH11K_SKB_TX_STATUS));
+ hdr.frame_control=0xc0;ath11k_mac_op_tx(&hw,&ctl,&skb);assert(wmi_tx==1&&freed==6);
+}
 int main(void) {
  struct ath11k_base ab={.nss.enabled=true,.wmi_ab.svc_map={1}};
  struct ath11k ar={.ab=&ab};struct ieee80211_hw hw={.priv=&ar};ar.hw=&hw;
@@ -96,9 +120,16 @@ int main(void) {
  ath11k_mac_op_tx(&hw,&control,&skb);assert(freed==4&&nss_tx==1);
  vif.type=NL80211_IFTYPE_AP_VLAN;av.nss.ext_vdev_up=true;
  assert(ath11k_nss_ext_vdev_up(&av)==-ESHUTDOWN&&!open_requests);
- parent.nss.key_failed=false;assert(!ath11k_nss_ext_vdev_up(&av)&&!open_requests);
+ parent.nss.key_failed=false;
+ assert(ath11k_nss_ext_vdev_up(&av)==-ESHUTDOWN&&!open_requests);
+ parent.nss.created=true;parent.nss.format_ready=true;
+ av.nss.created=true;av.nss.format_ready=false;
+ assert(!ath11k_nss_vdev_key_failed(&av));
+ av.nss.ap_vif=NULL;assert(ath11k_nss_vdev_key_failed(&av));av.nss.ap_vif=&parent;
+ assert(!ath11k_nss_ext_vdev_up(&av)&&!open_requests);
  av.nss.ext_vdev_up=false;assert(!ath11k_nss_ext_vdev_up(&av)&&open_requests==1);
  ab.nss.enabled=false;av.nss.key_failed=true;hdr.frame_control=8;ath11k_mac_op_tx(&hw,&control,&skb);assert(dp_tx==1);
+ for(unsigned enabled=0;enabled<2;enabled++)for(unsigned crash=0;crash<2;crash++)closed_entrances(enabled,crash);
  puts("PASS actual key failure TX gates: QoS-null/WMI, payload, Ethernet encapsulation, teardown management, AP VLAN parent/UP and disabled NSS");
 }
 '''

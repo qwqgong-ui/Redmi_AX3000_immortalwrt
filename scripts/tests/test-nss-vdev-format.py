@@ -177,7 +177,10 @@ int main(void) {
  fresh();edge_ack=true;assert(!ath11k_mac_update_vif_offload(&ar,&mac_vif)&&vif.nss.format_ready&&cancels==2);
  fresh();assert(ath11k_nss_vdev_set_format(&vif,1,3)==-EINVAL&&allocations==0);assert(ath11k_nss_vdev_set_format(&vif,1,(u32)-1)==-EINVAL&&allocations==0);
  fresh();vif.is_up=true;assert(ath11k_mac_update_vif_offload(&ar,&mac_vif)==-EOPNOTSUPP&&submissions==0&&wmi_calls==0);
- struct ath11k_vif child={.nss.ap_vif=&vif};assert(ath11k_nss_vdev_key_failed(&child));
+ struct ieee80211_vif child_vif={.type=NL80211_IFTYPE_AP_VLAN};
+ struct ath11k_vif child={.vif=&child_vif,.nss.ap_vif=&vif};assert(ath11k_nss_vdev_key_failed(&child));
+ vif.nss.format_ready=true;child.nss.created=true;assert(!ath11k_nss_vdev_key_failed(&child));
+ vif.nss.created=false;assert(ath11k_nss_vdev_key_failed(&child));
  unsigned char bytes[160]={0};struct sk_buff skb={.data=bytes};
  for(unsigned n=0;n<24;n++){skb.len=n;bytes[0]=8;assert(ath11k_nss_80211_header_len(&skb)==-EMSGSIZE);}
  skb.len=24;assert(ath11k_nss_80211_header_len(&skb)==24);bytes[0]=0x88;bytes[1]=3;skb.len=31;assert(ath11k_nss_80211_header_len(&skb)==-EMSGSIZE);skb.len=32;assert(ath11k_nss_80211_header_len(&skb)==32);bytes[1]=0x83;skb.len=35;assert(ath11k_nss_80211_header_len(&skb)==-EMSGSIZE);skb.len=36;assert(ath11k_nss_80211_header_len(&skb)==36);bytes[0]=9;assert(ath11k_nss_80211_header_len(&skb)==-EINVAL);

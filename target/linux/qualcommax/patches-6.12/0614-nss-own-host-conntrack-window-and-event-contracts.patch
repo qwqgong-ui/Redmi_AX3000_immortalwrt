@@ -1,0 +1,142 @@
+Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contracts
+
+--- a/include/linux/netfilter/nf_conntrack_tcp.h
++++ b/include/linux/netfilter/nf_conntrack_tcp.h
+@@ -28,6 +28,9 @@
+ 	/* For SYN packets while we may be out-of-sync */
+ 	u_int8_t	last_wscale;	/* Last window scaling factor seen */
+ 	u_int8_t	last_flags;	/* Last flags set */
++#ifdef CONFIG_NF_CONNTRACK_ECM_HOST_LIBERAL
++	u_int8_t	ecm_host_liberal; /* Host window state may lag NSS forwarding */
++#endif
+ };
+ 
+ #endif /* _NF_CONNTRACK_TCP_H */
+--- a/include/linux/thread_info.h
++++ b/include/linux/thread_info.h
+@@ -205,6 +205,10 @@
+ #endif
+ 
+ #ifdef CONFIG_HARDENED_USERCOPY
++/* This checks addresses and allocation metadata, not object contents. */
++#if __has_attribute(__access__)
++__attribute__((__access__(none, 1)))
++#endif
+ extern void __check_object_size(const void *ptr, unsigned long n,
+ 					bool to_user);
+ 
+--- a/net/bridge/br_mdb.c
++++ b/net/bridge/br_mdb.c
+@@ -2198,6 +2198,11 @@
+ 		}
+ 		if ((!listener && !router) || port->state != BR_STATE_FORWARDING)
+ 			continue;
++		/* The firmware fanout has no ingress isolation metadata. Keep the
++		 * whole rule on the host when any output requires that decision.
++		 */
++		if (port->flags & BR_ISOLATED)
++			return -EOPNOTSUPP;
+ 		if ((port->flags & BR_MULTICAST_TO_UNICAST) &&
+ 		    !READ_ONCE(port->mcast_hw_to_unicast))
+ 			return -EAGAIN;
+--- a/net/core/neighbour.c
++++ b/net/core/neighbour.c
+@@ -1321,7 +1321,7 @@
+ 			  u8 new, u32 flags, u32 nlmsg_pid,
+ 			  struct netlink_ext_ack *extack)
+ {
+-	bool gc_update = false, managed_update = false;
++	bool gc_update = false, managed_update = false, mac_changed = false;
+ 	int update_isrouter = 0;
+ 	struct net_device *dev;
+ 	int err, notify = 0;
+@@ -1381,11 +1381,6 @@
+ 		   - compare new & old
+ 		   - if they are different, check override flag
+ 		 */
+-       /* QCA NSS ECM update - Start */
+-		memcpy(nmu.old_mac, neigh->ha, dev->addr_len);
+-		memcpy(nmu.update_mac, lladdr, dev->addr_len);
+-		/* QCA NSS ECM update - End */
+-
+        if ((old & NUD_VALID) &&
+ 		    !memcmp(lladdr, neigh->ha, dev->addr_len))
+ 			lladdr = neigh->ha;
+@@ -1449,6 +1444,9 @@
+ 	}
+ 
+ 	if (lladdr != neigh->ha) {
++		memcpy(nmu.old_mac, neigh->ha, dev->addr_len);
++		memcpy(nmu.update_mac, lladdr, dev->addr_len);
++		mac_changed = true;
+ 		write_seqlock(&neigh->ha_lock);
+ 		memcpy(&neigh->ha, lladdr, dev->addr_len);
+ 		write_sequnlock(&neigh->ha_lock);
+@@ -1510,6 +1508,8 @@
+ 		neigh_update_managed_list(neigh);
+ 	if (notify) {
+ 		neigh_update_notify(neigh, nlmsg_pid);
++	}
++	if (mac_changed) {
+ 		atomic_notifier_call_chain(&neigh_mac_update_notifier_list, 0,
+ 					   (struct neigh_mac_update *)&nmu); /* QCA NSS ECM support */
+     }
+--- a/net/netfilter/Kconfig
++++ b/net/netfilter/Kconfig
+@@ -171,6 +171,14 @@
+ 	  Allow connection acceleration managers to observe connection events
+ 	  without replacing ctnetlink's primary notifier or its delivery result.
+ 	  If unsure, say N.
++
++config NF_CONNTRACK_ECM_HOST_LIBERAL
++	bool "Separate host TCP window tracking for ECM offload"
++	depends on NF_CONNTRACK_EVENTS_OBSERVER
++	help
++	  Keep the host's offload window policy separate from BE_LIBERAL.
++	  ECM requires this private conntrack state when NSS forwards packets
++	  without updating the host TCP window on every packet.
+ 
+ config NF_CONNTRACK_TIMEOUT
+ 	bool  'Connection tracking timeout'
+--- a/net/netfilter/nf_conntrack_ecache.c
++++ b/net/netfilter/nf_conntrack_ecache.c
+@@ -156,10 +156,16 @@
+ 	u32 old, want;
+ 	int ret;
+ 
+-	if (!((events | missed) & e->ctmask))
++	rcu_read_lock();
++	/* Offload lifecycle observers require DESTROY even if a netlink
++	 * subscriber changes this connection's event mask after acceleration.
++	 * The primary notifier keeps its original mask and delivery result.
++	 */
++	nf_conntrack_notify_observers(net, events | missed, item);
++	if (!((events | missed) & e->ctmask)) {
++		rcu_read_unlock();
+ 		return 0;
+-
+-	rcu_read_lock();
++	}
+ 
+ 	notify = rcu_dereference(net->ct.nf_conntrack_event_cb);
+ 	if (!notify && !nf_conntrack_has_event_observers(net)) {
+@@ -168,7 +174,6 @@
+ 	}
+ 
+ 	ret = notify ? notify->ct_event(events | missed, item) : 0;
+-	nf_conntrack_notify_observers(net, events | missed, item);
+ 	rcu_read_unlock();
+ 
+ 	if (likely(ret >= 0 && missed == 0))
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -506,6 +506,9 @@
+ 	bool be_liberal;
+ 
+ 	be_liberal = sender->flags & IP_CT_TCP_FLAG_BE_LIBERAL || tn->tcp_be_liberal;
++#ifdef CONFIG_NF_CONNTRACK_ECM_HOST_LIBERAL
++	be_liberal |= READ_ONCE(ct->proto.tcp.ecm_host_liberal);
++#endif
+ 	if (be_liberal)
+ 		return NFCT_TCP_ACCEPT;
+ 

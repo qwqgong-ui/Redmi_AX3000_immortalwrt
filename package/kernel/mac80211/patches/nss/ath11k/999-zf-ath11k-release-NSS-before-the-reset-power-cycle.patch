@@ -1,0 +1,69 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] ath11k: release NSS and stop CE before the reset power cycle
+
+ath11k_core_reset() power-cycled the userpd while NSS still owned the
+SoC rings; NSS teardown ran only later, in reconfigure_on_crash() after
+the new firmware reported ready. Masking host IRQs does not stop the NSS
+core. On opt66 a hw-restart of b00a040.wifi rebooted pd-2 and 0.47 s later
+its IST raised NOC_error.c:359, the Q6 root PD failed to restart (-110)
+and both radios stayed down until a full reboot.
+
+Tear down this SoC's NSS wifili instance after the radios park in
+op_start (which waits without conf_mutex) and before power down, and clear
+nss.enabled so the later teardown is a no-op and the existing reconfigure
+path re-enables and rebuilds NSS. If teardown fails, ring ownership is
+uncertain: keep the target powered, finish the reset bookkeeping and stop
+automatic retries instead of risking the shared root PD.
+
+With only that change, sta53dbg no longer hit the NOC and 2.4 GHz stayed
+up, but QCN6122 recovery failed with "Service connect timeout". The raw
+ce_irq_disable op masks CE IRQs without clearing CE_IRQ_ENABLED, so
+ath11k_pcic_start() skipped re-enabling them; HTC wait_target recovered by
+polling, the HTT service connect does not poll. Stop CE through hif_stop(),
+whose state hif_start() restores on both the AHB and the pcic ops.
+
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2664,7 +2664,7 @@
+ static void ath11k_core_reset(struct work_struct *work)
+ {
+ 	struct ath11k_base *ab = container_of(work, struct ath11k_base, reset_work);
+-	int reset_count, fail_cont_count;
++	int reset_count, fail_cont_count, ret;
+ 	long time_left;
+ 
+ 	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
+@@ -2727,7 +2727,32 @@
+ 						ATH11K_RECOVER_START_TIMEOUT_HZ);
+ 
+ 	ath11k_hif_irq_disable(ab);
+-	ath11k_hif_ce_irq_disable(ab);
++	/* hif_start() re-enables only what hif_stop() recorded as disabled. The
++	 * raw ce_irq_disable op left QCN6122 CE IRQs masked after recovery, so
++	 * the HTT service connect never saw the firmware's reply.
++	 */
++	ath11k_hif_stop(ab);
++
++	/* NSS still owns this SoC's rings on its own core, and IRQ masking does
++	 * not stop it. Release that ownership before the target loses power:
++	 * a userpd rebooted under live NSS ownership raised a NOC error that
++	 * took down the shared Q6 root PD and every radio on it.
++	 */
++	mutex_lock(&ab->core_lock);
++	ret = ath11k_nss_teardown(ab);
++	if (!ret)
++		ab->nss.enabled = false;
++	mutex_unlock(&ab->core_lock);
++	if (ret) {
++		ath11k_err(ab, "NSS reset failed before power down: %d; keeping target powered\n",
++			   ret);
++		atomic_set(&ab->fail_cont_count, ATH11K_RESET_MAX_FAIL_COUNT_FINAL);
++		ab->is_reset = false;
++		atomic_dec(&ab->reset_count);
++		complete(&ab->reset_complete);
++		return;
++	}
++	ath11k_info(ab, "NSS released before reset power cycle\n");
+ 
+ 	ath11k_hif_power_down(ab, false);
+ 	ath11k_hif_power_up(ab);

@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nss-wifi
-PKG_RELEASE:=13
+PKG_RELEASE:=15
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -10,7 +10,7 @@ define Package/nss-wifi
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Redmi AX3000 NSS Wi-Fi offload
-  DEPENDS:=@TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000 +kmod-ath11k-ahb +kmod-ath11k-pci +kmod-qca-nss-drv +kmod-qca-nss-drv-bridge-mgr +kmod-qca-nss-ecm +kmod-qca-dsa-nss +nss-firmware +@ATH11K_NSS_SUPPORT +ubus +jsonfilter +jshn
+  DEPENDS:=@TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000 +kmod-ath11k-ahb +kmod-ath11k-pci +kmod-qca-nss-drv +kmod-qca-nss-drv-bridge-mgr +kmod-qca-nss-ecm +kmod-qca-dsa-nss +nss-firmware +@ATH11K_NSS_SUPPORT +ubus +jsonfilter +jshn +ucode +ucode-mod-fs +ucode-mod-ubus +ucode-mod-uloop +ucode-mod-rtnl
 endef
 
 define Package/nss-wifi/description
@@ -43,6 +43,8 @@ define Package/nss-wifi/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nss-relay-wait $(1)/usr/lib/nss-relay-wait
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nss-relay-neighbor $(1)/usr/lib/nss-relay-neighbor
 	$(INSTALL_BIN) ./files/nss-relay-neighbor-watch $(1)/usr/sbin/nss-relay-neighbor-watch
+	$(INSTALL_DATA) ./files/nss-relay-neighbor-watch.uc $(1)/usr/lib/nss-relay-neighbor-watch.uc
+	$(INSTALL_DATA) ./files/nss-neighbor-state.uc $(1)/usr/lib/nss-neighbor-state.uc
 	$(INSTALL_BIN) ./files/nss-neighbor.init $(1)/etc/init.d/nss-neighbor
 endef
 

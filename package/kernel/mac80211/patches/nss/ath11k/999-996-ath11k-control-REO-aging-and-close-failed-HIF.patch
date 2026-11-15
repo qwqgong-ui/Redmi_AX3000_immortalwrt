@@ -280,13 +280,15 @@
  
  #define ATH11K_PCI_BAR_NUM		0
  #define ATH11K_PCI_DMA_MASK		36
-@@ -1195,14 +1196,27 @@
+@@ -1195,14 +1196,29 @@
  	return ret;
  }
  
 +static void ath11k_pci_remove_prepare(struct ath11k_base *ab)
 +{
++	spin_lock_bh(&ab->base_lock);
 +	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
++	spin_unlock_bh(&ab->base_lock);
 +	if (ab->qmi.event_work_initialized)
 +		cancel_work_sync(&ab->qmi.event_work);
 +	cancel_work_sync(&ab->wmi_ast_work);
@@ -321,10 +323,18 @@
  	ath11k_core_deinit(ab);
  
  qmi_fail:
-@@ -1236,6 +1245,9 @@
+@@ -1240,14 +1251,9 @@
  	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
  
  	ath11k_pci_set_irq_affinity_hint(ab_pci, NULL);
+-
+-	spin_lock_bh(&ab->base_lock);
+-	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
+-	spin_unlock_bh(&ab->base_lock);
+-
+-	cancel_work_sync(&ab->reset_work);
+-	cancel_work_sync(&ab->dump_work);
+-
 +	ath11k_pci_remove_prepare(ab);
 +	ath11k_nss_reoq_stop(ab);
 +	ath11k_dp_reo_cmd_close(&ab->dp);

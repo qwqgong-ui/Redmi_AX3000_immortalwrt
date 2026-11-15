@@ -1,0 +1,87 @@
+Subject: [PATCH] sqm: reconcile NSS roots under one nonblocking run lock
+
+--- a/src/run-openwrt.sh
++++ b/src/run-openwrt.sh
+@@ -15,6 +15,12 @@
+ ACTION="${1:-start}"
+ RUN_IFACE="$2"
+ LOCKDIR="${SQM_STATE_DIR}/sqm-run.lock"
++NSS_NONBLOCK=0
++case "$ACTION" in
++    nss-reconcile) NSS_NONBLOCK=1 ;;
++    nss-stop) NSS_NONBLOCK=1; ACTION=stop ;;
++esac
++[ "$NSS_NONBLOCK" -eq 0 ] || [ -n "$RUN_IFACE" ] || exit 1
+ 
+ CLEANUP=0
+ if [ "$ACTION" = "cleanup" ]; then
+@@ -31,6 +37,9 @@
+     # Source the state file prior to stopping; we need the variables saved in
+     # there.
+     [ -f "$f" ] && ( . "$f";
++                     if [ "$NSS_NONBLOCK" -eq 1 ]; then
++                         case "$SCRIPT" in nss-fq.qos|nss-edma.qos) ;; *) exit 0 ;; esac
++                     fi
+                      IFACE=$IFACE SCRIPT=$SCRIPT SQM_DEBUG=$SQM_DEBUG \
+                           SQM_DEBUG_LOG=$SQM_DEBUG_LOG CLEANUP=$CLEANUP \
+                           SQM_VERBOSITY_MAX=$SQM_VERBOSITY_MAX \
+@@ -39,12 +48,33 @@
+ }
+ 
+ start_sqm_section() {
+-    local section
++    local section script healthy upload download ifb
+     section="$1"
+     export IFACE=$(config_get "$section" interface)
+ 
+     [ -z "$RUN_IFACE" -o "$RUN_IFACE" = "$IFACE" ] || return
+     [ "$(config_get "$section" enabled)" -eq 1 ] || return 0
++    script=$(config_get "$section" script)
++    if [ "$ACTION" = nss-reconcile ]; then
++        case "$script" in nss-fq.qos|nss-edma.qos) ;; *) return 0 ;; esac
++        if [ -f "${SQM_STATE_DIR}/${IFACE}.state" ]; then
++            healthy=1
++            if [ "$script" = nss-fq.qos ]; then
++                tc qdisc show dev "$IFACE" | grep -q '^qdisc nssfq_codel 10: root' || healthy=0
++            elif [ -e "/sys/class/net/$IFACE/phy80211" ]; then
++                upload=$(config_get "$section" upload)
++                download=$(config_get "$section" download)
++                if [ "${upload:-0}" -gt 0 ]; then
++                    tc qdisc show dev "$IFACE" | grep -q '^qdisc nsstbl .* root' || healthy=0
++                fi
++                if [ "${download:-0}" -gt 0 ]; then
++                    ifb=$(printf '%.15s' "ifb@$IFACE")
++                    tc qdisc show dev "$ifb" 2>/dev/null | grep -q '^qdisc nsstbl .* root' || healthy=0
++                fi
++            fi
++            [ "$healthy" -eq 1 ] || stop_statefile "${SQM_STATE_DIR}/${IFACE}.state"
++        fi
++    fi
+     [ -f "${SQM_STATE_DIR}/${IFACE}.state" ] && return
+ 
+     export UPLINK=$(config_get "$section" upload)
+@@ -65,7 +95,7 @@
+     export EQDISC_OPTS=$(config_get "$section" eqdisc_opts)
+     export TARGET=$(config_get "$section" target)
+     export QDISC=$(config_get "$section" qdisc)
+-    export SCRIPT=$(config_get "$section" script)
++    export SCRIPT="$script"
+     export USE_MQ=$(config_get "$section" use_mq)
+ 
+     # The UCI names for these two variables are confusing and should have been
+@@ -104,6 +134,7 @@
+         trap release_lock 0
+         return 0
+     fi
++    [ "$NSS_NONBLOCK" -eq 0 ] || return 1
+     PID=$(cat "$LOCKDIR/pid")
+     sqm_warn "Unable to get run lock - already held by $PID"
+     return 1
+@@ -112,6 +143,7 @@
+ MAX_TRIES=10
+ tries=$MAX_TRIES
+ while ! take_lock; do
++    [ "$NSS_NONBLOCK" -eq 0 ] || exit 75
+     sleep 1
+     tries=$((tries - 1))
+     if [ "$tries" -eq 0 ]; then

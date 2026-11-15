@@ -1,0 +1,16 @@
+#!/bin/sh
+# Keep the kernel and syslog context of an uplink 4-way handshake failure.
+# Install as /usr/sbin/eapol-fail-capture with a procd service; pair it with
+# `uci set nss-wifi.main.relay_trace=1` so ath11k logs every EAPOL stage.
+DIR=/root
+MAX=5
+
+logread -f -e "reason=15" | while read -r line; do
+	[ "$(ls $DIR/eapol-fail-*.dmesg 2>/dev/null | wc -l)" -ge "$MAX" ] && continue
+	sleep 4
+	ts=$(date +%Y%m%d-%H%M%S)
+	{ echo "$line"; dmesg; } > "$DIR/eapol-fail-$ts.dmesg"
+	logread | tail -n 300 > "$DIR/eapol-fail-$ts.logread"
+	sync
+	logger -t eapol-fail "saved $DIR/eapol-fail-$ts.*"
+done

@@ -87,9 +87,17 @@ struct peer_stats { int unused; };
 struct ath11k_nss_peer_state;
 struct ath11k_ast_entry { struct list_head list; };
 struct ath11k_nss_peer { u32 *vaddr;dma_addr_t paddr;struct ath11k_nss_peer_state *state;struct peer_stats *nss_stats;int create_result; };
-struct ath11k_peer { struct list_head list,ast_entry_list;struct ath11k_ast_entry *self_ast_entry;struct ath11k_nss_peer nss;u32 peer_id,vdev_id,hw_peer_id,ast_hash;u8 addr[6]; };
+struct ath11k_peer { struct list_head list,ast_entry_list;struct ath11k_ast_entry *self_ast_entry;struct ath11k_nss_peer nss;u32 peer_id,vdev_id,hw_peer_id,ast_hash;u8 addr[6];struct ieee80211_vif *vif; };
 struct ath11k_base { int base_lock;struct device *dev;struct { bool enabled,peers_initialized,ownership_uncertain,quiescing,registered;u32 if_num;void *ctx;struct list_head peers; } nss; };
 struct ath11k { struct ath11k_base *ab;struct list_head peers; };
+struct ath11k_vif;
+struct ieee80211_vif { struct ath11k_vif *priv; };
+struct ath11k_nss_me_auto { bool initialized,closing,retained,active,running;u64 generation;int work; };
+struct ath11k_vif { struct ath11k *ar;struct { struct ath11k_nss_me_auto me_auto; } nss; };
+static struct ath11k_vif *ath11k_vif_to_arvif(struct ieee80211_vif *v) { return v->priv; }
+#define system_wq NULL
+static unsigned dirty_schedules;
+static void mod_delayed_work(void *queue,int *work,unsigned delay) { assert(!queue&&work&&delay==100);dirty_schedules++; }
 struct nss_wifili_peer_msg { u32 peer_id,vdev_id,hw_ast_idx,tx_ast_hash,nss_peer_mem,psta_vdev_id;u8 peer_mac_addr[6]; };
 struct nss_wifili_msg { struct { u32 interface,type,len,response;nss_ptr_t cb,app_data; } cm;union { struct nss_wifili_peer_msg peermsg; } msg; };
 typedef void (*nss_wifili_msg_callback_t)(void *,struct nss_wifili_msg *);
@@ -130,6 +138,15 @@ static void mark_firmware(struct ath11k_peer *p) { p->nss.state->memory->firmwar
 static void acknowledge_delete_during_wait(void) { delete_host(active);response(submissions-1,NSS_CMN_RESPONSE_ACK); }
 static void purge_safe(void) { struct ath11k_nss_peer_state *s;list_for_each_entry(s,&ab.nss.peers,list)s->memory->firmware_owned=false;ath11k_nss_peer_states_purge(&ab,false); }
 int main(void) {
+ setup();active=new_peer();delete_host(active);assert(!dirty_schedules&&!live_allocations);
+ struct ath11k_vif av={.ar=&ar,.nss.me_auto={.initialized=true,.active=true,.running=true}};
+ struct ieee80211_vif mac_vif={.priv=&av};
+ active=new_peer();active->vif=&mac_vif;delete_host(active);
+ assert(!av.nss.me_auto.active&&av.nss.me_auto.generation==1&&dirty_schedules==1&&!live_allocations);
+ av.nss.me_auto.closing=true;active=new_peer();active->vif=&mac_vif;delete_host(active);
+ assert(dirty_schedules==1&&av.nss.me_auto.generation==1);
+ av.nss.me_auto.closing=false;av.nss.me_auto.initialized=false;
+ active=new_peer();active->vif=&mac_vif;delete_host(active);assert(dirty_schedules==1&&!live_allocations);
  for(unsigned fail=1;fail<=7;fail++) {
   setup();active=new_peer();allocations=0;fail_allocation=fail;
   int result=create(active);assert(result<0&&submissions==0&&!active->nss.state&&!active->nss.vaddr&&!active->nss.nss_stats&&!active->self_ast_entry);
@@ -173,7 +190,9 @@ def main():
     names = ['ath11k_nss_peer_state_put', 'ath11k_nss_peer_state_retire', 'ath11k_nss_peer_response',
         'ath11k_nss_peer_submit_delete', 'ath11k_nss_peer_detach', 'ath11k_nss_peer_wait_created',
         'ath11k_nss_peer_states_purge', 'ath11k_nss_peer_delete', 'ath11k_nss_peer_create']
-    body = '\n'.join(functions.function(source, name) for name in names)
+    me = (directory/'nss_me.c').read_text()
+    body = functions.function(me, 'ath11k_nss_me_dirty_locked')
+    body += '\n'.join(functions.function(source, name) for name in names)
     peer = re.sub(r'/\*.*?\*/', '', (directory/'peer.c').read_text(), flags=re.S)
     for name in ['ath11k_peer_unmap_event', 'ath11k_peer_unmap_v2_event', 'ath11k_peer_cleanup']:
         assert 'ath11k_nss_peer_detach(ar, peer)' in functions.function(peer, name)

@@ -16,6 +16,28 @@ import time
 
 PORT = 18551
 ADDRESS = os.environ.get('NSS_RF_PEER', '')
+os.environ['LC_ALL'] = 'C'
+
+def parse_latency(text):
+    """Keep duplicate replies visible and compute RTT from first replies only."""
+    totals = re.search(r'(\d+) packets transmitted, (\d+) (?:packets )?received(?:, \+(\d+) duplicates)?', text)
+    loss = re.search(r'([0-9.]+)% packet loss', text)
+    assert totals and loss, 'Missing ping completion counters'
+    first = {}
+    duplicates = 0
+    for sequence, value in re.findall(r'icmp_seq=(\d+).*?time[=<]([0-9.]+)', text):
+        if sequence in first:
+            duplicates += 1
+        else:
+            first[sequence] = float(value)
+    sent, received, reported_duplicates = map(int, (totals[1], totals[2], totals[3] or 0))
+    assert len(first) == received and duplicates == reported_duplicates, 'Ping samples disagree with completion counters'
+    samples = sorted(first.values())
+    assert samples, 'No RTT samples'
+    return {'transmitted': sent, 'samples': len(samples), 'duplicates': duplicates,
+            'p50_ms': samples[len(samples)//2],
+            'p95_ms': samples[min(len(samples)-1, int(len(samples)*.95))],
+            'max_ms': max(samples), 'loss_percent': float(loss[1])}
 
 if sys.argv[1:] == ['server']:
     assert ADDRESS and ipaddress.ip_address(ADDRESS).version == 4
@@ -164,12 +186,13 @@ else:
             replace_neighbor([],'192.168.1.251','wlan0',namespace_mac)
         run(['ip','netns','exec',namespace,'ping','-n','-c','3','-W','3',ADDRESS], 15)
         def latency(target, seconds, name):
-            result = subprocess.run(['ip','netns','exec',namespace,'ping','-n','-i','0.1','-w',str(seconds),target], text=True, capture_output=True, timeout=seconds+8)
+            # A hard measurement deadline can discard the final in-flight
+            # reply. Send a fixed sample count and leave time to drain it.
+            result = subprocess.run(['ip','netns','exec',namespace,'ping','-n','-i','0.1',
+                                     '-c',str(seconds*10),'-W','2','-w',str(seconds+3),target],
+                                    text=True, capture_output=True, timeout=seconds+8)
             (output/name).write_text(result.stdout + result.stderr)
-            samples = sorted(float(value) for value in re.findall(r'time[=<]([0-9.]+)',result.stdout))
-            loss = re.search(r'([0-9.]+)% packet loss', result.stdout)
-            assert samples, result.stderr
-            return {'samples':len(samples), 'p50_ms':samples[len(samples)//2], 'p95_ms':samples[min(len(samples)-1,int(len(samples)*.95))], 'max_ms':max(samples), 'loss_percent':float(loss[1]) if loss else None}
+            return parse_latency(result.stdout)
         measurements['idle'] = latency(ADDRESS, 4, 'idle-ping.log')
         print('IDLE ' + json.dumps(measurements['idle']), flush=True)
         for direction in ('down','up'):
@@ -199,4 +222,7 @@ else:
             try: restore_neighbor(change)
             except Exception as error: cleanup_errors.append(str(error))
         assert not cleanup_errors, 'RF cleanup failed: '+repr(cleanup_errors)
-    print('PASS controlled RF load and RTT; endpoints removed and previous neighbors restored')
+    windows = [measurements['idle'], measurements['down']['latency'], measurements['up']['latency']]
+    assert all(item['loss_percent'] == 0 and item['duplicates'] == 0 for item in windows), \
+        'RF load completed and cleaned up, but packet loss/duplicate replies remain; see summary.json'
+    print('PASS controlled RF transfer without loss/duplicate replies; endpoints removed and previous neighbors restored')

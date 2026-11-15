@@ -1,0 +1,390 @@
+Subject: [PATCH] nss-clients: preserve stats owners and bounded flow allocation
+
+--- a/bridge/nss_bridge_mgr.c
++++ b/bridge/nss_bridge_mgr.c
+@@ -66,10 +66,11 @@
+ static struct delayed_work nss_bridge_reconcile_work;
+ static unsigned int nss_bridge_reconcile_retries;
+ static bool nss_bridge_stopping;
++static bool nss_bridge_reconciling;
+ 
+ static void nss_bridge_mgr_schedule_reconcile(void)
+ {
+-	if (READ_ONCE(nss_bridge_stopping))
++	if (READ_ONCE(nss_bridge_stopping) || READ_ONCE(nss_bridge_reconciling))
+ 		return;
+ 	nss_bridge_reconcile_retries = 10;
+ 	mod_delayed_work(system_wq, &nss_bridge_reconcile_work, HZ);
+@@ -1584,6 +1585,7 @@
+ 	rtnl_lock();
+ 	if (READ_ONCE(nss_bridge_stopping))
+ 		goto out;
++	WRITE_ONCE(nss_bridge_reconciling, true);
+ 	for_each_netdev(&init_net, dev) {
+ 		if (!netif_is_bridge_master(dev))
+ 			continue;
+@@ -1632,6 +1634,7 @@
+ 		mod_delayed_work(system_wq, &nss_bridge_reconcile_work, HZ);
+ 	}
+ out:
++	WRITE_ONCE(nss_bridge_reconciling, false);
+ 	rtnl_unlock();
+ }
+ 
+--- a/nss_qdisc/nss_codel.c
++++ b/nss_qdisc/nss_codel.c
+@@ -17,6 +17,7 @@
+ #include "nss_qdisc.h"
+ #include "nss_codel.h"
+ #include <linux/device.h>
++#include <linux/overflow.h>
+ 
+ /* No host qdisc or callback pointers survive an unconfirmed firmware FREE. */
+ struct nss_codel_flow_memory {
+@@ -385,6 +386,8 @@
+ 	 * has not been allocated previously (i.e. init time).
+ 	 */
+ 	if (is_fq_codel && !q->flow_queue_mem) {
++		u32 min_flows = min_t(u32, flows, NSS_CODEL_MIN_FQ_COUNT);
++
+ 		if (!q->flow_queue_sz) {
+ 			nss_qdisc_warning("Firmware reported a zero flow queue size\n");
+ 			return -EINVAL;
+@@ -405,8 +408,9 @@
+ 		 * until it fits. Fewer hash buckets cost a little flow isolation; a
+ 		 * tree that cannot be built costs the link.
+ 		 */
+-		for (q->flows = flows; q->flows >= NSS_CODEL_MIN_FQ_COUNT; q->flows >>= 1) {
+-			sz = q->flow_queue_sz * q->flows;
++		for (q->flows = flows; ; q->flows = max(q->flows >> 1, min_flows)) {
++			if (check_mul_overflow(q->flow_queue_sz, q->flows, &sz))
++				return -EOVERFLOW;
+ 			order = get_order(sz);
+ 
+ 			nss_qdisc_trace("Allocating %u bytes (%u pages) for flow qeueue\n", sz, 1 << order);
+@@ -416,6 +420,8 @@
+ 			if (q->flow_queue_mem) {
+ 				break;
+ 			}
++			if (q->flows == min_flows)
++				break;
+ 		}
+ 
+ 		if (!q->flow_queue_mem) {
+--- a/nss_qdisc/nss_qdisc.h
++++ b/nss_qdisc/nss_qdisc.h
+@@ -234,6 +234,7 @@
+ 	bool stats_stopping;
+ 	bool fw_node_free_confirmed;		/* FREE ACK, separate from host teardown state */
+ 	struct nss_qdisc_stats_wq *stats_wq;	/* Stats info and state work object */
++	struct nss_qdisc_htable *stats_table;	/* Actual owner while linked for stats */
+ 	struct hlist_node hlist;		/* Hlist node for managing stats hash list */
+ 	wait_queue_head_t wait_queue;		/* Wait queue used to wait on responses from the NSS */
+ 	spinlock_t lock;			/* Lock to protect the nss qdisc structure */
+--- a/nss_qdisc/nss_qdisc_htable.c
++++ b/nss_qdisc/nss_qdisc_htable.c
+@@ -43,9 +43,14 @@
+ struct nss_qdisc *nss_qdisc_htable_entry_lookup(struct nss_qdisc_htable *nqt, uint32_t qos_tag)
+ {
+ 	struct nss_qdisc *nq;
+-	uint32_t slot = nss_qdisc_htable_entry_compute_hash(qos_tag, nqt->htsize - 1);
+-
+-	spin_lock_bh(&nqt->lock);
++	uint32_t slot;
++
++	spin_lock_bh(&nqt->lock);
++	if (!nqt->htable || !nqt->htsize) {
++		spin_unlock_bh(&nqt->lock);
++		return NULL;
++	}
++	slot = nss_qdisc_htable_entry_compute_hash(qos_tag, nqt->htsize - 1);
+ 	hlist_for_each_entry(nq, &nqt->htable[slot], hlist) {
+ 		if (nq->qos_tag != qos_tag) {
+ 			continue;
+@@ -64,8 +69,13 @@
+ void nss_qdisc_htable_entry_del(struct nss_qdisc_htable *nqt, struct nss_qdisc *nq)
+ {
+ 	spin_lock_bh(&nqt->lock);
+-	nqt->count--;
+-	hlist_del(&nq->hlist);
++	if (nq->stats_table == nqt) {
++		if (!hlist_unhashed(&nq->hlist)) {
++			hlist_del_init(&nq->hlist);
++			nqt->count--;
++		}
++		nq->stats_table = NULL;
++	}
+ 	spin_unlock_bh(&nqt->lock);
+ }
+ 
+@@ -75,11 +85,18 @@
+  */
+ void nss_qdisc_htable_entry_add(struct nss_qdisc_htable *nqt, struct nss_qdisc *nq)
+ {
+-	uint32_t hslot = nss_qdisc_htable_entry_compute_hash(nq->qos_tag, nqt->htsize - 1);
++	uint32_t hslot;
++
++	spin_lock_bh(&nqt->lock);
++	if (!nqt->htable || !nqt->htsize ||
++	    nq->stats_table || !hlist_unhashed(&nq->hlist)) {
++		spin_unlock_bh(&nqt->lock);
++		return;
++	}
++	hslot = nss_qdisc_htable_entry_compute_hash(nq->qos_tag, nqt->htsize - 1);
+ 	INIT_HLIST_NODE(&nq->hlist);
+-
+-	spin_lock_bh(&nqt->lock);
+ 	nqt->count++;
++	nq->stats_table = nqt;
+ 	hlist_add_head(&nq->hlist, &nqt->htable[hslot]);
+ 	spin_unlock_bh(&nqt->lock);
+ }
+@@ -113,7 +130,6 @@
+ 		return NULL;
+ 	}
+ 
+-	nqt->htsize = size;
+ 	nss_qdisc_info("%p: Qdisc list hash table memory allocation of size %u sucessful, for %u members\n", nqt, msize, size);
+ 
+ 	return hlh;
+@@ -188,6 +204,7 @@
+ 		 */
+ 		hlist_for_each_entry_safe(nq, tmp, &hlh[--slot], hlist) {
+ 			new_slot = nss_qdisc_htable_entry_compute_hash(nq->qos_tag, new_mask);
++			hlist_del_init(&nq->hlist);
+ 			hlist_add_head(&nq->hlist, &nhlh[new_slot]);
+ 		}
+ 	}
+@@ -201,6 +218,7 @@
+ 	 * Attach the new table
+ 	 */
+ 	nqt->htable = nhlh;
++	nqt->htsize = new_htsize;
+ 	spin_unlock_bh(&nqt->lock);
+ }
+ 
+@@ -210,6 +228,7 @@
+  */
+ bool nss_qdisc_htable_init(struct nss_qdisc_htable *nqt)
+ {
++	spin_lock_init(&nqt->lock);
+ 	/*
+ 	 * Initialize table for eight qdisc nodes, it will grown if
+ 	 * needed as the number of nodes increase
+@@ -221,6 +240,7 @@
+ 	}
+ 
+ 	nqt->count = 0;
++	nqt->htsize = NSS_QDISC_LIST_TABLE_INIT_SIZE;
+ 	nss_qdisc_htable_hlist_init(nqt->htable, NSS_QDISC_LIST_TABLE_INIT_SIZE);
+ 	return true;
+ }
+@@ -232,8 +252,24 @@
+  */
+ void nss_qdisc_htable_dealloc(struct nss_qdisc_htable *nqt)
+ {
+-	spin_lock_bh(&nqt->lock);
++	struct nss_qdisc *nq;
++	struct hlist_node *tmp;
++	uint32_t slot;
++
++	spin_lock_bh(&nqt->lock);
++	if (!nqt->htable) {
++		spin_unlock_bh(&nqt->lock);
++		return;
++	}
++	for (slot = 0; slot < nqt->htsize; slot++) {
++		hlist_for_each_entry_safe(nq, tmp, &nqt->htable[slot], hlist) {
++			hlist_del_init(&nq->hlist);
++			nq->stats_table = NULL;
++		}
++	}
+ 	nss_qdisc_htable_free(nqt, nqt->htable, nqt->htsize);
+-	spin_unlock_bh(&nqt->lock);
+-}
+-
++	nqt->htable = NULL;
++	nqt->htsize = 0;
++	nqt->count = 0;
++	spin_unlock_bh(&nqt->lock);
++}
+--- a/nss_qdisc/nss_qdisc_stats.c
++++ b/nss_qdisc/nss_qdisc_stats.c
+@@ -42,14 +42,18 @@
+ 	struct gnet_stats_basic_sync *bstats;
+ 	struct gnet_stats_queue *qstats;
+ 	refcount_t *refcnt;
+-
+-	if (nim->cm.response != NSS_CMN_RESPONSE_ACK) {
++	size_t required = offsetof(struct nss_if_msg,
++				msg.shaper_configure.config.msg.shaper_node_stats_get.response) +
++				sizeof(wire->response);
++
++	if (READ_ONCE(nq->stats_stopping))
++		goto retire;
++	if (nim->cm.response != NSS_CMN_RESPONSE_ACK ||
++	    nss_if_rx_msg_buf_len(nq->nss_shaping_ctx) < required) {
+ 		nss_qdisc_warning("Qdisc %px (type %d): receive stats FAILED - "
+-				"response: type: %d\n", qdisc, nq->type,
+-				nim->msg.shaper_configure.config.response_type);
+-		atomic_sub(1, &nq->pending_stat_requests);
+-		wake_up(&nq->wait_queue);
+-		return;
++					"response: %u error: %u\n", qdisc, nq->type,
++					nim->cm.response, nim->cm.error);
++		goto retire;
+ 	}
+ 
+ 	/*
+@@ -76,7 +80,6 @@
+ 		bstats = &qdisc->bstats;
+ 		qstats = &qdisc->qstats;
+ 		refcnt = &qdisc->refcnt;
+-		qdisc->q.qlen = response.sn_stats.qlen_packets;
+ 	}
+ 
+ 	spin_lock_bh(&nq->lock);
+@@ -99,9 +102,7 @@
+ 	}
+ 
+ 	if (READ_ONCE(nq->stats_stopping) || refcount_read(refcnt) == 0) {
+-		atomic_sub(1, &nq->pending_stat_requests);
+-		wake_up(&nq->wait_queue);
+-		return;
++		goto retire;
+ 	}
+ 
+ 	/*
+@@ -112,6 +113,10 @@
+ 		nq->stats_get_timer.expires = jiffies + HZ;
+ 	}
+ 	add_timer(&nq->stats_get_timer);
++	return;
++retire:
++	atomic_sub(1, &nq->pending_stat_requests);
++	wake_up(&nq->wait_queue);
+ }
+ 
+ /*
+@@ -444,7 +449,7 @@
+ 	struct nss_qdisc *nq = (struct nss_qdisc *)app_data;
+ 	struct nss_qdisc_stats_wq *nqsw = nq->stats_wq;
+ 	struct Qdisc *qdisc = nq->qdisc;
+-	struct nss_shaper_node_stats_sync_many *nsnsm = &nim->msg.shaper_configure.config.msg.stats_get;
++	struct nss_shaper_node_stats_sync_many *nsnsm;
+ 	struct nss_shaper_node_stats_sync_many *nqsw_nsnsm = &nqsw->stats_sync_req_msg.msg.shaper_configure.config.msg.stats_get;
+ 	unsigned long int current_jiffies;
+ 	int i;
+@@ -458,20 +463,20 @@
+ 		return;
+ 
+ 	if (nim->cm.response == NSS_CMN_RESPONSE_ACK) {
+-		/*
+-		 * count is a firmware field and stats_sync[] is a flexible
+-		 * array, so bound it by the buffer the host provided - every
+-		 * term below comes from our own request copy, not the reply.
++		size_t hdr = offsetof(struct nss_if_msg,
++				msg.shaper_configure.config.msg.stats_get.stats_sync);
++		size_t actual = nss_if_rx_msg_buf_len(nq->nss_shaping_ctx);
++		size_t limit = min_t(size_t, actual, nqsw_nsnsm->size);
++
++		limit = min_t(size_t, limit, PAGE_SIZE);
++		if (limit < hdr)
++			goto failed;
++		nsnsm = &nim->msg.shaper_configure.config.msg.stats_get;
++		/* Reject a truncated response as a whole. Partly accounting it and
++		 * advancing the cursor would silently lose the omitted nodes.
+ 		 */
+-		size_t hdr = (char *)nqsw_nsnsm->stats_sync - (char *)&nqsw->stats_sync_req_msg;
+-		uint32_t max = (nqsw_nsnsm->size < hdr) ? 0 :
+-			(nqsw_nsnsm->size - hdr) / sizeof(nqsw_nsnsm->stats_sync[0]);
+-
+-		if (nsnsm->count > max) {
+-			nss_qdisc_warning("%px: stats sync count %u exceeds buffer capacity %u\n",
+-					nq, nsnsm->count, max);
+-			nsnsm->count = max;
+-		}
++		if (nsnsm->count > (limit - hdr) / sizeof(nsnsm->stats_sync[0]))
++			goto failed;
+ 
+ 		for (i = 0; i < nsnsm->count; i++) {
+ 			nss_qdisc_stats_process_node_stats(nq, &nsnsm->stats_sync[i]);
+@@ -514,9 +519,10 @@
+ 	/*
+ 	 * We get a NACK from FW, which should not happen, restart the request
+ 	 */
++failed:
+ 	nss_qdisc_warning("Qdisc %px (type %d): Receive stats FAILED - "
+-			"response: type: %d\n", qdisc, nq->type,
+-			nim->msg.shaper_configure.config.response_type);
++				"response: %u error: %u\n", qdisc, nq->type,
++				nim->cm.response, nim->cm.error);
+ 	nqsw->stats_request_fail++;
+ 	nqsw_nsnsm->last_qos_tag = 0;
+ 	nss_qdisc_stats_queue_delayed_work(nq);
+@@ -781,6 +787,8 @@
+  */
+ static inline struct Qdisc *nss_qdisc_stats_get_root_qdisc(struct nss_qdisc *nq)
+ {
++	if (!nq->qdisc)
++		return NULL;
+ 	return nq->is_root ? nq->qdisc : qdisc_dev(nq->qdisc)->qdisc;
+ }
+ 
+@@ -815,7 +823,7 @@
+ 	 * private area, so it must not be passed to qdisc_priv(); the stats
+ 	 * hash table is freed along with the real root qdisc anyway.
+ 	 */
+-	if (rqdisc == &noop_qdisc) {
++	if (rqdisc == &noop_qdisc || rqdisc->ops->owner != THIS_MODULE) {
+ 		return;
+ 	}
+ 
+@@ -839,36 +847,17 @@
+  */
+ void nss_qdisc_stats_qdisc_detach(struct nss_qdisc *nq)
+ {
+-	struct Qdisc *rqdisc;
+-	struct nss_qdisc *rnq;
+-
+-	if (nq->is_class) {
+-		return;
+-	}
+-
+-	rqdisc = nss_qdisc_stats_get_root_qdisc(nq);
+-	if (!rqdisc) {
+-		nss_qdisc_warning("Root qdisc not found for nq:%p with qos_tag:%x\n", nq, nq->qos_tag);
+-		return;
+-	}
+-
+-	/*
+-	 * During tree teardown the kernel points the device root at
+-	 * noop_qdisc before destroying the old hierarchy. noop_qdisc has no
+-	 * private area, so it must not be passed to qdisc_priv(); the stats
+-	 * hash table is freed along with the real root qdisc anyway.
+-	 */
+-	if (rqdisc == &noop_qdisc) {
+-		return;
+-	}
+-
+-	rnq = qdisc_priv(rqdisc);
+-	if (!rnq || !rnq->stats_wq) {
+-		nss_qdisc_warning(" Error, stats wq should be initialized by now for root qdisc:%x\n", rnq?rnq->qos_tag:0);
+-		return;
+-	}
+-
+-	nss_qdisc_htable_entry_del(&rnq->stats_wq->nqt, nq);
++	struct nss_qdisc_htable *table = nq->stats_table;
++
++	if (nq->is_class || !nq->qdisc || !table) {
++		return;
++	}
++
++	/* TC mutation is serialized by RTNL. The root may already have been
++	 * replaced, so detach from the table that actually owns this node.
++	 * Table teardown unlinks every child before freeing its storage.
++	 */
++	nss_qdisc_htable_entry_del(table, nq);
+ 	/* Lookup drops its htable lock before using the node. Drain any response
+ 	 * that fetched this node before removal, before its qdisc can be freed.
+ 	 */

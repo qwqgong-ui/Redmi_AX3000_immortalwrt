@@ -1,14 +1,504 @@
 # Redmi AX3000 / IPQ5018 NSS 开发交接
 
-## 当前发行状态
+## 上一整包：STA-r50（真机已换为 sta54dbg，见后两节）
 
-当前真机为 **opt59 模块补齐预发行**，源码 `c27415c429`，保留完整 opt58 UBI 回退。
-补齐按需加载的 MIRROR manager、驱动/DT 入口与条件编译的 ECM PCC 接口，
-版本为 NSS driver release39、clients release10、ECM release12。
-真实固件三轮镜像生命周期、指定 IPv4 TCP 流的双向宿主副本与 2 MiB TLS
-传输通过；测试实例和规则已清理，默认不加载模块或创建复制规则。
-完整 NSS、三路硬件队列、零带宽上限和八项配置已核对，验收及限制见发行附件。
-此前报告的间歇性卡顿仍未确认根治，不能按稳定版结论发布。
+此前真机为 `r0-nsslan-sta50-5563ec0823`，mac80211/ath11k 为
+**6.18.55-r50**，基于下述 opt66 内容追加 STA/MU 统计生命周期修复，保留配置整包刷入。
+源码仍在当前分支，Git 短哈希只表示基线；本版也尚未达到稳定发行的验收条件。
+
+正常移除不再提前清空 `peer->sta`，由唯一 sta_state 调用者在精确身份匹配的残留
+peer 回收之后、同一次 base_lock 临界区内释放统计；failed-add 保留先 detach 再释放。
+早停 VDEV 失败仍完成 host STA 析构并返回错误，MU 的每个 user 独立核对 STA 是否存在。
+撤去修补后的源码会分别触发残留 peer/计数断言和 MU 空 STA 断言，修补后均通过。
+
+| 验证层次 | 本版结果 |
+|---|---|
+| 补丁与回归 | 完整319项无线补丁应用、75项实际构建源码回归通过；故障注入为提取实际 C 函数的 ASan/UBSan 支架，不等同内核并发检测 |
+| 构建与镜像 | Debian12/GCC14.3完整 world 成功；factory/sysupgrade/staging rootfs、FIT的4个hash、9项sha256sums和4项profiles一致 |
+| 模块与固件 | 130个KO在82个kmod APK与镜像中一致，强引用/模块依赖缺失0；设备端130个模块及39个无线固件/板级文件摘要匹配 |
+| 板级适配 | 保留01744 IPQ5018/QCN6122组合固件；37个payload与源文件相同、23个外部分段完整；IPQ5018板号16/36、QCN6122板号96及0x20000字节板级数据通过校验 |
+| 设备重建 | 两轮真正down/up分别9.36/9.68秒恢复DHCP和三路NSS FQ；boot未变、8份配置摘要相同，未出现内核/NSS/SQM错误 |
+| 联网验证 | 首次经eno1/mark666的UDP/TCP DNS、20/20 LAN ping、验证证书的16MiB HTTPS下载通过，链路错误/drop增量0；当时默认路由另走wlan0，require-primary整体为false。随后一次UDP DNS超时使HTTPS停在解析阶段；再后来的同步抓包窗口UDP/TCP DNS及固定已验证IP、仍校验证书的16MiB HTTPS均通过。间歇异常未闭合，不能只保留通过样本 |
+
+factory UBI SHA256：`33dba036506b001006a3b1a5be9886cc6665bbb3c4f1efd2eae93bfbe785a59d`；
+sysupgrade tar SHA256：`dc315bad4ec2bf034420aa64b7b1aa11604f226ba218672d1ea3ec6c969c13de`。
+本板升级入口仍使用 factory UBI。完整产物和验收记录在本机
+`Redmi_AX3000_build/work/wireless-61855-5861/verified-r50/`，
+回归结果在同级 `staged-regressions/results.json`。
+
+重复回复的分层抓包和 NSS/非NSS 对照见[采证记录](periodic-stalls-opt59.md)。
+该现象尚未宣称修复；opt66的共享DSP主动恢复失败也未由本补丁解决，本版没有重复该故障注入。
+用户明确上游不是其设备，排查和修改仅限Redmi侧。传统20MHz试验的单个零重复窗口
+不能证明禁HT有效：恢复VHT80后另一个1000请求窗口也为零重复。当前维持VHT80、NSS及三路FQ。
+
+## sta52dbg（2026-11-14 刷入，调试版；真机已换为 sta54dbg）
+
+真机为 `r0-nsslan-sta52dbg-5563ec0823`，在 r50 基础上整包加入下述修复、999-939、
+已热装的用户态维护包，以及临时插桩 0224。factory UBI SHA256
+`068b32d38f3091e8a872bd9b0b1ea744981308a940974bcbee432eeec9134eae`；保留配置刷入，
+8 份配置摘要刷前刷后一致，82 项实际源码回归通过，镜像内 130 个模块与 rootfs 逐字节一致。
+产物与现场记录在本机 `Redmi_AX3000_build/work/wireless-61855-5861/verified-sta52dbg/`，
+上一轮 sta51dbg 的修复前基线在同级 `verified-sta51dbg/`。
+**0224 为调试插桩，问题闭合后应删除再出正式版。** 计数在
+`/sys/module/qca_nss_drv/parameters/dbg_*`，日志 `logread -e nss-dbg`。
+
+**qca-dsa-nss r3：有线端口掉线不再拆除 NSS conduit。** 旧版每次 lan1 掉线，
+`collect()` 用 `dsa_tag_8021q_find_user()` 选桥锚点，内核只返回 LEARNING/FORWARDING
+端口；唯一有载波的成员掉线即返回 -EAGAIN，随后暂停 ECM、销毁 VLAN 节点、
+`nss_data_plane_detach(eth1)` 并重新初始化 GMAC，恢复后整套重建。现以第一个管理态 UP
+成员作锚点，RX 仍在 `node_receive()` 按包解析当前转发端口；ECM 自身在无载波及 FDB
+删除时 defunct 连接。`test-nss-dsa-anchor.py` 执行实际 `collect()`，r50 源码同例失败。
+真机复核：工作站 eno1 断开 8 秒，lan1 Down/Up，eth1 无重新注册、无新的 conduit ready，
+VLAN 节点 ifnum 不变，`ready=Y`。此前两次 lan1 抖动与工作站重启时段吻合。
+
+**0223a：接受紧凑的 shaper 统计应答（qdisc 统计 10–30 秒才刷新的根因）。**
+sta51dbg 插桩显示，755 秒内 70 次状态消息在 `nss_core` 长度检查被丢弃，全部为
+ISHAPER_CONFIG ACK、`len=56 buf=56`，覆盖 if 1/31/32 三个根；与 69 次
+`got no reply` 一一对应，迟到、未知 cookie、身份不符和所有者变更丢弃均为 0。
+本轮无节点可报时，固件只回统计头（count=0），缓冲区按内容截短，而 `cm.len`
+仍为请求长度。上游检查 `ncm->len > nbuf->len` 接受它；0223 收紧为
+`ncm->len > buf_len - sizeof(*ncm)` 后丢弃，worker 每次等满 10 秒命令超时。
+修复只放行由 broker 跟踪、原始请求为 STATS_SYNC_MANY 的 BASE_IF 应答，要求 `cm.len`
+未改写、缓冲区含统计头及全部计数节点；broker 只提供与类型无关的
+`nss_control_request_copy()`，判断在 `nss_if.c`。新增 `test-nss-short-stats-reply.py`
+执行实际函数，去掉计数上限、长度一致或请求类型任一检查的三个变异均被拒绝。
+刷入后：长度丢弃 0、超时 0；有流量时三根计数 20 秒内变化 18 次，统计 worker 不再常驻 D 状态。
+0065 保留 TASK_IDLE 和限速超时报告，用于今后发现同类丢失。
+
+撤回此前的猜测：sta51dbg 刷后 29.6 MB 可用内存是在停 uhttpd/采样器并清缓存后测得，
+与 r50 的 17.6 MB 测量条件不同，不构成内存泄漏证据；sta52dbg 正常运行时约 19 MB。
+
+## sta54dbg：5 GHz 固件重启恢复（2026-11-14 刷入，调试版）
+
+真机为 `r0-nsslan-sta54dbg-5563ec0823`，在 sta52dbg 上加入 999-zf，83 项回归通过，
+产物与现场记录在 `verified-sta53dbg/`（失败一轮）和 `verified-sta54dbg/`。
+
+**999-zf：复位前释放 NSS 并经 hif_stop 停 CE。** opt66 中 `hw-restart` 使 pd-2 重启
+0.47 秒后报 `NOC_error.c:359`，Q6 根 PD 重启超时，两个射频都需整机重启。
+`ath11k_core_reset()` 在掉电前从未拆除该 SoC 的 NSS wifili，NSS 核心不受 host IRQ 屏蔽影响。
+现在 `op_start` 已不持 `conf_mutex` 等待之后、掉电之前执行 `ath11k_nss_teardown()` 并清
+`nss.enabled`，后续 `reconfigure_on_crash()` 的拆除为空操作并按原流程重建；拆除失败则不掉电、
+结束 reset 记账并停止自动重试。sta53dbg 注入：先打印 `NSS released before reset power cycle`
+再停 pd-2，无 NOC，2.4 GHz 保持服务；但 QCN6122 在 `Service connect timeout` 处失败。
+原因是复位路径的 raw `ce_irq_disable` 未清 `CE_IRQ_ENABLED`，`ath11k_pcic_start()` 因此
+跳过重新开中断，HTC wait_target 靠轮询通过而 HTT connect 无轮询。改走 `hif_stop()` 后，
+sta54dbg 注入 5 秒内 STA 重连，2.2 秒打印 `pdev 1 successfully recovered`，NSS 以新的
+radio/VDEV if 重建，队列、DHCP 与上游 ping 正常。`test-nss-reset-release.py` 执行实际函数，
+r50 源码同例失败。尚未覆盖：真实固件崩溃走 QMI `SERVER_EXIT`，NSS 在 rproc 自动重启期间
+仍然存活，同类问题未修；恢复后一次 `failed to process regulatory info -22` 未分析。
+恢复后与干净开机的路由器本机 TLS 下载各测一次，0.23/0.38 MB/s，信号 -79 dBm，样本不足以下结论。
+
+**未闭合：上行 STA 间歇性 4-way 握手超时。** 05:47–05:57 期间，对 `f4:2a:7d:ab:24:4c`
+反复在关联后 3.05 秒被 AP 以 reason 15 断开；同 SSID 的 `ac:03:e1`（-85 dBm）握手完成但
+DHCP 无应答。一次失败开机中 5 GHz NSS 仅投递 6 包而 RXDMA 错误 72。此后 10 次重关联、
+1 次接口重建、普通与 sysrq 重启各 1 次均未复现，当时未开 EAPOL 追踪，不能区分本机丢 M1/M2
+还是上游 AP 状态。已加入 `nss-wifi.main.relay_trace`（默认 0，真机设为 1，开机即记录各阶段
+EAPOL）和设备端 `eapol-fail-capture` 服务（脚本在 `scripts/nss/`，出现 reason=15 时保存
+dmesg/logread 至 `/root/eapol-fail-*`，最多 5 份），二者已列入 sysupgrade.conf。
+
+## sta55–57dbg：真实固件崩溃与开机 5 GHz 收包失效（2026-11-15，未闭合）
+
+**真实崩溃走根 PD。** 向 b00a040 注入 `assert`（固件 `wlan_wmi.c:692`，进程 wlan1）后，
+上报致命错误的是 Q6 根 PD `cd00000`，user PD 的 fatal 中断不触发；999-zg 挂在 user PD
+SSR 上，因此不会被调用。sta55dbg 看门狗曾因 `iw link`/operstate 仍显示正常而误报恢复，
+现改为根 PD running、`pdev successfully recovered`、注入后无 `failed to send WMI`、经
+phy1-sta0 ping 上游四项同时成立才判定恢复，失败时另存 remoteproc 状态与 q6v5 中断计数。
+
+**0816（内核）：根 PD 崩溃时经 user PD 自身路径停止与重启。** 参照 QSDK
+`linux-ipq-files@ba9f6a11` 的 `qcom_q6v5_mpd.c`：根 PD 以 CRASHED 停止时先对每个 RUNNING
+的 user PD 调用 `rproc_stop(..., true)` 并置 SUSPENDED，重启期间 user PD 不关闭也不引导根，
+根 PD 就绪后由 kthread 在 user PD 锁下 `rproc_start()`；根 PD 启动等待改为 QSDK 的 10 秒。
+`test-mpd-rootpd-recovery.py` 执行实际函数，基线与"标志置晚"变异均被拒绝。sta56dbg 实测：
+pd-1/pd-2 干净停止，但根 PD 仍 `start timed out`（-110），user PD 停在 SUSPENDED；10 秒
+版本（sta57dbg）尚未完成注入，因为下述问题使 5 GHz 在开机后不可用。根 PD 无法从致命错误
+重新启动的原因仍未知。
+
+**未闭合：开机后 5 GHz 数据收包整体失效。** 连续四次开机（sta56dbg 两次、sta57dbg 两次）：
+关联成功，但 3.05 秒后被 AP 以 reason 15 断开；EAPOL 追踪显示 if=32 上没有任何 EAPOL RX；
+NSS 5 GHz `rx_deliverd=0`、`reo_reaped=0`，RX 缓冲区已补充（`rx_desc_in_use=511`），
+`wbm_src_reo` 随每次握手增长、`code_inv` 每次约 +4。关联窗口内的 REO 队列查询显示所有 TID
+`jump_2k=0`、`late=0`、SSN 0，仅 TID5 已建立 64 窗口并处理 1 帧，否定了 SSN/2K 跳变假设。
+同一时期 2.4 GHz 正常；更早在同 SSID 的 `ac:03:e1` 也出现过握手成功但 DHCP 无回应。
+在已失效状态下做 hw-restart（完整重建 5 GHz SoC 与 NSS 实例）不能恢复；此前一次失效开机
+在约 6 次失败后自行恢复并稳定运行 5.6 小时。根因待查，现场日志在 `verified-sta56dbg/`、
+`verified-sta57dbg/`（`boot*-deadrx-dmesg.txt`、`reoq-probe-1.txt`、`reo-dead.txt`、
+`eapol-fail/`）。
+
+**2026-11-15 续：5 GHz STA 的 REO 队列从未生效（D1，未闭合）。** 2A 与 3A 表现相同，故障在
+路由器侧。关联后 TID 0 等全部数据帧以 `Desc addr zero` 进入错误路径（每次关联后 8 秒内约
+18–123 个），`reo_queue_query` 显示所有 TID 队列描述符有效但 `processed_mpdu=0`；NSS 驱动
+数百次重发 `WMI_PEER_REORDER_QUEUE_SETUP` 均无效。EAPOL 经 `nss_eap_route` 绕过 REO，因此
+握手有时成功但拿不到 DHCP。连续三次开机（两次 NSS、一次 `nss_offload=0` 主机模式）均复现，
+monitor vdev 有无不影响。同一 QCN6122 上临时开放 AP（hostapd，ch149）时，接入客户端 TID 0
+处理 38 帧且空队列计数不变，说明芯片与 REO 正常，缺陷限于 STA vdev 的 peer/vdev 配置路径。
+另一类失败（D2）是重连时 CCE 路由的 EAPOL M1 进入 WBM（`wbm_src_reo` +4）后未送达，导致
+reason 15；待 D1 修复后再查。证据在 `verified-sta57dbg/boot4-nullq/`。`assoc-probe` 已增加
+`settle` 快照（空队列增量与 TID 0 处理数），并修正跨午夜按文件名轮转误删新文件的问题。
+
+**sta58dbg（fw_trace 跟踪）。** 新增默认关闭的 `ath11k.fw_trace`，记录 QCN6122 的 WMI 命令
+前 48 字节与 HTT peer map/unmap。同一次开机内对比：STA 连 2A，TID 0 处理 0 帧；临时开放 AP 处理
+19 帧，WPA2 AP 处理 36 帧，因此加密可以排除。两种模式都在 peer map 之后、PEER_ASSOC 之前对 17 个
+TID 下发相同格式的 `REORDER_QUEUE_SETUP`（vdev 0、tid、地址、窗口 1）。差别在固件 peer 状态：
+STA 的 AP peer 为 `peer_type=1`（BSS peer）、`qpeer_flags=0x7200008`，并且之后还有 STA 独有的
+`VDEV_UP`；AP 模式的客户端为 `peer_type=0`、`0x1200008`。sta58dbg 第一次 sysupgrade 没有写入，
+设备以原版本重启；第二次刷写成功。数据在 `verified-sta58dbg/compare1`、`compare2-wpa2`。
+
+**纯净驱动对照（sta59dbg 上的开机一次性替换）。** sta59dbg 的 `reo_queue_remove` 先移除队列再由 NSS
+重绑，TID 0 仍为 0 帧，排除“相同地址被固件忽略”。运行中卸载重载无线模块会让 Q6 根 PD 启动超时
+（-110），两个射频都起不来，只能重启恢复。改为在开机时由 nss-wifi 一次性加载不含 `patches/nss`
+系列、`CONFIG_ATH11K_NSS_SUPPORT` 为空的 mac80211/ath11k：STA 关联 2A 后 `Desc addr zero` 达到 121，
+ping 网关失败，与 NSS 版相同。因此 D1 不在 NSS 补丁系列内，范围缩小到 OpenWrt 基础 ath11k 的
+QCN6122 STA 路径、WLAN.HK.2.7.0.1-01744 固件或板级数据。测试后已恢复原厂启动脚本与 NSS 版。
+
+换用旧版仓库的 `WLAN.HK.2.6.0.1-01288`（overlay 替换 q6/m3）后，IPQ5018 固件在启动时断言失败
+（`platform.c:738`），两个射频都起不来；已删除 overlay 文件，恢复 2.7.0.1-01744。
+
+**STA 的范围再缩小（sta59dbg）。** 路由器 5G STA 连电脑临时开的 Linux WPA2 热点（ch149），同样
+TID 0 处理 0 帧、空队列 +9，与 TP-LINK/mesh 无关。2.4 GHz（IPQ5018）以 STA 连 2A 的 2.4 GHz
+（f4:2a:7d:ac:1c:18，ch11）：空队列 +36，TID 0 只处理 5 帧，DHCP 无租约。所以两个射频的 STA
+模式都受影响；它们共用同一个 Q6 固件镜像 2.7.0.1-01744。打开混杂模式的 mon1 后连续 400 秒握手
+全部失败，无法复现上一次开机 323 秒那次成功会话。对照：r50（同一 backports 6.18.55、同一固件包）
+两次真实重连约 9 秒拿到 DHCP。0816 对正常开机路径只把根 PD 等待改为 10 秒。
+
+**r50 对照（2026-11-15）。** 临时刷回 10 月验证过的 `r0-nsslan-sta50`（sha256 `33dba036…`），保留配置。
+STA 连 2A：`Desc addr zero` 97、5 GHz `reo_reaped=0`，ping 网关失败。只保留 2A 一个 STA 段后重载，
+结果相同（空队列 427）。10 月同一镜像两次重连约 9 秒拿到 DHCP；与当时相比，5 GHz 初始化日志一致，
+无线配置只多出 2A 段（当时禁用）与 3A 的 BSSID 锁定。因此 D1 不是 r50 之后的软件改动引入的；
+在软件和配置都基本相同的情况下，结果从 10 月的正常变成了现在的失败。
+
+**更正（2026-11-15）：`Desc addr zero` 不是断网原因，但确实是 REO 缺陷（见下一段的再更正）。** 在 7 月稳定版（`r38010-015690e239`，不带 NSS）上，
+路由器 5G STA 连电脑临时开的 Linux WPA2 热点，ping 10/10 通过，同一时段空队列也 +10，所以这类帧是正常背景
+（推测为广播或多播），之前按 D1 根因排查的方向作废。同一时间电脑自己连 2A 也拿不到 DHCP（NetworkManager 报
+IP 配置超时，自动回落到 3A 后能上网）。另一个独立的配置问题：2A、3A 两个 STA 段同时启用并挂在同一个 `wwan` 上，
+第二个接口 `phy1-sta1` 起不来，netifd 把 `wwan` 判为不可用，DHCP 客户端根本不启动；临时禁用 3A 段后
+udhcpc 才开始发 discover。
+
+**恢复（2026-11-15）。** 只启用 2A 一个 STA 段（`wireless.wifinet3.disabled=1`），7 月稳定版在 2A 上拿到
+192.168.13.36，外网 ping 5/5；刷回 sta59dbg（NSS 卸载）后拿到 192.168.13.37，外网 ping 10/10，5 GHz
+`reo_reaped=39`、`rx_deliverd=41`，NSS 数据面正常。2A 之前不给 DHCP，期间电脑也拿不到地址。仍未闭合：
+路由器连 3A（f4:2a:7d:ab:24:4c，-67 dBm）在稳定版和 NSS 版上都是握手超时（reason 15），同一节点电脑可以
+正常连接；外网 ping 偶有重复回包。
+
+**再更正：空队列帧就是单播数据。** sta59dbg 连 2A 时，向网关 ping 30 次，空队列 +60、TID 0 只 +3，接口收包
++96；外网 ping 出现 3～11 个重复回包。这些帧由 NSS 从错误路径交给主机，网络是通的，但绕过了 REO 的
+去重和重排序；r50 记录的重复回复也是同一原因。关闭 HT/VHT（不建立 BA）后同样是空队列 +357、TID 0 +0，
+所以和 BA 无关。在 TID 0 上先移除队列，NSS 会重新下发设置（fw_trace 已确认 0x6014 之后跟着 0x6013），
+但空队列比例不变。TID 0 偶尔也有帧命中队列，说明队列本身是设置好的，只有一部分帧拿不到。
+2A 网关 192.168.13.1 的 MAC 是 `f4:2a:7d:ac:04:48`，与 BSSID `…1c:1a` 不同。
+
+**结论（sta61dbg）：REO 没有缺陷，`Desc addr zero` 只来自组播和广播帧。** 在主机模式的空队列处理里
+采样 MPDU 字段：fc 为 0x4208 或 0x6208（FromDS），addr1 全部是 `ff:ff:ff:ff:ff:ff` 或 `01:00:5e:…`，
+addr2 是 2A 的 BSSID，ast 144，`reo_queue_desc` 为 0。20 次 ping 的 36 个样本里，没有一个 addr1 是本机单播
+MAC。这与上游 `ath11k_dp_rx_h_null_q_desc` 注释里描述的“组播/广播帧没有路由到非 QoS TID 队列”一致。按 TID
+读 `reo_queue_query`：主机模式 50 次 ping 后 TID 0 +66、TID 5 +51；NSS 模式 TID 0 +42、TID 5 +52，两种模式下
+REO 的 `duplicate_16bit` 都是 0。早先“TID 0 只 +3”的测量只看了 TID 0，漏掉了 TP-LINK 走 TID 5 的回包；空闲时
+空队列每 30 秒涨约 90 到 360 个，全是背景广播。外网 ping 的重复回包在 REO 层看不到重复，r50 的三点抓包也显示
+重复在 WAN 入站时已经存在，所以来自上游。
+
+**sta62（2026-11-15，已由 sta63 取代）。** 删除 0224 与 999-zz 两个调试补丁，qca-nss-drv 升到 45、mac80211 升到 54，
+85/85 项回归通过，factory SHA256 `4f887994…bc0d`。保留配置刷入后 NSS 卸载开启，`fw_trace`/`dbg_*` 参数不存在，
+路由器上的 assoc-probe、eapol-fail-capture、nss-rx-sampler 已停用并从 sysupgrade.conf 删除（原文件备份在
+`/root/sysupgrade.conf.debug-bak`），`relay_trace=0`。上联只启用 2A：拿到地址，外网 ping 10/10。曾有一段时间 2A
+本身丢包 20%～70% 并伴随大量重复，同一时刻电脑连 2A 也是同样症状，属于上游。3A 在 sta62 上无论固定 MAC 还是
+随机 MAC 都是握手超时（reason 15，15 次），同一节点电脑可以连接，仍未闭合。
+
+**3A 握手超时（D2）的已知链条，未闭合。** 失败的那几次：AP 在 3 秒内把 M1 发了 4 次，每次尝试 5 GHz
+`wbm_src_reo` 都 +4，且不计入空队列或无效队列；同时 REO 错误分类里没有 OOR、2K、AMPDU-in-non-BA 的增量，所以
+这 4 帧更像是经 `nss_eap_route` 的 CCE 规则路由到 WBM 的 EAPOL，而不是 REO 错误。主机一侧始终没有 EAPOL RX，
+也就从未发出 M2，因此不是“发送不重传”。TID5 在失败时已建立 BA（窗口 64，收到 2 个 BAR）。EAPOL 路由规则只在
+`mac_op_start` 按固定元数据下发一次，与 peer 无关；SSN 取自 mac80211 解析的 ADDBA，代码正确。重建 vdev 后第一次
+关联能成功、同一 vdev 重连失败的规律反复出现；不带 NSS 的稳定版连 3A 同样失败，所以丢弃点不只在 NSS 内部。
+缺少的证据是失败时那 4 帧在主机模式下的 REO/RXDMA 错误码，需要一次有针对性的测量才能定位。
+
+**3A 重连测量（sta62）：没有复现。** 用 wpa_supplicant 的 ubus `control` 在同一个 vdev 上重连 3A：主机模式下
+`REASSOCIATE` 3 次、`DISCONNECT`+`RECONNECT` 3 次，NSS 模式下 `DISCONNECT`+`RECONNECT` 3 次，9 次全部在 2～4 秒内
+完成四次握手，所以拿不到失败时的错误码。此前在 sta62 上连续 15 次 reason 15，都发生在 `wifi` 全量重载切换上联之后；
+用户自己切到 3A 后立即可用。数据在 `verified-sta62/reconnect-probe/`。D2 的触发条件仍不明确，在能复现之前不改代码。
+当前真机：NSS 模式，上联 3A（192.168.15.26），外网 ping 10/10。
+
+## sta63（2026-11-15 刷入，当前真机）：TX 速率与重试统计（QSDK 358）
+
+真机为 `r0-nsslan-sta63-5563ec0823`，只在 sta62 上加入 `999-zh`，mac80211 升到 55。86/86 项回归通过，
+factory SHA256 `3fd16bdc…831e`，rootfs 的 `ath11k.ko` 与 r55 包一致（`32475656…b9f5`）。保留配置刷入，
+8 份配置摘要刷前刷后一致。产物和现场记录在 `verified-sta63/`，刷前基线在 `baseline-sta62-pre63/`。
+
+**999-zh。** sta62 的 station dump 在 -76 dBm 时 `tx retries` 恒为 0：ath11k 的 host 完成把
+`rates[0].idx` 置为 -1，mac80211 因此不计重试，NSS 每 peer 的 `retries` 在本固件上也是 0。按 QSDK 358，
+无 BA 状态时从 completion-common TLV 取 TID，TID≥16（非 QoS 数据和管理帧）的 PPDU 不再更新 txrate 和
+tx_duration。重试按 QSDK host-cmn `dp_mon.c` 的 offload 口径计：每个 PPDU 中 tried−success 的 MPDU 都会重传，
+delayed BA 的成功数要等 BAR 才有，所以不计。NSS 和 host 模式共用这一个计数，NSS station 路径取它与旧的
+NSS+mac80211 之和中的较大值，不会重复计数。QSDK 358 的 RSSI 噪底/带宽偏移部分未移植，因为依赖未验证的 FW NF 校准。
+`test-ppdu-tx-retries.py` 执行实际函数；sta62 源码，以及去掉 TID 过滤、delayed BA 门、completion TID 三个变异，都会失败。
+
+**刷后验证。** 这次 sysupgrade 后两个射频都正常起来了，没有遇到需要冷启动的情况。5 GHz STA 拿到地址，外网 ping 10/10。
+经 eno1/mark666 的 30 MB HTTPS 转发下载为 33.6 Mbit/s，期间 5 GHz NSS `rx_deliverd` +22157，说明走的是 NSS。
+刷前同条件为 27.8 Mbit/s，信号随上游波动，不作为性能结论。5 GHz STA（-78 dBm）显示 `tx retries 10608`/
+`tx packets 13326`。重试按 MPDU 计、包数按 MSDU 计，两者口径不同，比值不是重传率。2.4 GHz AP 客户端显示
+HE-MCS5 速率和非零重试。dmesg 无 Oops/BUG/WARNING。
+
+**本轮核对：QSDK“候选已修”条目已在栈内。** 338（CRASH_FLUSH 统一 TX 入口）、357（按最终 vdev_type 拒绝
+MONITOR）、374（`is_diff_encap`）和 784（REO_MISC_CTL 0x5d8 三位目的地 RMW）都在 `999-z-week-audit` 中，
+sta62 起已随镜像运行。
+
+**已排除的方向（记录，不改代码）。** 根 PD 在同一次上电内停止后再启动会 `start timed out`（-110）。拿 QSDK
+`linux-ipq-files@ba9f6a11` 的 `qcom_q6v5_mpd.c` 以及 `linux-ipq-6.1@8e508b31` 的 `qcom_q6v5.c`、`smp2p.c`
+对照，启停序列只有表面差异，解释不了这个问题。QSDK 的 MPD 驱动同样没有 `.shutdown`；`ath11k_ahb_shutdown()`
+经 `core_deinit` 已经会断电，sta51–sta63 共 13 次热重启刷写后无线都起来了。未验证的线索：`shutdown()` 的
+`!REGISTERED` 分支跳过断电，而 `remove()` 的 QMI_FAIL 分支会断电，所以一个启动失败的射频可能在热重启后
+仍保持 rproc 运行。原厂 DT 带 `qca,wcss-aon-reset-seq` 及 AON/Q6/CE 复位，当前 TZ PAS 路径没有用到，这也只是线索。
+
+## STA-r50 上的维护进程修正
+
+2026-10-18 在上述 STA-r50 上热升级用户态维护包：`sqm-scripts 1.7.2-r4`、
+`sqm-scripts-nss 20261012-r6`、`nss-wifi 14`、`ucode-mod-rtnl 2026.01.16~85922056-r3`。
+本次没有重刷固件或更换 r50 无线模块；三个新包与 rtnl 包归档在
+`Redmi_AX3000_build/work/nss-watch-maint-20261018/packages/`，含 SHA256 清单。
+安装前后9个关键载荷与实际源码相同，8份配置、boot ID、无线 ifindex 18/19 和三路
+`nssfq_codel 10:` 均保持一致。APK 新默认配置另存为 `.apk-new`，未覆盖现有配置。
+
+旧 SQM runner 把非目标 section 的跳过返回失败，末尾 section 又会掩盖目标失败；
+这导致无线绑定未发布、watch 持续重试。r4 聚合真实失败、跳过返回成功、缺状态的 stop
+幂等，并在同一 SQM 锁内修复 ECM denied 所有权。两个 watch 改用 ucode 原生
+ubus/rtnetlink/fs，正常巡检不启动子进程、不反复写绑定。邻居 ARP 保留首次连接和
+300秒刷新，失败与 SKIP 均退避30秒，身份包含接口、BSSID、IP/前缀及双方 MAC。
+链路事件兼容 flags/change-mask 数组；基础 IPv4 地址选择与现有发送程序一致。
+正则表达式在进程启动时编译一次，避免每轮遍历 rc.d 重新编译。
+
+| 真机采样，CPU按整机两核总时间计算 | 修正前15秒 | 安装后60秒 |
+|---|---:|---:|
+| 整机 CPU | 9.01% | 1.62% |
+| SQM watch，含等待回收的子进程 | 6.76% | 0.11% |
+| 邻居 watch，含等待回收的子进程 | 1.16% | 0.11% |
+| 全机新建进程数 | 464 | 3 |
+
+后者3个进程来自采样命令自身；两个服务 PID 未变，FD 数分别12/13且未增长。
+这是有界空闲窗口的运行验证，不代表满载 CPU 或无限时稳定性。
+原始 `/proc`、安装和联网证据在同一 work 目录。UDP/TCP DNS、20/20 LAN ping、
+经 eno1/mark666 且校验证书的16MiB HTTPS通过；该窗口链路错误和drop增量为0。
+
+受控双向无线负载仍有异常：相同 STA-r50/NSS/FQ 路径下载约12.82Mbit/s、上传约
+3.34Mbit/s；各160个探针收到160个唯一回复，但另有22/33个重复回复。按唯一回复
+重算的 RTT p95 分别214/926ms，不能因0% loss就算无线正常。测试工具已修正为
+单独统计重复回复、仅用首个回复计算 RTT，并拒绝把有重复的窗口标成 PASS；已有
+原始日志由新解析器重算为失败。对端、临时邻居和 namespace 已清理，电脑原无线
+关闭状态及主路由已恢复。该路径含独立电脑 Wi-Fi 与上游转发，吞吐及排队不能只归因
+Redmi，也没有据此排除 Redmi。原始日志及重算在 `wireless-load-raw/` 和
+`wireless-load-corrected.json`。
+
+随后电脑 eno1、Redmi br-lan、phy1-sta0 三点非混杂抓包，在三点共有的前961个
+ICMP sequence 中各有961个请求、967个回复；额外6份回复的 sequence、IPv4 ID 与
+payload 多重集三点完全一致，WAN入站已存在，转发到LAN没有增加副本。
+此统计仅覆盖共同捕获区间，未把1000个发包全当成三点完整捕获；内核 capture drop 为0。
+它不能单独区分固件/驱动接收与上游去重，且不等同负载排队的根因定位。
+数据在 `icmp-segments/`。临时抓包工具已移除；服务单例、SQM reload 保持原PID，
+持久配置、boot ID、VIF编号、三路NSS根队列复核相同，原生watch启动后无新增内核日志。
+
+构建采用实际 Debian12/目标工具链。CI 增加固定版本 host ucode，执行实际状态模块：
+各100轮空闲巡检、丢根队列、同名接口重建、观测失败、禁用/删除、ECM 所有权、
+邻居缺路由/失效/身份变化与短断重连等回归通过；12项独立撤保护反例均由运行断言拒绝，
+不以源码字符串存在代替行为测试。原有 C ARP 帧/路由选择 ASan/UBSan 测试保留通过。
+
+以上修正只闭合维护进程的空转及相应状态问题。间歇 DNS/重复回复、共享 DSP 的
+主动恢复失败和下述 qdisc 额外引用边界仍保留为未完成项，不能标记整个路由器无异常。
+
+## opt66 阶段记录
+
+此前真机为 **opt66 整包验证版**，版本 `r0-nsslan-opt66-5563ec0823`，
+保留配置刷入。主动 `hw-restart` 测试触发共享无线固件崩溃，自动恢复失败；
+已停止故障注入并整机重启恢复联网，**未达到整个项目无异常的停止条件**。
+Git 短哈希只表示构建基线；当前补丁尚未提交，镜像必须按实际摘要识别。
+包 release 为 mac80211/ath11k 49（backports 6.18.55）、NSS driver 42、clients 12、ECM 13、
+NSS DP 7、SSDK 2、DSA NSS 2；SQM 1.7.2-r3、SQM NSS 20261012-r5、dnsmasq 2.93-r5。
+
+本板现有升级入口要求 **squashfs factory UBI**，不能将 sysupgrade tar 当作相同入口：
+factory SHA256 `441447d608fe7335267d5b49d58ed4e6f4040f2e98ce2657b692e98d6bcf91cd`；
+sysupgrade tar SHA256 `28297b4a9dee7e419df7c86d402b1c6db31f157d46b8a87c88f11a68d2f4621c`。
+产物与原始证据在本机 `Redmi_AX3000_build/work/nss-opt66-20261018/`。
+opt63/opt65 产物和现场记录保留在对应 work 目录，不能混用验收结果。
+
+| 验证层次 | 已完成的范围 |
+|---|---|
+| 官方源码 | BOM 中25个官方Git远端已重新连通核对；SQM固定上游20ba926，另保留原厂manifest/pin和逐文件对照边界 |
+| 源码回归 | 实际构建源码74项通过；本轮9项统计生命周期/锁消融和2项队列/原生hotplug消融均在运行时拒绝撤补丁反例；这些是提取实际函数的支架测试，不是内核并发检测器 |
+| 目标构建 | Debian12/GCC14.3完整world成功；前批18个修改C文件另做严格编译，未改原对象 |
+| 整包一致性 | 130个KO在82个kmod APK、最终rootfs和SquashFS中相同，缺失强引用和依赖均为0；SQM源码/镜像/APK也相同 |
+| 镜像 | factory/sysupgrade根文件系统一致，FIT内4个hash、Image/DTB、9项sha256sums与4项profiles全部通过 |
+| 当前设备 | opt66、130个模块及39个无线固件/板级文件摘要、8份配置、DHCP和三路硬件nssfq_codel核对通过；故障后整机重启，8份配置仍相同，两台WPA2/WPA3客户端已重新认证 |
+| DNS | 镜像内dnsmasq独立进程的6项TCP故障场景、12项DNSSEC/CD场景通过；整机恢复后经eno1/mark666访问生产UDP/TCP DNS及验证证书HTTPS通过 |
+| 普通重连 | opt66两次真正down/up分别约17.2/14.8秒恢复DHCP和三路队列；期间360次TX读、360次RX读、361次RX reset，无内核或NSS/SQM异常，临时debug开关已还原 |
+| 驱动恢复 | 未通过：b00a040.wifi的hw-restart之后，父cd00000.remoteproc报告NOC_error.c:359，父DSP重启超时-110，两路WMI随后失败；手动整机重启后恢复 |
+
+本轮先刷入opt61，实测暴露多peer统计误拒收和有线队列早于DSA接管；opt62
+修正后仍捕获watch的检查与实际run之间争锁，opt63改为同一SQM锁内检查/修复，
+忙则返回75交下轮。opt65普通无线重建又暴露原生11-sqm重复stop/start争锁，
+以及VDEV先注销、qdisc稍后FREE而被本机BASE gate拒绝的顺序问题。opt66使原生
+NSS FQ热插拔复用nss-reconcile/nss-stop，并在ndo_stop已deactivate后、驱动移除
+VDEV前放掉设备持有的NSS root qdisc引用。两次普通重建未再出现这两类异常。
+
+本轮还统一TX debugfs读取与两条writer的base_lock；nl80211速率/时长也在同一锁
+内快照。station_add在发布peer->sta前分配TX/RX统计，失败先撤销已完成的DP和peer，
+再持base_lock断开残留的同一STA引用并释放统计；正常remove同样保护释放。
+
+**恢复故障仍未闭合，不能将opt66标为稳定发行。** 故障注入日志在
+`runtime-after/hw-restart-b00a040.wifi.log`；恢复后的新boot ID、配置摘要和联网结果在
+`runtime-after/rescue-reboot.json`、`rescue-connectivity.json`。后者仅客户端默认路由
+检查失败，因为电脑当时另接上游Wi-Fi；绑定eno1的DNS、HTTPS、ping及有线计数检查
+均成功。之后没有再次执行无线重启或故障注入。
+
+源码边界：提前dev_shutdown只闭合当前直接NSS root、没有额外TC引用的普通关闭
+顺序。并发TC filter额外引用可推迟最终destroy，mq下面的NSS叶队列也不在当前root
+检查内；这两类所有权边界尚未闭合。主动驱动重启是另一条共享DSP恢复路径，
+本轮普通down/up修补不能代替其修复。
+
+opt59曾发生的断租、重复回复和顿卡见[历史采证](periodic-stalls-opt59.md)，
+不能据本轮源码修补宣称此前唯一根因已找到。当前STA为TP-LINK_3A、192.168.15.17。
+一次TCP DNS REFUSED及上游单次TCP reset仍在核对；未据此认定NSS或上游的唯一责任。
+动态AP VLAN/WDS、可选路径与固件执行契约的剩余项仍见下文及[明细](firmware-contracts.tsv)。
+
+## opt60：原厂全量对照与 NSS 修复
+
+**下述为opt60阶段的历史记录，整包校验只对应摘要b5e1e468…的既有产物。
+当前整包和设备状态以上方opt63记录为准；未完成项仍须逐项闭合。**
+
+原厂参考为 [NHSS.QSDK.12.4.5.r3 wlan-open](https://git.codelinaro.org/clo/qsdk/oss/system/feeds/wlan-open/-/tree/NHSS.QSDK.12.4.5.r3)，
+固定提交 `9441ce3c71760cd7d1cd0c5b754f55790f123dd0`。实际仓库的补丁根目录是
+`patches/`；[逐项表](qsdk-week-comparison.tsv)包含其全部 1054 项，
+包括非 `.patch` 后缀的有效 diff：ath11k 229、subsys 207、ath12k 618。
+本周范围为 2026-10-10 起的六个提交以及当前工作区，覆盖 300 个唯一改动文件；
+NSS 相关清单共 795 个文件，其中本周改动 195 个。逐项表是源码语义对照，
+不代表已在本设备运行每项功能。
+
+| 标记 | 数量 | 含义 |
+|---|---:|---|
+| E | 158 | 适用语义已存在；不要求旧代码逐字相同 |
+| D | 134 | 设计差异或可选功能未移植，说明保留在逐项表 |
+| N | 727 | 当前平台、驱动或配置不适用；包含 ath12k 专属实现 |
+| F | 34 | 对照发现缺陷；证据列区分候选修复与尚未修复项 |
+| U | 1 | 密钥删除与固件排队 TX 同步仍缺执行契约；不代表仅剩一项工作 |
+
+同批修复按真实所有权边界组织：
+
+- RX 在扩容前保存并重定位 descriptor，传播失败；纠正 RAW/SNAP、MIC 异常、
+  REO 错误顺序及消费 skb 后继续读取 peer 的问题，保留 MCBC 软件 PN 校验。
+- 密钥在正确退关联状态清理；GTK 重装持有有效 peer/state，并在 WMI 前后复核。
+  AP VLAN 从已提交的父接口继承格式，父接口失败继续拦截发送。
+- ME reader 排空超时设置 SOC 持久不确定状态。teardown 关闭全部无线电的生产者；
+  即使 VIF 已摘链，也不能发送 RESET 后误释放仍被引用的 DMA。
+- RPS 使用有身份和取消排空的私有事务、互斥配置和双协议回滚；统计表显式持有
+  回调 owner，resize 原子发布指针与大小，流数分配检查下限和乘法溢出。
+- ECM 的宿主 TCP liberal 标记与固件序列检查分离；conntrack/neighbor observer
+  保留原消费者语义。组播 CREATE ACK 记录请求序号下界和规则/路由代次，
+  后续分页统计校验代次，移除每页全库快照。
+- DSA 接收核对节点、conduit、VID 和端口状态；VLAN filtering 变更前撤销接管。
+  SSDK notifier 限定实际 PHY 管理域，DP 无 carrier 时保留 host 队列，
+  EEE bitmap 明确初始化。shutdown 先关闭发布和队列，再排空 IRQ/NAPI 与本地 DMA。
+- 补齐 AQL 短输入、迟到 kickout、QMI 内存/BDF 清理、监管规则输入及多链路
+  统计聚合的异常分支。严格编译误报通过明确契约处理，没有整体关闭告警。
+
+原厂 `open-mac80211.bb` 只描述使用同一 `KLIB_BUILD` 构建 backports，
+不能据此拼装完整内核、模块与 FIT/UBI。本轮在实际 Debian 12 构建环境，
+使用 OpenWrt 同一构建树执行 `make defconfig`、清理内核后 `make -j20 V=s`；
+配置取自唯一 [39 项 canonical profile](../../configs/redmi-ax3000-nss-wifi.config)，
+CI 直接复制该文件，再追加镜像构建器、SDK、工具链和非共享包选项。
+内核、所有 kmod APK 与系统镜像须同批生成；禁止用单独复制 `.ko` 作为发行包。
+
+最终验收记录：
+
+| 检查 | 结果与范围 |
+|---|---|
+| 实际完整构建 | OpenWrt world 成功，内核/模块/FIT/UBI 同一构建树生成 |
+| 严格编译 | 使用保存的实际 GCC 14.3 Kbuild 命令重编译 351 个文件，未初始化变量警告作为错误，0 失败；原始对象 SHA256 未变。当前配置未编译的两个 GRE 文件不计入通过 |
+| 回归 | opt60 打包时的 58 项命令全部通过，包含 ASan/UBSan、ACK/超时/迟到回复、错误路径和生命周期；后续新增测试另列 |
+| 消融 | 同一 AQL、EEE、MLD 统计用例：撤掉各自修复后均编译成功但运行失败，保留修复后全部通过 |
+| 模块一致性 | SquashFS、最终 rootfs、82 个已安装 kmod APK 的 DATA 块，130/130 个 KO 逐字节一致 |
+| 依赖与符号 | 15 个核心模块的 1961 个强引用闭合；全部 130 个 KO 的缺失符号和依赖均为 0 |
+| 镜像 | FIT 内部 CRC32/SHA1、Image/DTB、sysupgrade kernel 和有效 SquashFS 一致；sha256sums 9/9、profiles 四镜像大小与摘要全部通过 |
+
+最新 sysupgrade 为 `immortalwrt-qualcommax-ipq50xx-redmi_ax3000-squashfs-sysupgrade.bin`，
+SHA256：`b5e1e468563c1ed1c998f4efd8d2fe4d303921e56aee6907b2678ef21abad600`。
+内核 APK ABI 为 `764b0d8ef51129abb105b5de04c1e2ff`；`MODVERSIONS` 关闭，
+普通 KO vermagic 不能识别手工混入的其他构建模块，仍须保持整包安装。
+构建、严格编译、回归、消融和逐项原始清单保存在本机
+`Redmi_AX3000_build/work/nss-qsdk-week-audit-20261017/`。
+运行中的 opt59 不是这些候选补丁的验证对象，不能把现网稳定写成候选固件通过。
+
+尚未闭合：动态 AP VLAN GTK 索引/共享槽位及异步 ACK，WDS worker 的 peer 生命周期，
+IGS down/up 映射恢复，mirror/PCC 外部规则 lease，部分控制消息的完整 typed geometry，
+运行时 QCA tag 切换回滚、KR 监管差异及下述原 19 项的剩余实现与验证。
+当前普通 AP/STA 不能覆盖这些可选路径；相关代码没有凭猜测改写。
+
+动态 AP VLAN 还确认两个确定性问题：GTK 轮换复用 VLAN 槽时，WMI 在选定
+`hw_key_idx` 前已下发旧索引；正常删除旧 GTK 会提前归还新 GTK 仍共用的槽。
+现有 `peer->keys[]` 又缺少 VLAN 维度，group-key mapping 只有发送成功语义，
+没有证明固件已撤销映射的 ACK。因此只移动 allocator 或扫描四个 key 槽，
+不能形成跨 VLAN 的安全复用闭环；本批没有将该路径标记为已修好。
+
+### 后续：官方仓库、AP VLAN/WDS 与原 19 项契约
+
+[官方仓库 BOM](official-source-bom.tsv)固定于
+[release manifest 提交](https://git.codelinaro.org/clo/qsdk/releases/manifest/qstak/-/tree/71a7a879d0a97c436287a97a7c1e56d9fdbb6fac)。
+12.2.r9 对应 NSS MP156；12.4.5.r3 的公开 manifest 使用内核6.1，
+没有 nss-drv/nss firmware 项。当前14.0 driver、12.5 clients、12.2固件和
+12.4.5.r3 WLAN补丁的组合，未找到一个官方 manifest 声明其整体配套。
+driver/clients/ECM 社区归档已逐文件对上官方 Git；NSS MP156 二进制尚缺独立
+官方 hash/签名，官方配方的下载地址连接关闭且 MD5 为 skip。没有据较高
+固件配方存在就自动换二进制，也没有把第三方镜像组织当官方来源。
+
+[原 19 项明细](firmware-contracts.tsv)已区分 producer、consumer、源码缺口、
+候选实现、验证及缺失证据。3 项已证明源码覆盖，3 项为现代接口或可选功能差异；
+12 项从笼统未知改为已确认源码缺口，另1项保留固件排队 TX 同步的特定未知。
+这不是将缺口消去：能力/监管、统计、EMA、固定内存和 AHB dump 仍需修复。
+
+本轮已补入候选并测试：
+
+- hybrid DEVICE_INFO 对相同 BAR 复用映射，仍重编 static window；未经同步保证
+  的 BAR 变更返回错误并保留旧 mapping/CE 别名。
+- CRASH_FLUSH 与最终 MONITOR VDEV 在 TX 入口释放 skb；合法映射到 AP/STA
+  的注入仍允许。DISABLE_KEY 不携带非零长度的空密钥 payload。
+- 普通 native QoS 继续 strip；Ethernet offload 下 EAPOL/QoS-null 统一进入
+  RAW/HTT exception，保留原软件加密分支。
+- IPQ5018/QCN6122 在 0x5d8 的三位 MISC 字段设置 fragment 目的地，保留 bit20
+  等无关位，不再把目的地写入旧 GENERAL 字段。
+
+对应五个脚本执行实际函数/代码块并通过 ASan/UBSan；旧产物源码在相同用例下均
+编译成功而断言失败。qmi.c/mac.c/dp_tx.c/hw.c 已用实际 GCC14.3 Kbuild命令
+单独编译，并将未初始化变量告警作为错误；仅生成独立测试对象，原构建对象未变。
+新增3项已接入CI；另加下述GMAC RX/TX及EXT控制三项，当前总64项，
+当前候选64项离线回归已全部通过；七组补丁从冻结基线应用后，
+与候选逐文件一致。全项目尚未闭合，最终统一整包尚未生成。
+
+AP VLAN 已从原厂 hostap 明确每 VID 独立 GTK group、各自复用 wire keyidx1/2；
+parent self-peer 的四槽不能代表全部 VID。实现需在 WMI 前固定硬件槽，child
+持有精确 key 对象，parent 持有 VID 稳定槽，删除即解除 key 借用。缺少 mapping
+撤销契约时不能把槽跨 VID 重用；正常 retired 与 timeout uncertain 必须区分。
+group SET现已通过WIFI_VDEV broker接收有身份的header-only ACK，超时cancel/drain，
+不能强加未文档化echo，也不能将SET确认当作撤销映射或跨VID复用的证据。
+EXT候选现已接入独立broker family，并用每请求私有wait取代全局completion。
+ACK先按请求身份路由，NOTIFY只使用host注册回调，stats及verbose logger按实际
+payload长度读取；BASE类型的OPEN/CLOSE仍区分EXT与BASE_IF请求。
+测试执行真实broker、两个handler及两个logger，覆盖迟到/重复/取消应答、
+header-only ACK、ACK无效error字段、NULL事件订阅、注册回滚和短body矩阵。
+ASan/UBSan及5个实际GCC编译检查通过；旧源码同一短ACK用例可复现logger越界。
+BASE_IF现由DP注册/注销驱动gate，入口捕获lease并在入队锁内复核代次；
+原始API也经broker，core先分流BASE回复并保留真实RX长度上下文。
+迟到回复、重注册ABA及callback/enqueue drain已有实际函数回归，三路硬件队列已加载；
+这些检查仍不能代替VLAN/WDS资源所有权或全部IGS/mirror可选路径验收。
+WDS 应利用允许睡眠的 callback 同步完成，并保持硬件 peer 所属 parent；
+还需修补 wrapper 的 child 身份丢失、peer-unmap、disable、错误回滚和裸 STA 恢复队列。
+这些VLAN/WDS资源实现尚未完成，不能用控制通道或BAR/TX用例替代它们的验证。
+
+另经官方 DP/SSDK 两个版本对照，GMAC候选已按host pool记录每次映射的
+地址、长度和类型；RX普通/page回收及部分scatter清理不再从descriptor反推所有权。
+TX先验证整包，再完成全部映射，最后发布OWN；失败只回滚本包映射。
+producer与NAPI回收按固定锁序提交、停止及唤醒队列；RX所有权交接使用DMA屏障，
+TX门铃使用ordered MMIO写。两个脚本执行实际函数并通过ASan/UBSan，
+旧实现同例编译后失败；5个修改C文件通过实际GCC14.3命令编译，原对象未变。
+这是离线源码验证，尚未部署或证明现场卡顿因果。
+
+活动接口的platform remove仍是未闭合项：旧路径在unregister前deinit，
+而ndo_stop失败不会阻止unregister，platform remove也不能拒绝devres释放。
+还需处理NSS callback撤销和DMA停机失败边界，不能只交换两行便宣称安全。
+SSDK MP相关寄存器文件与当前pristine相同，不据此回退现有MDIO管理域过滤等本地强化。
 
 此前完成队列验收的候选为 **opt56**，基于 Linux 6.12.108、NSS 12.2；ath11k release43、
 NSS driver release38、clients release8、ECM release10、nss-wifi release12。

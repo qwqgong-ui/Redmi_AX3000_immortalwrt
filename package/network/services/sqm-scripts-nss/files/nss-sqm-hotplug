@@ -71,9 +71,11 @@ while [ -n "$walk" ]; do
 done
 
 nss_sqm_converge() {
-	local queue="$1" enabled iface state
+	local queue="$1" enabled iface state script
 	config_get_bool enabled "$queue" enabled 0
 	config_get iface "$queue" interface
+	config_get script "$queue" script
+	case "$script" in nss-fq.qos|nss-edma.qos) ;; *) return 0 ;; esac
 	[ "$enabled" = 1 ] || return 0
 	# run.sh reads an empty interface name as "every section", so a section
 	# with none would turn one iface event into a global start or stop.
@@ -113,6 +115,10 @@ nss_sqm_converge() {
 			;;
 		esac
 		return 0
+	fi
+	if [ "$script" = nss-fq.qos ]; then
+		/usr/lib/sqm/run.sh nss-reconcile "$iface"
+		return
 	fi
 
 	# Clearing sqm-scripts' start-once latch is simply how the converge gets

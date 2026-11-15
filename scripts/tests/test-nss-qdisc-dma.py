@@ -29,6 +29,10 @@ typedef uintptr_t dma_addr_t;
 #define DMA_TO_DEVICE 1
 #define unlikely(x) (x)
 #define NSS_CODEL_MIN_FQ_COUNT 64
+#define NSS_CODEL_DEFAULT_FQ_COUNT 1024
+#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
+#define max(a,b) ((a)>(b)?(a):(b))
+#define check_mul_overflow(a,b,out) __builtin_mul_overflow((a),(b),(out))
 #define NSS_QDISC_STATE_IDLE 0
 #define NSS_QDISC_STATE_READY 1
 #define NSS_QDISC_STATE_NODE_FREE_FAIL -16
@@ -55,6 +59,8 @@ struct list_head { struct list_head *next,*prev; };
 #define spin_unlock_bh(p) ((void)(p))
 static void list_add_tail(struct list_head *n,struct list_head *h) { n->next=h;n->prev=h->prev;h->prev->next=n;h->prev=n; }
 static unsigned pins, page_frees, unmaps, records, allocations;
+static unsigned expected_bytes=9216, max_alloc_order=32;
+static bool fail_alloc;
 static bool fail_record, fail_map, fail_config, fail_default, fail_unassign;
 #define THIS_MODULE ((void *)1)
 static void __module_get(void *module) { assert(module==THIS_MODULE);pins++; }
@@ -64,17 +70,21 @@ static struct device *nss_shaper_get_dev(void) { return &dma_device; }
 static struct device *get_device(struct device *d) { if(d)d->refs++;return d; }
 static void put_device(struct device *d) { assert(d&&d->refs);d->refs--; }
 static unsigned get_order(unsigned size) { unsigned order=0;while((4096U<<order)<size)order++;return order; }
-static unsigned long __get_free_pages(int flags,unsigned order) { allocations++;return (unsigned long)calloc(1,4096U<<order); }
+static unsigned long __get_free_pages(int flags,unsigned order) {
+ allocations++;
+ if(fail_alloc || order>max_alloc_order)return 0;
+ return (unsigned long)calloc(1,4096UL<<order);
+}
 static void free_pages(unsigned long pages,unsigned order) { assert(pages);page_frees++;free((void *)pages); }
 static void *kzalloc(size_t n,int flags) { if(fail_record)return NULL;records++;return calloc(1,n); }
 static void kfree(void *memory) { assert(memory&&records);records--;free(memory); }
 static dma_addr_t dma_map_single(struct device *dev,void *pages,unsigned bytes,int direction) {
- assert(dev==&dma_device&&dev->refs&&pages&&bytes==9216&&direction==DMA_TO_DEVICE);
+ assert(dev==&dma_device&&dev->refs&&pages&&bytes==expected_bytes&&direction==DMA_TO_DEVICE);
  return fail_map?UINTPTR_MAX:(dma_addr_t)pages;
 }
 static bool dma_mapping_error(struct device *dev,dma_addr_t dma) { return dma==UINTPTR_MAX; }
 static void dma_unmap_single(struct device *dev,dma_addr_t dma,unsigned bytes,int direction) {
- assert(dev==&dma_device&&dev->refs&&dma&&bytes==9216&&direction==DMA_TO_DEVICE);unmaps++;
+ assert(dev==&dma_device&&dev->refs&&dma&&bytes==expected_bytes&&direction==DMA_TO_DEVICE);unmaps++;
 }
 struct nss_qdisc {
  bool fw_node_free_confirmed; unsigned qos_tag,type;
@@ -101,11 +111,10 @@ struct netlink_ext_ack { int unused; };
 struct tc_nsscodel_qopt { unsigned target,limit,interval,quantum,ecn,set_default,flows; };
 static struct tc_nsscodel_qopt options={5000,128,100000,1514,0,1,128};
 static struct tc_nsscodel_qopt *nss_qdisc_qopt_get(struct nlattr *opt,void *policy,struct nlattr **tb,int max,int parms,struct netlink_ext_ack *ack) { return &options; }
-static unsigned nss_codel_flow_count(struct Qdisc *sch,struct tc_nsscodel_qopt *opt) { return opt->flows; }
 static unsigned configured_bytes;
 static int nss_qdisc_configure(struct nss_qdisc *nq,struct nss_if_msg *msg,int kind) {
  configured_bytes=msg->msg.shaper_configure.config.msg.shaper_node_config.snc.codel_param.flows_mem_sz;
- assert(configured_bytes==9216);return fail_config?-1:0;
+ assert(configured_bytes==expected_bytes);return fail_config?-1:0;
 }
 static int nss_qdisc_set_default(struct nss_qdisc *nq) { return fail_default?-1:0; }
 static void nss_qdisc_root_cleanup_shaper_unassign(struct nss_qdisc *nq) { atomic_set(&nq->state,fail_unassign?-17:0); }
@@ -179,6 +188,25 @@ int main(void) {
  setup(&q,&sch);assert(!nss_codel_change(&sch,&opt,NULL));m=ack();m.msg.shaper_configure.config.response_type=1;
  nss_qdisc_child_cleanup_free_node_callback(&q.nq,&m);assert(!q.nq.fw_node_free_confirmed);
  nss_codel_flow_queues_free(&q);assert(pins==3&&unmaps==before_unmaps&&dma_device.refs==3);
+ /* Exercise the real flow-count resolver and allocation fallback boundary. */
+ unsigned counts[]={1,7,63,64,128,0};
+ for(unsigned i=0;i<sizeof(counts)/sizeof(counts[0]);i++) {
+  setup(&q,&sch);options.flows=counts[i];
+  expected_bytes=(counts[i]?counts[i]:NSS_CODEL_DEFAULT_FQ_COUNT)*72;
+  assert(!nss_codel_change(&sch,&opt,NULL));
+  assert(q.flows==(counts[i]?counts[i]:NSS_CODEL_DEFAULT_FQ_COUNT));
+  q.nq.fw_node_free_confirmed=true;nss_codel_flow_queues_free(&q);
+ }
+ setup(&q,&sch);options.flows=256;expected_bytes=64*72;max_alloc_order=1;
+ base=allocations;
+ assert(!nss_codel_change(&sch,&opt,NULL)&&q.flows==64&&allocations==base+3);
+ q.nq.fw_node_free_confirmed=true;nss_codel_flow_queues_free(&q);
+ setup(&q,&sch);options.flows=7;fail_alloc=true;base=allocations;
+ assert(nss_codel_change(&sch,&opt,NULL)==-ENOMEM&&allocations==base+1&&!q.flow_memory);
+ fail_alloc=false;max_alloc_order=32;
+ setup(&q,&sch);options.flows=2;q.flow_queue_sz=UINT32_MAX;base=allocations;
+ assert(nss_codel_change(&sch,&opt,NULL)==-EOVERFLOW&&allocations==base&&!q.flow_memory);
+ assert(pins==3&&dma_device.refs==3);
  puts("PASS real FQ change/free and root/child FREE callbacks: allocation/map failures, preserved reconfigure length, configure/default failure, short ACK/NACK/timeout retention, successful FREE with failed UNASSIGN, matched DMA device/direction, repeated destroy");
 }
 '''
@@ -203,7 +231,8 @@ def main():
     # The 6.12 declaration precedes a common body behind an old-kernel #if.
     change = ('static int nss_codel_change(struct Qdisc *sch, struct nlattr *opt, '
               'struct netlink_ext_ack *extack)\n' + change[change.index('{'):])
-    functions = helper.function(codel, 'nss_codel_flow_queues_free') + change
+    functions = (helper.function(codel, 'nss_codel_flow_queues_free') +
+                 helper.function(codel, 'nss_codel_flow_count') + change)
     with tempfile.TemporaryDirectory(prefix='nss-qdisc-dma-') as directory:
         root = Path(directory)
         (root / 'test.c').write_text(SHIM + record + globals_ + SCHED + callbacks + functions + TEST)

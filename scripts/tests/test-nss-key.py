@@ -165,6 +165,7 @@ static int ath11k_dp_peer_rx_pn_replay_config(struct ath11k_vif *vif,const u8 *a
 }
 static struct ath11k_nss_peer_state *ath11k_nss_key_get(struct ath11k *ar,struct ath11k_peer *peer) { assert(ar->ab->base_lock&&peer==lookup_peer);if(!ar->ab->nss.enabled)return NULL;key_state.refs++;return &key_state; }
 static void ath11k_nss_key_put(struct ath11k_nss_peer_state *state) { if(state){assert(state==&key_state&&state->refs);state->refs--;} }
+static void ath11k_nss_me_dirty(struct ath11k_vif *vif) {}
 static int ath11k_nss_key_check(struct ath11k *ar,struct ath11k_peer *peer,struct ath11k_nss_peer_state *state) { assert(ar->ab->base_lock&&peer==lookup_peer);assert((bool)state==ar->ab->nss.enabled);return 0; }
 static int ath11k_nss_key_config(struct ath11k_vif *vif,struct ath11k_peer *peer,struct ath11k_nss_peer_state *state,struct ieee80211_key_conf *key) {
  (void)key;assert(vif->ar->conf_mutex&&!vif->ar->ab->base_lock&&peer==lookup_peer);

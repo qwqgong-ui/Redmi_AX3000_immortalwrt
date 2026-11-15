@@ -1,0 +1,34 @@
+Subject: [PATCH] ssdk: scope MP link notifications to owned PHYs
+
+--- a/src/init/ssdk_init.c
++++ b/src/init/ssdk_init.c
+@@ -2305,12 +2305,23 @@
+ 					SSDK_ERROR("Failed to get pointer\n");
+ 					return NOTIFY_DONE;
+ 				}
+-				if (dev->phydev != NULL) {
+-					port_id = qca_ssdk_phydev_to_port(priv->device_id,
+-						dev->phydev);
+-					rv = p_api->adpt_port_netdev_notify_set(priv, port_id);
+-					if (rv) {
+-						SSDK_ERROR("netdev change notify failed\n");
++					if (dev->phydev != NULL) {
++						/* The global notifier also sees fixed-link and
++						 * DSA PHYs outside this SSDK MDIO domain.
++						 */
++						if (ssdk_miibus_index_get(priv->device_id,
++						    dev->phydev->mdio.bus) == SSDK_MII_INVALID_BUS_ID)
++							return NOTIFY_DONE;
++						port_id = qca_ssdk_phydev_to_port(priv->device_id,
++							dev->phydev);
++						if (!port_id)
++							return NOTIFY_DONE;
++						rv = p_api->adpt_port_netdev_notify_set(priv, port_id);
++						if (rv) {
++							SSDK_ERROR("%s: port %u phy %s:%d change notify failed: %d\n",
++								dev->name, port_id,
++								dev->phydev->mdio.bus->id,
++								dev->phydev->mdio.addr, rv);
+ 						return NOTIFY_DONE;
+ 					}
+ 				}

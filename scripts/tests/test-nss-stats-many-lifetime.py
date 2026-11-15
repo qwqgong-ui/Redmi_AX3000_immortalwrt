@@ -38,18 +38,18 @@ struct nss_qdisc_stats_wq {
  struct nss_qdisc *nq;struct nss_if_msg stats_sync_req_msg;
  struct list_head stats_list;struct timer_list stats_get_timer;
  atomic_t pending_stat_resp,pending_stat_work;bool stats_polling_stopped;
- unsigned stats_cookie,stats_request_fail,stats_request_success;
+ unsigned stats_cookie,stats_request_success;unsigned long stats_request_fail;
  int stats_resp_waitqueue,stats_work_waitqueue,nqt;
 };
 struct nss_qdisc {void *nss_shaping_ctx;unsigned qos_tag;struct nss_qdisc_stats_wq *stats_wq;};
 static struct nss_qdisc_stats_wq *active;
-static unsigned mode,submits,cancels,queued,pending,timer_stops,htable_frees,context_frees;
+static unsigned reports,mode,submits,cancels,queued,pending,timer_stops,htable_frees,context_frees;
 static int wait_response(void) {
  if(mode==1){atomic_set(&active->pending_stat_resp,0);return 1;}
  if(mode==2){active->stats_polling_stopped=true;atomic_set(&active->pending_stat_resp,0);return 1;}
  return 0;
 }
-#define wait_event_timeout(queue,condition,timeout) ((condition)?1:wait_response())
+#define wait_event_idle_timeout(queue,condition,timeout) ((condition)?1:wait_response())
 #define wait_event(queue,condition) do {if(!(condition))atomic_set(&active->pending_stat_work,0);assert(condition);}while(0)
 static nss_tx_status_t nss_if_tx_msg_with_size_tracked(void *ctx,struct nss_if_msg *msg,u32 size,u32 *cookie) {
  assert(size==PAGE_SIZE && !active->stats_polling_stopped && !pending);
@@ -61,6 +61,7 @@ static void nss_if_cancel_msg(u32 cookie) {
  assert(active->nq->stats_wq==active);
 }
 static void usleep_range(int a,int b) {}
+#define pr_warn_ratelimited(fmt,tag,attempt,fails) (assert((tag)==0x10000 && (attempt)==(int)reports+1 && (fails)==reports+1),reports++)
 static void nss_qdisc_stats_queue_delayed_work(struct nss_qdisc *nq) {
  assert(!nq->stats_wq->stats_polling_stopped);queued++;
 }
@@ -73,11 +74,11 @@ static void kfree(void *p) {assert(p==active && !pending && !active->stats_get_t
 TEST=r'''
 int main(void) {
  for(mode=0;mode<3;mode++) {
-  struct nss_qdisc nq={0};active=calloc(1,sizeof(*active));active->nq=&nq;nq.stats_wq=active;
-  submits=cancels=queued=pending=0;
+  struct nss_qdisc nq={.qos_tag=0x10000};active=calloc(1,sizeof(*active));active->nq=&nq;nq.stats_wq=active;
+  submits=cancels=queued=pending=reports=0;
   nss_qdisc_stats_sync_msg_tx(active);
-  if(mode==0)assert(submits==3 && cancels==3 && queued==1);
-  else assert(submits==1 && cancels==1 && !queued);
+  if(mode==0)assert(submits==3 && cancels==3 && queued==1 && reports==3);
+  else assert(submits==1 && cancels==1 && !queued && !reports);
   assert(!pending);free(active);
  }
  struct nss_qdisc nq={0};active=calloc(1,sizeof(*active));nq.stats_wq=active;active->nq=&nq;
@@ -86,7 +87,7 @@ int main(void) {
  nss_qdisc_stats_sync_many_exit(&nq);
  assert(!nq.stats_wq && context_frees==1 && htable_frees==1 && timer_stops==2 && !pending);
  nss_qdisc_stats_sync_many_exit(&nq);assert(context_frees==1);
- puts("PASS actual 12.2 stats-many lifetime: exactly three no-ACK attempts, ACK drain, stop-aware exit, pending worker/context protection, timer drain and repeated stop");
+ puts("PASS actual 12.2 stats-many lifetime: exactly three reported no-ACK attempts, ACK drain, stop-aware exit, pending worker/context protection, timer drain and repeated stop");
 }
 '''
 
@@ -100,6 +101,7 @@ def main():
     # Select the target stats-many branch, not the 11.4 no-op compatibility functions.
     source=source.split('#else /* !NSS_FIRMWARE_VERSION_11_4 */',1)[1]
     functions=helper.function(source,'nss_qdisc_stats_sync_msg_tx')+helper.function(source,'nss_qdisc_stats_sync_many_exit')
+    assert 'wait_event_idle_timeout(nqsw->stats_resp_waitqueue' in functions
     with tempfile.TemporaryDirectory(prefix='nss-stats-many-') as directory:
         root=Path(directory);(root/'test.c').write_text(SHIM+functions+TEST)
         subprocess.run(['cc','-std=gnu11','-O1','-g','-pthread','-fsanitize=address,undefined',

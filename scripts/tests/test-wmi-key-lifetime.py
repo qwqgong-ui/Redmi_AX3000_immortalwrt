@@ -96,7 +96,7 @@ struct ath11k {
  struct { int tx_empty_waitq; } dp;
  int txmgmt_idr,txmgmt_empty_waitq,monitor_vdev_id,peer_mapping_wq;
  unsigned long monitor_flags;
- int fw_stats;
+ int fw_stats;void *mon_metadata;
 };
 struct ath11k_vif { struct ath11k *ar;u32 vdev_id; };
 struct ieee80211_key_conf { unsigned keyidx,keylen,vlan_id,hw_key_idx,cipher,flags;u8 key[32]; };
@@ -122,6 +122,7 @@ static void synchronize_rcu(void) { atomic_store(&destroy_waiting,true);while(at
 #define mutex_unlock(p) assert(pthread_mutex_unlock(p)==0)
 static void ath11k_nss_reoq_stop(struct ath11k_base *ab) { (void)ab; }
 static void ath11k_fw_stats_free(int *stats) { (void)stats; }
+static void kvfree(void *ptr) { assert(!ptr); }
 static void ieee80211_free_hw(struct ieee80211_hw *hw) { (void)hw;assert(!lookup_ar->install_key.active && !atomic_load(&rcu_depth));freed++; }
 static struct ath11k *ath11k_mac_get_ar_by_vdev_id(struct ath11k_base *ab,u32 vdev) {
  assert(atomic_load(&rcu_depth));struct ath11k *found=ab==lookup_ar->ab && vdev==7 && ab->pdevs_active[0]==lookup_ar ? lookup_ar : NULL;
@@ -149,6 +150,8 @@ static void event(struct ath11k *ar,u32 vdev,u32 idx,u32 flags,const u8 *addr,u3
 static int ath11k_wmi_vdev_install_key(struct ath11k *ar,const struct wmi_vdev_install_key_arg *arg) {
  submissions++;atomic_store(&submitted,true);
  assert(arg->vdev_id==7 && arg->key_idx==1);
+ assert((arg->key_cipher==WMI_CIPHER_NONE)==(arg->key_len==0));
+ assert(arg->key_data||!arg->key_len);
  if(mode==SEND_FAIL)return -ENOBUFS;
  if(mode==CRASH) { ar->ab->dev_flags|=BIT(ATH11K_FLAG_CRASH_FLUSH);ath11k_core_pre_reconfigure_recovery(ar->ab);return 0; }
  if(mode==NO_REPLY || mode==ASYNC)return 0;

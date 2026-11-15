@@ -17,7 +17,8 @@ import time
 
 
 def command(argv):
-    return subprocess.check_output(argv, text=True, timeout=15)
+    return subprocess.check_output(argv, text=True, timeout=15,
+                                   env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
 
 
 def read_name(data, offset):

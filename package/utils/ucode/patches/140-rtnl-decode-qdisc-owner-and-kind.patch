@@ -1,0 +1,32 @@
+Subject: [PATCH] rtnl: describe qdisc owner, handle and kind for readback
+
+--- a/lib/rtnl.c
++++ b/lib/rtnl.c
+@@ -3408,6 +3408,19 @@
+ }
+ 
+ 
++static const uc_nl_nested_spec_t qdisc_msg = {
++	.headsize = NLA_ALIGN(sizeof(struct tcmsg)),
++	.nattrs = 6,
++	.attrs = {
++		{ TCA_UNSPEC, "family", DT_U8, 0, MEMBER(tcmsg, tcm_family) },
++		{ TCA_UNSPEC, "dev", DT_NETDEV, 0, MEMBER(tcmsg, tcm_ifindex) },
++		{ TCA_UNSPEC, "ifindex", DT_U32, 0, MEMBER(tcmsg, tcm_ifindex) },
++		{ TCA_UNSPEC, "handle", DT_U32, 0, MEMBER(tcmsg, tcm_handle) },
++		{ TCA_UNSPEC, "parent", DT_U32, 0, MEMBER(tcmsg, tcm_parent) },
++		{ TCA_KIND, "kind", DT_STRING, 0, NULL },
++	}
++};
++
+ static const struct {
+ 	int family;
+ 	const uc_nl_nested_spec_t *spec;
+@@ -3420,6 +3433,7 @@
+ 	{ RTM_FAM(RTM_GETADDRLABEL), &addrlabel_msg },
+ 	{ RTM_FAM(RTM_GETNEIGHTBL), &neightbl_msg },
+ 	{ RTM_FAM(RTM_GETNETCONF), &netconf_msg },
++	{ RTM_FAM(RTM_GETQDISC), &qdisc_msg },
+ };
+ 
+ /**

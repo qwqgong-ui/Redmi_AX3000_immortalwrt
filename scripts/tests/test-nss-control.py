@@ -43,7 +43,7 @@ SHIM = r'''
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sched.h>
-typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
+typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
 #define NSS_CORE_MAX 2
 #define NSS_CORE_0 0
 #define NSS_MAX_NET_INTERFACES 16
@@ -56,6 +56,7 @@ typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
 #define NSS_DYNAMIC_INTERFACE_MAX 2
 #define NSS_IF_MAX_MSG_TYPES 2
 #define NSS_WIFI_VDEV_INTERFACE_CONFIGURE_MSG 3
+#define NSS_WIFI_VDEV_SET_GROUP_KEY 4
 #define NSS_WIFI_VDEV_MAX_MSG 16
 #define NSS_TX_SUCCESS 0
 #define NSS_TX_FAILURE 1
@@ -75,6 +76,7 @@ typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
 #define nss_mirror_stats_sync(ctx,msg,ifnum) ((void)(ctx),(void)(msg),(void)(ifnum))
 #define nss_mirror_stats_notify(ctx,ifnum) ((void)(ctx),(void)(ifnum))
 #define U32_MAX UINT32_MAX
+#define U64_MAX UINT64_MAX
 #define GFP_ATOMIC 0
 #define GFP_KERNEL 1
 #define READ_ONCE(x) (x)
@@ -91,6 +93,7 @@ typedef uint32_t u32;typedef uint64_t nss_ptr_t;typedef int nss_tx_status_t;
 #define nss_dynamic_interface_log_tx_msg(...) ((void)0)
 #define ath11k_warn(...) ((void)0)
 #define ath11k_info(...) ((void)0)
+#define ath11k_dbg(...) ((void)0)
 enum nss_cmn_response { NSS_CMN_RESPONSE_ACK,NSS_CMN_RESPONSE_EMSG,NSS_CMN_RESPONSE_NOTIFY };
 enum nss_dynamic_interface_type { NSS_DYNAMIC_INTERFACE_TYPE_NONE,NSS_DYNAMIC_INTERFACE_TYPE_VAP,NSS_DYNAMIC_INTERFACE_TYPE_RADIO,NSS_DYNAMIC_INTERFACE_TYPE_MAX };
 typedef enum nss_dynamic_interface_type nss_dynamic_interface_assigned;
@@ -130,12 +133,14 @@ struct nss_dynamic_interface_alloc_node_msg { enum nss_dynamic_interface_type ty
 struct nss_dynamic_interface_dealloc_node_msg { enum nss_dynamic_interface_type type;int if_num; };
 struct nss_dynamic_interface_msg { struct nss_cmn_msg cm;union { struct nss_dynamic_interface_alloc_node_msg alloc_node;struct nss_dynamic_interface_dealloc_node_msg dealloc_node; } msg; };
 struct nss_wifi_vdev_config_msg { u32 radio_ifnum,vdev_id,opmode,vap_ext_mode;unsigned char mac_addr[6]; };
-struct nss_wifi_vdev_msg { struct nss_cmn_msg cm;union { struct nss_wifi_vdev_config_msg vdev_config; } msg; };
+struct nss_wifi_vdev_set_vlan_group_key { u16 vlan_id,group_key; };
+struct nss_wifi_vdev_msg { struct nss_cmn_msg cm;union { struct nss_wifi_vdev_config_msg vdev_config;struct nss_wifi_vdev_set_vlan_group_key vlan_group_key; } msg; };
 struct nss_mirror_msg { struct nss_cmn_msg cm;unsigned payload[2]; };
 typedef void (*nss_mirror_msg_callback_t)(void *,struct nss_cmn_msg *);
 static bool nss_mirror_verify_if_num(unsigned ifnum) { return ifnum==7; }
 typedef void (*nss_wifi_vdev_msg_callback_t)(void *,struct nss_cmn_msg *);
-struct nss_ctx_instance { unsigned id;struct { void *ndev; } subsys_dp_register[NSS_MAX_NET_INTERFACES]; };
+struct nss_subsystem_dataplane_register { void *cb,*xmit_cb,*ext_cb,*app_data,*ndev;uint32_t features,type; };
+struct nss_ctx_instance { unsigned id;struct nss_subsystem_dataplane_register subsys_dp_register[NSS_MAX_NET_INTERFACES]; };
 static struct { unsigned wifi_handler_id;struct nss_ctx_instance nss[NSS_CORE_MAX];unsigned dynamic_interface_table[NSS_DYNAMIC_INTERFACE_TYPE_MAX]; } nss_top_main;
 static void nss_cmn_msg_init(struct nss_cmn_msg *cm,u32 ifnum,u32 type,u32 len,void *cb,void *data) { cm->interface=ifnum;cm->type=type;cm->len=len;cm->cb=(uintptr_t)cb;cm->app_data=(uintptr_t)data; }
 static unsigned nss_cmn_get_msg_len(struct nss_cmn_msg *cm) { return cm->len; }
@@ -158,7 +163,7 @@ static nss_tx_status_t nss_core_send_cmd(struct nss_ctx_instance *ctx,void *msg,
  return send_failure?NSS_TX_FAILURE:NSS_TX_SUCCESS;
 }
 static void ether_addr_copy(unsigned char *to,const unsigned char *from) { memcpy(to,from,6); }
-struct ath11k_base { int unused; };
+struct ath11k_base { struct { bool enabled; } nss; };
 struct ath11k { struct ath11k_base *ab;struct { void *ctx;int if_num; } nss; };
 struct ieee80211_vif { int type;unsigned char addr[6]; };
 struct ath11k_vif { struct ath11k *ar;struct ieee80211_vif *vif;u32 vdev_id;struct { int if_num,config_result;struct completion complete; } nss; };
@@ -186,6 +191,15 @@ static void acknowledge(void) { deliver(wire,NSS_CMN_RESPONSE_ACK,false); }
 static void reject(void) { deliver(wire,NSS_CMN_RESPONSE_EMSG,false); }
 static void invalid_node(void) { deliver(wire,NSS_CMN_RESPONSE_ACK,true); }
 static void truncated_node(void) { struct wire_copy copy=wire;((struct nss_cmn_msg *)(void *)copy.payload.data)->len=0;deliver(copy,NSS_CMN_RESPONSE_ACK,false); }
+static void group_ack(void) {
+ struct nss_wifi_vdev_msg *sent=(void *)wire.payload.data;
+ assert(sent->cm.type==NSS_WIFI_VDEV_SET_GROUP_KEY&&sent->msg.vlan_group_key.vlan_id==37&&sent->msg.vlan_group_key.group_key==9);
+ struct nss_cmn_msg *header=malloc(sizeof(*header));assert(header);*header=sent->cm;
+ header->response=NSS_CMN_RESPONSE_ACK;header->error=0xffffffff;header->len=0;
+ nss_wifi_vdev_handler(wire.ctx,header,NULL);free(header);
+}
+static struct wire_copy group_old;
+static void old_group_reply(void) { deliver(group_old,NSS_CMN_RESPONSE_ACK,false); }
 static struct wire_copy mirror_old;
 static void old_mirror_reply(void) { deliver(mirror_old,NSS_CMN_RESPONSE_ACK,false); }
 static void fresh(void) {
@@ -286,6 +300,17 @@ int main(void) {
  wait_hook=acknowledge;assert(ath11k_nss_vdev_configure(&arvif)==0&&!live_allocations);
  deliver(original,NSS_CMN_RESPONSE_ACK,false);assert(!live_allocations&&arvif.nss.config_result==1234);
  for(unsigned failure=1;failure<=3;failure++){fresh();fail_allocation=failure;assert(ath11k_nss_vdev_configure(&arvif)<0&&!live_allocations);}
+ fresh();ab.nss.enabled=true;
+ wait_hook=group_ack;assert(!ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)&&!live_allocations);
+ force_wait_timeout=true;wait_hook=group_ack;assert(!ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)&&!live_allocations);force_wait_timeout=false;
+ wait_hook=reject;assert(ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)==-EIO&&!live_allocations);
+ assert(ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)==-ETIMEDOUT&&!live_allocations);group_old=wire;
+ wait_hook=old_group_reply;assert(ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)==-ETIMEDOUT&&!live_allocations);
+ wait_hook=group_ack;assert(!ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)&&!live_allocations);
+ deliver(group_old,NSS_CMN_RESPONSE_ACK,false);assert(!live_allocations);
+ send_failure=true;assert(ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)==-EIO&&!live_allocations);send_failure=false;
+ for(unsigned failure=1;failure<=2;failure++){fresh();fail_allocation=failure;assert(ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)<0&&!live_allocations);}
+ fresh();before=submissions;ab.nss.enabled=false;assert(!ath11k_nss_dyn_vlan_set_group_key(&arvif,37,9)&&submissions==before);
  fresh();msg=request();assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==0);nss_control_close_core(ctx);assert(!live_allocations&&!nss_control_open(ctx,NSS_CONTROL_WIFI_VDEV,6));
  before=submissions;assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==NSS_TX_FAILURE_NOT_READY&&submissions==before);
  fresh();struct nss_mirror_msg mirror={.cm={.interface=7,.type=0,.len=0}};
@@ -301,7 +326,7 @@ int main(void) {
  fresh();nss_control_close(ctx,NSS_CONTROL_MIRROR,7);before=submissions;
  assert(nss_mirror_tx_msg_sync(ctx,&mirror)==NSS_TX_FAILURE_NOT_READY&&submissions==before&&!live_allocations);
  fresh();atomic_store(&nss_control_sequence.value,U32_MAX);msg=request();assert(nss_wifi_vdev_tx_msg_tracked(ctx,&msg,&cookie)==NSS_TX_FAILURE&&!cookie&&!live_allocations);
- puts("NSS control: dynamic/VDEV/mirror identities, stale/duplicate rejection, callback drains, enqueue closure, shadow generations, timeout-edge ACK results and private waits passed");
+ puts("NSS control: dynamic/VDEV/mirror identities, VLAN group header-only ACK/late replies, callback drains, enqueue closure, shadow generations, timeout-edge ACK results and private waits passed");
  return 0;
 }
 '''
@@ -332,10 +357,12 @@ def main():
     bodies = '\n'.join(function(dynamic, name) for name in dynamic_names)
     bodies += '\n'.join(function(vdev, name) for name in
                         ['nss_wifi_vdev_msg_init', 'nss_wifi_vdev_handler',
-                         'nss_wifi_vdev_tx_msg_tracked', 'nss_wifi_vdev_cancel_msg'])
+                         'nss_wifi_vdev_tx_msg_tracked', 'nss_wifi_vdev_tx_msg',
+                         'nss_wifi_vdev_cancel_msg'])
     bodies += structures.structure(ath, 'ath11k_nss_vdev_request')
     bodies += '\n'.join(function(ath, name) for name in
-                        ['ath11k_nss_vdev_cfg_cb', 'ath11k_nss_vdev_configure'])
+                        ['ath11k_nss_vdev_cfg_cb', 'ath11k_nss_vdev_configure',
+                         'ath11k_nss_dyn_vlan_set_group_key'])
     bodies += structures.structure(mirror, 'nss_mirror_wait')
     bodies += '\n'.join(function(mirror, name) for name in
                         ['nss_mirror_handler', 'nss_mirror_callback',

@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=qca-nss-ecm
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 PKG_SOURCE_DATE:=2026-09-06
 PKG_SOURCE_VERSION:=7894b769eeb64f1c44fde547a107a8b866997590
 QSDK_VERSION:=14.0
@@ -27,7 +27,7 @@ define KernelPackage/qca-nss-ecm
   TITLE:=NSS connection acceleration manager
   DEPENDS:=@TARGET_qualcommax_ipq50xx +kmod-qca-nss-drv +kmod-qca-nss-drv-bridge-mgr +kmod-qca-dsa-nss +kmod-nf-conntrack +@NSS_DRV_IPV6_ENABLE +@NSS_DRV_VIRT_IF_ENABLE +PACKAGE_kmod-qca-nss-drv-pppoe:kmod-pppoe
   FILES:=$(PKG_BUILD_DIR)/ecm.ko $(LINUX_DIR)/net/bridge/netfilter/nf_conntrack_bridge.ko
-  KCONFIG:=CONFIG_NF_CONNTRACK_EVENTS=y CONFIG_NF_CONNTRACK_EVENTS_OBSERVER=y CONFIG_NF_CONNTRACK_BRIDGE=m
+  KCONFIG:=CONFIG_NF_CONNTRACK_EVENTS=y CONFIG_NF_CONNTRACK_EVENTS_OBSERVER=y CONFIG_NF_CONNTRACK_ECM_HOST_LIBERAL=y CONFIG_NF_CONNTRACK_BRIDGE=m
 endef
 
 define Build/InstallDev

@@ -66,52 +66,13 @@ jobs:
 
       - name: Configure
         run: |
-          cat <<EOF | sed -E 's/^  //' >.config
-            CONFIG_TARGET_qualcommax=y
-            CONFIG_TARGET_qualcommax_ipq50xx=y
-            CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
-
-            CONFIG_IB=y
-            # CONFIG_IB_STANDALONE is not set
-            CONFIG_SDK=y
-            CONFIG_MAKE_TOOLCHAIN=y
-
-            CONFIG_ALL_NONSHARED=y
-            CONFIG_REPRODUCIBLE_DEBUG_INFO=y
-            CONFIG_CCACHE=y
-
-            CONFIG_PACKAGE_luci=y
-            CONFIG_PACKAGE_nss-wifi=y
-            CONFIG_PACKAGE_kmod-qca-nss-drv=y
-            CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr=y
-            CONFIG_PACKAGE_kmod-qca-nss-drv-qdisc=y
-            CONFIG_PACKAGE_kmod-qca-nss-drv-igs=y
-            CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe=y
-            CONFIG_PACKAGE_tc-full=y
-            CONFIG_PACKAGE_sqm-scripts-nss=y
-            CONFIG_PACKAGE_luci-app-sqm=y
-            CONFIG_PACKAGE_kmod-qca-nss-ecm=y
-            CONFIG_PACKAGE_kmod-qca-dsa-nss=y
-            CONFIG_PACKAGE_nss-firmware=y
-            CONFIG_PACKAGE_nss-firmware-ipq50xx=y
-            CONFIG_NSS_FIRMWARE_VERSION_12_2=y
-            CONFIG_NSS_MEM_PROFILE_LOW=y
-            CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE=y
-            CONFIG_NSS_DRV_WIFI_EXT_VDEV_ENABLE=y
-            CONFIG_NSS_DRV_VIRT_IF_ENABLE=y
-            CONFIG_NSS_DRV_BRIDGE_ENABLE=y
-            CONFIG_NSS_DRV_VLAN_ENABLE=y
-            CONFIG_NSS_DRV_IPV6_ENABLE=y
-            CONFIG_NSS_DRV_IPV4_REASM_ENABLE=y
-            CONFIG_NSS_DRV_IPV6_REASM_ENABLE=y
-            CONFIG_NSS_DRV_PPPOE_ENABLE=y
-            CONFIG_NSS_DRV_SHAPER_ENABLE=y
-            CONFIG_NSS_DRV_IGS_ENABLE=y
-            # CONFIG_NSS_DRV_RMNET_ENABLE is not set
-            CONFIG_ATH11K_NSS_SUPPORT=y
-            CONFIG_ATH11K_MEM_PROFILE_256M=y
-            CONFIG_PACKAGE_MAC80211_DEBUGFS=y
-            CONFIG_PACKAGE_iw=y
+          cp configs/redmi-ax3000-nss-wifi.config .config
+          cat <<'EOF' >>.config
+          CONFIG_IB=y
+          # CONFIG_IB_STANDALONE is not set
+          CONFIG_SDK=y
+          CONFIG_MAKE_TOOLCHAIN=y
+          CONFIG_ALL_NONSHARED=y
           EOF
           make defconfig
 
@@ -149,6 +110,9 @@ jobs:
       - name: Build all
         run: make -j$(nproc) V=sc
 
+      - name: Build native scheduler test runtime
+        run: make package/utils/ucode/host/compile V=sc
+
       - name: Test NSS Wi-Fi, relay and DNS control paths
         run: |
           set -eu
@@ -159,6 +123,9 @@ jobs:
           DP_SOURCE="$(find build_dir -path '*/qca-nss-dp-*/nss_dp_attach.c' -print -quit)"
           ECM_SOURCE="$(find build_dir -path '*/qca-nss-ecm-*/ecm_interface.c' -print -quit)"
           DNS_FORWARD="$(find build_dir -path '*/dnsmasq-*/src/forward.c' -print -quit)"
+          SQM_SOURCE="$(find build_dir -path '*/sqm-scripts-*/src/run-openwrt.sh' -print -quit)"
+          ATH11K_FW_SOURCE="$(find build_dir -path '*/ath11k-legacy-firmware-*/ath11k-firmware/IPQ5018_QCN6122_QCN6122/hw1.0/2.7.0.1/WLAN.HK.2.7.0.1-01744-QCAHKSWPL_SILICONZ-1/q6_fw.mdt' -print -quit)"
+          ROOTFS_DIR="$(find build_dir -maxdepth 3 -type d -name root-qualcommax -print -quit)"
           test -n "$NSS_SOURCE"
           test -n "$ATH11K_MAC"
           test -n "$BRIDGE_SOURCE"
@@ -166,7 +133,14 @@ jobs:
           test -n "$DP_SOURCE"
           test -n "$ECM_SOURCE"
           test -n "$DNS_FORWARD"
+          test -n "$SQM_SOURCE"
+          test -n "$ATH11K_FW_SOURCE"
+          test -n "$ROOTFS_DIR"
+          python3 scripts/tests/test-redmi-wireless-firmware.py \
+            --firmware-source "$(dirname "$ATH11K_FW_SOURCE")" --rootfs "$ROOTFS_DIR"
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-dns-fast-retry.py \
+            --source "$(dirname "$DNS_FORWARD")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-dns-tcp-retry.py \
             --source "$(dirname "$DNS_FORWARD")"
           python3 scripts/tests/test-nss-wifi.py "$(dirname "$NSS_SOURCE")" \
             "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
@@ -179,6 +153,14 @@ jobs:
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-ecm-denied.py \
             --ecm "$(dirname "$ECM_SOURCE")"
           python3 scripts/tests/test-nss-sqm-watch.py
+          python3 scripts/tests/test-nss-sqm-native.py --ucode staging_dir/hostpkg/bin/ucode
+          python3 scripts/tests/test-nss-neighbor-native.py --ucode staging_dir/hostpkg/bin/ucode
+          python3 scripts/tests/test-nss-relay-neighbor.py
+          python3 scripts/tests/test-nss-wireless-load.py
+          python3 scripts/tests/test-nss-sqm-reconcile.py \
+            --sqm "${SQM_SOURCE%/src/run-openwrt.sh}"
+          python3 scripts/tests/test-nss-maintenance-ablation.py \
+            --ucode staging_dir/hostpkg/bin/ucode --sqm "${SQM_SOURCE%/src/run-openwrt.sh}"
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-qdisc-lifetime.py \
             --clients "$(dirname "$BRIDGE_SOURCE")/.."
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-qdisc-dma.py \
@@ -237,8 +219,14 @@ jobs:
             --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-wifili.py \
             --drv "$(dirname "$NSS_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-peer-stats-geometry.py \
+            --drv "$(dirname "$NSS_SOURCE")"
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-control.py \
             --drv "$(dirname "$NSS_SOURCE")" \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-base-owner.py \
+            --driver "$(dirname "$NSS_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-bandwidth-cap.py \
             --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-n2h-sg.py \
             --drv "$(dirname "$NSS_SOURCE")"
@@ -280,6 +268,52 @@ jobs:
           UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-mroute-table.py \
             --kernel "${KERNEL_SOURCE%/net/netfilter/nf_conntrack_ecache.c}"
           python3 scripts/tests/test-nss-lan-init.py
+          python3 scripts/tests/test-nss-dsa-ingress.py
+          python3 scripts/tests/test-nss-dsa-anchor.py
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-short-stats-reply.py \
+            --drv "$(dirname "$NSS_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-reset-release.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-ssr-release.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-mpd-rootpd-recovery.py \
+            --kernel "${KERNEL_SOURCE%/net/netfilter/nf_conntrack_ecache.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-rps-transaction.py \
+            --drv "$(dirname "$NSS_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-rx-relocation.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-backports-owners.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-sta-stats.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-ppdu-tx-retries.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-mu-sta.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-wifi-qdisc-teardown.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-stats-table-owner.py \
+            --clients "${BRIDGE_SOURCE%/bridge/nss_bridge_mgr.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-link-statistics.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-error-guards.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}" \
+            --dp "$(dirname "$DP_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-qmi-bar.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-tx-exceptions.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-fragment-route.py \
+            --backports "${ATH11K_MAC%/drivers/net/wireless/ath/ath11k/mac.c}"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-dp-rx-dma.py \
+            --dp "$(dirname "$DP_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-dp-tx-dma.py \
+            --dp "$(dirname "$DP_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-ext-control.py \
+            --drv "$(dirname "$NSS_SOURCE")"
+          UBSAN_OPTIONS=halt_on_error=1 python3 scripts/tests/test-nss-stats-geometry.py \
+            --clients "${BRIDGE_SOURCE%/bridge/nss_bridge_mgr.c}" \
+            --drv "$(dirname "$NSS_SOURCE")"
 
       - name: Upload bin to artifacts
         uses: actions/upload-artifact@v7

@@ -1,0 +1,198 @@
+From: Redmi AX3000 NSS integration
+Subject: [PATCH] remoteproc: qcom_q6v5_mpd: restart user PDs on root PD crash
+
+On IPQ5018 a WLAN firmware assert is reported as a fatal error of the Q6
+root PD. rproc recovery then restarted only the root while its user PDs
+still held MSA and internal radio power, and the root start timed out
+(-110), leaving both radios down until a reboot.
+
+Follow the QSDK multipd design: when the crashed root stops, stop each
+running user PD through its own stop op (releasing TZ resources and
+notifying its SSR clients) and park it SUSPENDED; once the root runs
+again, restart those user PDs from a kthread. While this is in progress
+a user PD neither shuts the root down (the recovering root holds its own
+lock) nor boots it. rproc_start()/rproc_stop() become visible to
+remoteproc drivers for this.
+
+On sta56dbg the user PDs now stopped cleanly but the root start still hit
+the 5 s wait; QSDK waits 10 s for the root PD, so use the same bound.
+
+--- a/drivers/remoteproc/remoteproc_core.c
++++ b/drivers/remoteproc/remoteproc_core.c
+@@ -1264,7 +1264,7 @@
+ }
+ EXPORT_SYMBOL(rproc_resource_cleanup);
+ 
+-static int rproc_start(struct rproc *rproc, const struct firmware *fw)
++int rproc_start(struct rproc *rproc, const struct firmware *fw)
+ {
+ 	struct resource_table *loaded_table;
+ 	struct device *dev = &rproc->dev;
+@@ -1704,7 +1704,7 @@
+ 	return ret;
+ }
+ 
+-static int rproc_stop(struct rproc *rproc, bool crashed)
++int rproc_stop(struct rproc *rproc, bool crashed)
+ {
+ 	struct device *dev = &rproc->dev;
+ 	int ret;
+--- a/drivers/remoteproc/remoteproc_internal.h
++++ b/drivers/remoteproc/remoteproc_internal.h
+@@ -110,6 +110,9 @@
+ 
+ phys_addr_t rproc_va_to_pa(void *cpu_addr);
+ int rproc_trigger_recovery(struct rproc *rproc);
++/* Multi-PD drivers restart user PDs from their root PD crash path. */
++int rproc_start(struct rproc *rproc, const struct firmware *fw);
++int rproc_stop(struct rproc *rproc, bool crashed);
+ 
+ int rproc_elf_sanity_check(struct rproc *rproc, const struct firmware *fw);
+ u64 rproc_elf_get_boot_addr(struct rproc *rproc, const struct firmware *fw);
+--- a/drivers/remoteproc/qcom_q6v5_mpd.c
++++ b/drivers/remoteproc/qcom_q6v5_mpd.c
+@@ -10,6 +10,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
++#include <linux/kthread.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+@@ -87,6 +88,7 @@
+ 	const struct wcss_data *desc;
+ 	const char **firmware;
+ 	struct userpd *upd[MAX_UPD];
++	bool upd_restarting;
+ };
+ 
+ struct userpd {
+@@ -116,6 +118,76 @@
+ 	return bit / 8;
+ }
+ 
++/* A root PD fatal takes every user PD down with it, but rproc recovery only
++ * restarts the root. Restarting the root with its user PDs still holding
++ * MSA and radio power timed out (-110). Stop each running user PD through
++ * its own stop op first, which releases those resources and notifies its
++ * SSR clients, and keep them SUSPENDED for q6_wcss_restart_userpds().
++ */
++static void q6_wcss_stop_userpds(struct q6_wcss *wcss)
++{
++	int i;
++
++	wcss->upd_restarting = true;
++	for (i = 0; i < MAX_UPD; i++) {
++		struct userpd *upd = wcss->upd[i];
++		struct rproc *upd_rproc;
++
++		if (!upd)
++			continue;
++		upd_rproc = upd->q6.rproc;
++		if (upd_rproc->state != RPROC_RUNNING)
++			continue;
++		upd->q6.running = false;
++		upd_rproc->state = RPROC_CRASHED;
++		if (rproc_stop(upd_rproc, true))
++			dev_err(upd->dev, "failed to stop %s\n", upd_rproc->name);
++		upd_rproc->state = RPROC_SUSPENDED;
++	}
++}
++
++static int q6_wcss_restart_userpds(void *data)
++{
++	struct rproc *rproc = data;
++	struct q6_wcss *wcss = rproc->priv;
++	const struct firmware *fw;
++	int i, ret, wait;
++
++	/* rproc_start() marks the root RUNNING after its start op returns. */
++	for (wait = 0; READ_ONCE(rproc->state) != RPROC_RUNNING && wait < 1000; wait++)
++		msleep(10);
++	if (READ_ONCE(rproc->state) != RPROC_RUNNING) {
++		dev_err(wcss->dev, "root pd not running; user pds stay down\n");
++		wcss->upd_restarting = false;
++		return -ETIMEDOUT;
++	}
++
++	for (i = 0; i < MAX_UPD; i++) {
++		struct userpd *upd = wcss->upd[i];
++		struct rproc *upd_rproc;
++
++		if (!upd)
++			continue;
++		upd_rproc = upd->q6.rproc;
++		mutex_lock(&upd_rproc->lock);
++		if (upd_rproc->state == RPROC_SUSPENDED) {
++			ret = request_firmware(&fw, upd_rproc->firmware, upd->dev);
++			if (!ret) {
++				ret = rproc_start(upd_rproc, fw);
++				release_firmware(fw);
++			}
++			if (ret) {
++				dev_err(upd->dev, "failed to restart %s: %d\n",
++					upd_rproc->name, ret);
++				upd_rproc->state = RPROC_CRASHED;
++			}
++		}
++		mutex_unlock(&upd_rproc->lock);
++	}
++	wcss->upd_restarting = false;
++	return 0;
++}
++
+ static int q6_wcss_start(struct rproc *rproc)
+ {
+ 	struct q6_wcss *wcss = rproc->priv;
+@@ -130,10 +202,14 @@
+ 		return ret;
+ 	}
+ 
+-	ret = qcom_q6v5_wait_for_start(&wcss->q6, 5 * HZ);
++	/* Match the QSDK root PD start wait, which covers a restart after a fatal. */
++	ret = qcom_q6v5_wait_for_start(&wcss->q6, msecs_to_jiffies(10000));
+ 	if (ret == -ETIMEDOUT)
+ 		dev_err(wcss->dev, "start timed out\n");
+ 
++	if (!ret && wcss->upd_restarting)
++		kthread_run(q6_wcss_restart_userpds, rproc, "mpd_restart");
++
+ 	return ret;
+ }
+ 
+@@ -195,6 +271,9 @@
+ 	const struct wcss_data *desc = wcss->desc;
+ 	int ret;
+ 
++	if (rproc->state == RPROC_CRASHED)
++		q6_wcss_stop_userpds(wcss);
++
+ 	ret = qcom_q6v5_request_stop(&wcss->q6, NULL);
+ 	if (ret) {
+ 		dev_err(wcss->dev, "pd not stopped\n");
+@@ -266,7 +345,9 @@
+ 		return ret;
+ 	}
+ 
+-	rproc_shutdown(rpd_rproc);
++	/* The crashed root holds its own lock while it stops us. */
++	if (!wcss->upd_restarting)
++		rproc_shutdown(rpd_rproc);
+ 
+ 	return 0;
+ }
+@@ -505,9 +586,11 @@
+ 	struct q6_wcss *wcss = rpd_rproc->priv;
+ 	int ret;
+ 
+-	ret = rproc_boot(rpd_rproc);
+-	if (ret)
+-		return ret;
++	if (!wcss->upd_restarting) {
++		ret = rproc_boot(rpd_rproc);
++		if (ret)
++			return ret;
++	}
+ 
+ 	return qcom_mdt_load_pd_seg(upd->dev, fw, rproc->firmware,
+ 			     wcss->desc->pasid, upd->pd_asid, wcss->mem_region,

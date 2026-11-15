@@ -113,6 +113,13 @@ def main():
     repo = Path(__file__).resolve().parents[2]
     if args.driver:
         source = (args.driver / 'nss_if.c').read_text()
+        if "struct nss_if_wait {" in source:
+            spec = importlib.util.spec_from_file_location(
+                'nss_base_owner', Path(__file__).with_name('test-nss-base-owner.py'))
+            owner = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(owner)
+            owner.run(args.driver)
+            return
     else:
         source = new_side(repo / 'package/kernel/qca-nss-drv/patches/0216-base-interface-correlate-synchronous-ACKs.patch')
     spec = importlib.util.spec_from_file_location('nss_control_extract', Path(__file__).with_name('test-nss-control.py'))

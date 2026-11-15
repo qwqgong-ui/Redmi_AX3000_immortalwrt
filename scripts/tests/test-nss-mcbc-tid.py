@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -47,12 +48,15 @@ enum hal_encrypt_type { HAL_ENCRYPT_TYPE_CCMP };
 #define RX_DROP_U_MIC_FAIL 4
 #define RX_DROP_U_SHORT_CCMP_MIC 5
 #define GFP_ATOMIC 0
-#define WARN_ON_ONCE(x) (x)
+static bool warn_once(bool value) { return value; }
+#define WARN_ON_ONCE(x) warn_once(x)
 #define unlikely(x) (x)
+#define likely(x) (x)
 #define DP_RX_BUFFER_SIZE 2048
 #define EINVAL 22
 #define EIO 5
-struct hal_rx_desc { u8 tid, pn[6]; bool qos; };
+#define ENOMEM 12
+struct hal_rx_desc { u8 tid, pn[6], decap_type; bool qos; };
 struct ath11k_skb_rxcb {
  struct hal_rx_desc *rx_desc; u8 tid; bool is_mcbc;
  bool is_frag, is_first_msdu, is_last_msdu;
@@ -61,13 +65,13 @@ struct ieee80211_rx_status { unsigned flag, rx_flags; };
 struct sk_buff {
  struct ath11k_skb_rxcb cb;
  struct ieee80211_rx_status status;
- _Alignas(8) u8 storage[256]; u8 *data; size_t len; unsigned priority;
+ _Alignas(8) u8 storage[256]; u8 *data; size_t len; unsigned priority;bool freed;
 };
 struct ieee80211_hdr { u16 frame_control; u8 rest[22]; };
 struct napi_struct { int unused; };
 struct sk_buff_head { int unused; };
 struct rx_attention { int unused; };
-struct ath11k_base { struct { unsigned hal_desc_sz; } hw_params; };
+struct ath11k_base { struct { unsigned hal_desc_sz; } hw_params; struct { unsigned invalid_rbm; } soc_stats; };
 struct ath11k { struct ath11k_base *ab; };
 struct ieee80211_key {
  struct { unsigned flags; } conf;
@@ -87,8 +91,6 @@ static bool ieee80211_is_frag(struct ieee80211_hdr *hdr) { (void)hdr; return fal
 static unsigned ieee80211_hdrlen(u16 fc) { return ieee80211_is_data_qos(fc) ? 26 : 24; }
 static u8 *ieee80211_get_qos_ctl(struct ieee80211_hdr *hdr) { return (u8 *)hdr + 24; }
 static size_t skb_headroom(struct sk_buff *skb) { return skb->data - skb->storage; }
-static int pskb_expand_head(struct sk_buff *skb, int n, int tail, int flags)
-{ (void)skb; (void)n; (void)tail; (void)flags; assert(0); return -1; }
 static u8 *skb_push(struct sk_buff *skb, size_t n)
 { assert(skb_headroom(skb) >= n); skb->data -= n; skb->len += n; return skb->data; }
 static u8 *skb_pull(struct sk_buff *skb, size_t n)
@@ -117,6 +119,8 @@ static void ath11k_dp_rx_h_ppdu(struct ath11k *ar, struct hal_rx_desc *desc,
  struct ieee80211_rx_status *status) { (void)ar; (void)desc; (void)status; }
 static unsigned ath11k_dp_rx_h_msdu_start_msdu_len(struct ath11k_base *ab, struct hal_rx_desc *desc)
 { (void)ab; (void)desc; return 20; }
+static __attribute__((unused)) u8 ath11k_dp_rx_h_msdu_start_decap_type(struct ath11k_base *ab, struct hal_rx_desc *desc)
+{ (void)ab; return desc->decap_type; }
 static void ath11k_dp_rx_null_q_desc_sg_drop(struct ath11k *ar, unsigned len, struct sk_buff_head *list)
 { (void)ar; (void)len; (void)list; assert(0); }
 static struct rx_attention *ath11k_dp_rx_get_attention(struct ath11k_base *ab, struct hal_rx_desc *desc)
@@ -136,15 +140,20 @@ static void ccmp_special_blocks(struct sk_buff *skb, u8 *pn, u8 *b, u8 *aad, boo
 { (void)skb; (void)pn; (void)b; (void)aad; (void)spp; assert(0); }
 static int ieee80211_aes_ccm_decrypt(void *tfm, u8 *b, u8 *aad, u8 *data, int len, u8 *mic)
 { (void)tfm; (void)b; (void)aad; (void)data; (void)len; (void)mic; assert(0); return -1; }
+static unsigned deliveries,frees;
+static int mpdu_error;
+static void dev_kfree_skb_any(struct sk_buff *skb) { assert(!skb->freed);skb->freed=true;frees++; }
 '''
 
 PIPELINE = r'''
-static void ath11k_dp_rx_h_mpdu(struct ath11k *ar, struct sk_buff *skb,
+static int ath11k_dp_rx_h_mpdu(struct ath11k *ar, struct sk_buff *skb,
  struct hal_rx_desc *desc, struct ieee80211_rx_status *status, bool *fast, bool from_nss)
 {
- (void)desc; (void)from_nss; assert(!*fast && skb->cb.is_mcbc);
+ (void)from_nss; assert(!*fast && skb->cb.is_mcbc);
+ if(mpdu_error)return mpdu_error;
  status->flag |= RX_FLAG_DECRYPTED | RX_FLAG_MIC_STRIPPED;
- ath11k_get_dot11_hdr_from_rx_desc(ar, skb, &skb->cb, status, HAL_ENCRYPT_TYPE_CCMP);
+ ath11k_get_dot11_hdr_from_rx_desc(ar, skb, &skb->cb, desc, status, HAL_ENCRYPT_TYPE_CCMP);
+ return 0;
 }
 static int result, security_idx, seqno_idx;
 static unsigned delivered_flags;
@@ -152,7 +161,7 @@ static struct ieee80211_key key;
 static void ath11k_dp_rx_deliver_msdu(struct ath11k *ar, struct napi_struct *napi,
  struct sk_buff *skb, struct ieee80211_rx_status *status)
 {
- (void)ar; (void)napi;
+ (void)ar; (void)napi;assert(!skb->freed);deliveries++;
  skb->status = *status; delivered_flags = status->flag;
  struct ieee80211_rx_data rx = { .skb = skb, .key = &key, .sta = &key };
  ieee80211_parse_qos(&rx); security_idx = rx.security_idx; seqno_idx = rx.seqno_idx;
@@ -168,17 +177,31 @@ static void receive(struct ath11k *ar, bool qos, u8 tid, u8 poison, unsigned pn,
   .pn = {0, 0, 0, 0, (pn >> 8) & 255, pn & 255} };
  struct sk_buff skb = { .cb = { .rx_desc = &desc, .tid = poison, .is_mcbc = true } };
  skb.data = skb.storage + 128; skb.len = 20;
+ unsigned before=deliveries,freed_before=frees;
  ath11k_dp_rx_from_nss(ar, &skb, NULL);
+ assert(deliveries==before+1&&frees==freed_before&&!skb.freed);
  assert(skb.cb.tid == tid);
  assert(security_idx == (qos ? tid : 0));
  assert(seqno_idx == (qos ? tid : IEEE80211_NUM_TIDS));
  assert(result == expected);
  assert(delivered_flags & RX_FLAG_SKIP_MONITOR);
  assert(!(delivered_flags & (RX_FLAG_PN_VALIDATED | RX_FLAG_DUP_VALIDATED)));
+ assert((delivered_flags&(RX_FLAG_DECRYPTED|RX_FLAG_MIC_STRIPPED))==(RX_FLAG_DECRYPTED|RX_FLAG_MIC_STRIPPED));
+ assert(!(delivered_flags&RX_FLAG_IV_STRIPPED));
 }
 int main(void)
 {
  struct ath11k_base ab = { .hw_params.hal_desc_sz = 32 }; struct ath11k ar = { .ab = &ab };
+ /* The explicit descriptor supplies FC and PN even if cb still holds a stale alias. */
+ struct hal_rx_desc poison={.qos=false,.tid=15,.pn={9,9,9,9,9,9}};
+ struct hal_rx_desc good={.qos=true,.tid=6,.pn={0,0,0,0,0,42}};
+ struct sk_buff explicit={.cb={.rx_desc=&poison,.tid=6,.is_mcbc=true}};
+ explicit.data=explicit.storage+128;explicit.len=20;
+ struct ieee80211_rx_status direct_status={0};
+ ath11k_get_dot11_hdr_from_rx_desc(&ar,&explicit,&explicit.cb,&good,&direct_status,HAL_ENCRYPT_TYPE_CCMP);
+ struct ieee80211_hdr *header=(void *)explicit.data;
+ assert(header->frame_control==0x88&&(*ieee80211_get_qos_ctl(header)&15)==6);
+ u8 explicit_pn[6];ccmp_hdr2pn(explicit_pn,explicit.data+26);assert(!memcmp(explicit_pn,good.pn,6));
  for (unsigned tid = 0; tid < 16; tid++) {
   memset(&key, 0, sizeof(key));
   receive(&ar, true, tid, 0xff, 1, RX_CONTINUE);
@@ -195,6 +218,15 @@ int main(void)
  memset(&key, 0, sizeof(key));
  receive(&ar, false, 15, 6, 1, RX_CONTINUE);
  assert(key.u.ccmp.rx_pn[0][5] == 1);
+ for(int which=0;which<2;which++) {
+  struct hal_rx_desc desc={.qos=true,.tid=6,.pn={0,0,0,0,0,99}};
+  struct sk_buff skb={.cb={.rx_desc=&desc,.is_mcbc=true}};
+  skb.data=skb.storage+128;skb.len=20;
+  struct ieee80211_key saved=key;unsigned before=deliveries,freed_before=frees;
+  mpdu_error=which?-ENOMEM:-EINVAL;ath11k_dp_rx_from_nss(&ar,&skb,NULL);
+  assert(skb.freed&&frees==freed_before+1&&deliveries==before&&!memcmp(&key,&saved,sizeof(key)));
+ }
+ mpdu_error=0;
  for (unsigned tid = 0; tid < 16; tid++) {
   struct sk_buff skb = { .cb = { .tid = 0xff, .is_mcbc = true } };
   skb.data = skb.storage + 96;
@@ -209,6 +241,12 @@ int main(void)
   assert(seqno_idx == (int)tid);
   assert(key.u.ccmp.rx_pn[tid][5] == 1);
  }
+ struct sk_buff failed={.cb={.is_mcbc=true}};failed.data=failed.storage+96;
+ *(struct hal_rx_desc *)failed.data=(struct hal_rx_desc){.qos=true,.tid=6};
+ struct ieee80211_rx_status failed_status={0};struct sk_buff_head failed_list={0};
+ struct ieee80211_key saved=key;unsigned before=deliveries,freed_before=frees;mpdu_error=-ENOMEM;
+ assert(ath11k_dp_rx_h_null_q_desc(&ar,&failed,&failed_status,&failed_list)==-EINVAL);
+ assert(!failed.freed&&frees==freed_before&&deliveries==before&&!memcmp(&key,&saved,sizeof(key)));
  puts("NSS MCBC and host NULL queue: descriptor TID, QoS reconstruction, independent CCMP PN windows and replay rejection passed");
  return 0;
 }
@@ -224,11 +262,17 @@ def main():
     rx = (args.backports / 'net/mac80211/rx.c').read_text()
     pn = module.function(wpa, 'ccmp_pn2hdr') + module.function(wpa, 'ccmp_hdr2pn')
     typedefs, helpers = SHIM.split('static bool ieee80211_is_data_qos', 1)
-    program = typedefs + pn + 'static bool ieee80211_is_data_qos' + helpers
+    dp_header = (args.backports / 'drivers/net/wireless/ath/ath11k/dp_rx.h').read_text()
+    decap = re.search(r'enum dp_rx_decap_type\s*\{.*?\};', dp_header, re.S)[0]
+    native_limit = re.search(r'(?m)^#define DP_MAX_NWIFI_HDR_LEN[^\n]*', dp_header)
+    program = decap + '\n' + (native_limit[0] + '\n' if native_limit else '')
+    program += typedefs + pn + 'static bool ieee80211_is_data_qos' + helpers
     program += module.function(dp, 'ath11k_get_dot11_hdr_from_rx_desc')
     program += module.function(rx, 'ieee80211_parse_qos')
     program += '\nieee80211_rx_result\n' + module.function(wpa, 'ieee80211_crypto_ccmp_decrypt')
     program += PIPELINE + module.function(dp, 'ath11k_dp_rx_from_nss')
+    if 'ath11k_dp_rx_check_nwifi_hdr_len_valid(' in dp:
+        program += module.function(dp, 'ath11k_dp_rx_check_nwifi_hdr_len_valid')
     program += module.function(dp, 'ath11k_dp_rx_h_null_q_desc') + CASES
     with tempfile.TemporaryDirectory(prefix='nss-mcbc-tid-') as temp:
         path = Path(temp) / 'mcbc-tid.c'

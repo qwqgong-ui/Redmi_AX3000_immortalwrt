@@ -1,0 +1,27 @@
+component	official_repository	pin_12_2_r9	pin_12_4_5_r3	current_input	evidence_and_scope
+release-manifest	https://git.codelinaro.org/clo/qsdk/releases/manifest/qstak.git	71a7a879d0a97c436287a97a7c1e56d9fdbb6fac	71a7a879d0a97c436287a97a7c1e56d9fdbb6fac	同仓固定XML	12.2.R9_TARGET_ALL.12.02.09.023.039与12.4.5.R3_TARGET_ALL.12.4.503.308.018；不是按分支名猜配套
+nss-drv	https://git.codelinaro.org/clo/qsdk/oss/lklm/nss-drv.git	fe0bc6b077b842d13a06053271115bb9b3dcc505	公开manifest无此项	d7ef98b1d3d31346981d3a1abff5152a206374af	14.0.r9-00025-O XML确认当前pin；官方tree与取件archive 480/480相同
+nss-clients	https://git.codelinaro.org/clo/qsdk/oss/lklm/nss-clients.git	9b99c6f088b6950d937a4cb8f405f86818c1dff4	1babe67509fd9b516e1c4a37c22eb206aae78a1f	51be82d43ef85079f78aa163d014223b05baa6a2	12.5.5 XML确认当前pin；官方tree与取件archive 295/295相同
+ecm	https://git.codelinaro.org/clo/qsdk/oss/lklm/qca-nss-ecm.git	7606b02d7b2f088abadd3b567ed56366ca53c3fd	cb557ea8680b95ad4de83945c08c7a1865f86948	7894b769eeb64f1c44fde547a107a8b866997590	14.0-01670-O XML确认当前pin；官方tree与取件archive 172/172相同
+nss-dp	https://git.codelinaro.org/clo/qsdk/oss/lklm/nss-dp.git	7a602da9ea32b705fff5bce6cfee89b172a62c0d	dfeb7d33ca22216a8172d5dd966e4c0db7715b69	openwrt/qca-nss-dp@19c51af0c5be0afcbd57a9e0e50928759d7d08da	官方两树已完整取得；当前attach pristine相同、标准PHY/DMA API为下游改造；发现host teardown索引/descriptor及RX长度配对问题待修
+ssdk	https://git.codelinaro.org/clo/qsdk/oss/lklm/qca-ssdk.git	5fc7e5b726271faa492e7b2bfb8a85232c9a292a	3153d9068a87198dabf1b8f2c80801fd31a493b3	openwrt/qca-ssdk@446db12b1fd3bca2e61e45cb01c4ad52cfddd95b	官方两树已完整取得；MP mib/portctrl/uniphy及对应寄存器头与当前pristine逐字节相同；平台适配不同
+nss-fw-feed	https://git.codelinaro.org/clo/qsdk/oss/feeds/nss.git	5ded5aa209ddc438f43f8ccf487b8f8897c5cf0a	公开manifest无此项	NSS.FW.12.2-156-MP.R	原厂配方明确12.2/MP/R/156；执行源码未取得；官方后来已有更高release配方，不能称156最新
+nss-fw-blob	http://qcawebsrvr.qualcomm.com/NSS/NSS.FW/12.2/MP/156/BIN-NSS.FW.12.2-156-MP.R.tar.bz2	上述feed配方URL	不适用	7f14b5a2e72ba0b016f0c4b2ac4ce74664de650f8e16b6d70e6f10d05f05edc0	当前789564字节blob与社区156归档相同；原厂配方MD5=skip，尚缺独立官方hash/签名
+nss-host-feed	https://git.codelinaro.org/clo/qsdk/oss/system/feeds/nss-host.git	ecd53242c69f6bd7704bb0f84437f5201cae8a9f	1d1b58aadd8dd068b82e0a1021de5adfca47e9b2	本仓OpenWrt包集成	包依赖、编译参数及功能选择；不等于FW wire ABI承诺
+wlan-open	https://git.codelinaro.org/clo/qsdk/oss/system/feeds/wlan-open.git	7f756c1146c4753ce3df9876696f00ed963a8d01	9441ce3c71760cd7d1cd0c5b754f55790f123dd0	本仓backports6.18.39补丁	1054项diff全对照；原厂recipe另用ath ef7197996efe及generator 42a95ce7，不能称同原厂构建
+wlan-hostapd-feed	https://git.codelinaro.org/clo/qsdk/oss/system/feeds/wlan-hostapd.git	195bff110c86523f4b26343ce5a549e516916f95	128dbebc711163ba0c9e8cb34432c1ce1d5b461f	本仓hostapd较新版本	原厂动态VLAN接口选择及ifindex/VID传播
+hostap	https://git.codelinaro.org/clo/le/hostap.git	以对应feed recipe为准	01944c0957ba20ee1790eb2473cc5970f8b1f17e	ca266cc24d8705eb1a2a0857ad326e48b1408b20	原厂recipe pin已取得；每VID独立wpa_group，共用wire keyidx1/2，证实driver需VLAN维度所有权
+wifi-host-cmn	https://git.codelinaro.org/clo/qsdk/platform/vendor/qcom-opensource/wlan/qca-wifi-host-cmn.git	a25671add03b2bf957581bb612a5bc265ef32682	47fd3528cf8ca6c35ee280b394fd7c0d5063ae60	不是当前ath11k编译依赖	12.4.5.r3完整取得；已读peer引用/TID锁/REO need_status与callback、NSS MEC aging边界，不能代证ath11k等价
+fw-api	https://git.codelinaro.org/clo/qsdk/platform/vendor/qcom-opensource/wlan/fw-api.git	deaae38ade51d202a253b0c3a88b21c002f880d3	d10ff60bc8d256292d23ea6d79a43b7b18837d68	对照资料，不直接替换当前layout	已核对qca5018/qcn6122寄存器、MPDU length、RSSI、HTT、WMI CSC接口；协议头不等于FW执行源码
+qca-mcs	https://git.codelinaro.org/clo/qsdk/oss/lklm/qca-mcs.git	d4e5d8c84369225d833c2b0dcf22fa3f6b9c9ac2	02207cdd83fb5f97a8842954d8134b739564fc01	当前使用Linux bridge snooper消费者	厂商组播接口原厂对照；未把可选模块盲目加入本平台
+kernel-5.4	https://git.codelinaro.org/clo/qsdk/oss/kernel/linux-ipq-5.4.git	7645549e1c8f37de69a03eea5158bfb94dbf8c30	不适用	非当前内核	NSS156对应原厂内核BOM
+kernel-6.1	https://git.codelinaro.org/clo/qsdk/oss/kernel/linux-ipq-6.1.git	不适用	8e508b31dcfe843a0d40fef4841bf24824c0beb4	非当前内核	wlan-open12.4.5.r3对应原厂基础内核
+kernel-files	https://git.codelinaro.org/clo/qsdk/oss/kernel/linux-ipq-files.git	以12.2 XML为准	ba9f6a116bffa025b984fae49f5d7202ac8378c3	本仓MPD移植补丁	官方remoteproc/DT binding树已取得；remoteproc并非另一个独立repo
+kernel-patches	https://git.codelinaro.org/clo/qsdk/oss/kernel/linux-ipq-patches-6.1.git	不适用	950656d1c0bbb51ae9683ee69e1b2d0c302d7aca	本仓6.12兼容移植	与6.1 base及files一起构成原厂内核
+linux-stable	https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git	不适用	不适用	v6.12.108@064531c7e30cd67b79c0c694ac97f00c7796f4d6	本机当前基础内核再叠OpenWrt/QSDK移植；不是原厂QSDK内核
+qca-wifi-oss	https://git.codelinaro.org/clo/qsdk/wifi/qca-wifi-oss.git	以12.2 XML为准	aec60b73683a8dc44b325bd32909278664660a40	非当前ath11k实现	12.4.5.r3完整取得；已读WDS peer/dest/vdev/static及VLAN TX/RX inner/outer组包；不是ath11k可直接搬用的实现
+wlan-fw	https://github.com/quic/upstream-wifi-fw.git	不适用	以实际recipe为准	795809c7041582bd51bdfaa1f548b916ae8d4382	实际IPQ5018/QCN6122选WLAN.HK.2.7.0.1-01744；QUIC tree与本地所用目录37/37 blob相同
+ath11k-firmware	https://git.codelinaro.org/clo/ath-firmware/ath11k-firmware.git	以对应recipe为准	以对应recipe为准	15f050122da5ef5bef2cc8c7c19dfb7f98060a49	包主pin；本板实际装的是上一行QUIC legacy目录，不可混同
+ssdk-feed	https://git.codelinaro.org/clo/qsdk/oss/system/feeds/ssdk.git	以12.2 XML为准	4d9d0ab5157331286ea9cea60f4a4be8492afb5c	本仓SSDK包集成	原厂交换机集成对照
+ssdk-shell	https://git.codelinaro.org/clo/qsdk/oss/ssdk-shell.git	以12.2 XML为准	67fb8bc65b6327c87c377f9921b2acddccd4f207	未作为当前运行数据面依赖	诊断工具对照
+nss-userspace	https://git.codelinaro.org/clo/qsdk/oss/nss-userspace.git	以12.2 XML为准	fcfdf4c940f30f8429f0e6aa9abe166f2f588af5	本仓独立诊断脚本	NSS用户态接口/工具对照

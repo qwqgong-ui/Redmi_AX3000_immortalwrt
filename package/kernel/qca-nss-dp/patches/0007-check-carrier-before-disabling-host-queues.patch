@@ -1,0 +1,1191 @@
+Subject: [PATCH] nss-dp: own DMA transactions, descriptor ordering and host queues
+
+--- a/hal/dp_ops/syn_gmac_dp/syn_dma_reg.h
++++ b/hal/dp_ops/syn_gmac_dp/syn_dma_reg.h
+@@ -519,7 +519,8 @@
+  */
+ static inline void syn_resume_dma_tx(void __iomem *mac_base)
+ {
+-	hal_write_relaxed_reg(mac_base, SYN_DMA_TX_POLL_DEMAND, 0);
++	/* Publish descriptor ownership before the MMIO doorbell. */
++	writel(0, mac_base + SYN_DMA_TX_POLL_DEMAND);
+ }
+ 
+ /*
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp.c
+@@ -335,7 +335,7 @@
+ 	struct net_device *netdev = dpc->dev;
+ 	struct nss_dp_dev *gmac_dev = (struct nss_dp_dev *)netdev_priv(netdev);
+ 	struct syn_dp_info_tx *tx_info = &gmac_dev->dp_info.syn_info.dp_info_tx;
+-	uint16_t ret;
++	int ret;
+ 
+ 	ret = syn_dp_tx(tx_info, skb);
+ 	if (likely(!ret)) {
+@@ -347,17 +347,9 @@
+ 	 * Only one DMA channel is supported to assume queue 0.
+ 	 */
+ 	if (likely(ret == NETDEV_TX_BUSY)) {
+-		/*
+-		 * Stop the queue if the queue stop is not disabled and return
+-		 * NETDEV_TX_BUSY. Packet will be requeued or dropped by the caller.
+-		 * Queue will be re-enabled from Tx Complete.
+-		 */
+-		if (likely(!dp_global_ctx.tx_requeue_stop)) {
+-			netdev_dbg(netdev, "Stopping tx queue due to lack of tx descriptors");
+-			atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_packets_requeued);
+-			netif_stop_queue(netdev);
+-			return NETDEV_TX_BUSY;
+-		}
++		/* The queue stop is serialized with completion in syn_dp_tx(). */
++		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_packets_requeued);
++		return NETDEV_TX_BUSY;
+ 	}
+ 
+ 	netdev_dbg(netdev, "Drop packet due to no Tx descriptor or invalid pkt");
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_cfg_rx.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_cfg_rx.c
+@@ -88,32 +88,38 @@
+ {
+ 	struct syn_dp_info_rx *rx_info = &dev_info->dp_info_rx;
+ 	uint32_t rx_skb_index;
+-	struct dma_desc_rx *rxdesc;
+-	int i;
++	uint32_t i;
+ 	struct sk_buff *skb;
++
++	if (!rx_info->rx_desc)
++		return;
+ 
+ 	/*
+ 	 * Rx Ring cleaning
+ 	 * We are assuming that the NAPI poll was already completed.
+ 	 * No need of a lock here since the NAPI and interrupts have been disabled now
+ 	 */
+-	rx_skb_index = rx_info->rx_idx;
+ 	for (i = 0; i < rx_info->busy_rx_desc_cnt; i++) {
+-		rx_skb_index = (rx_skb_index + i) & SYN_DP_RX_DESC_MAX_INDEX;
+-		rxdesc = rx_info->rx_desc;
+-
+-		dma_unmap_single(rx_info->dev, rxdesc->buffer1,
+-				 rxdesc->length, DMA_FROM_DEVICE);
++		rx_skb_index = syn_dp_rx_inc_index(rx_info->rx_idx, i);
++		syn_dp_rx_unmap_buffer(rx_info, rx_skb_index);
+ 
+ 		skb = rx_info->rx_buf_pool[rx_skb_index].skb;
+ 		if (unlikely(skb != NULL)) {
+ 			dev_kfree_skb_any(skb);
+ 			rx_info->rx_buf_pool[rx_skb_index].skb = NULL;
+ 		}
++		rx_info->rx_buf_pool[rx_skb_index].map_addr_virt = 0;
+ 	}
+ 
++	/* An incomplete scatter frame has already left the descriptor pool. */
++	dev_kfree_skb_any(rx_info->head);
++	rx_info->head = rx_info->tail = NULL;
++	rx_info->prev_len = 0;
++
+ 	dma_free_coherent(rx_info->dev, (sizeof(struct dma_desc_rx) * SYN_DP_RX_DESC_SIZE),
+-			  rx_info->rx_desc, dev_info->rx_desc_dma_addr);
++				  rx_info->rx_desc, dev_info->rx_desc_dma_addr);
+ 	rx_info->rx_desc = NULL;
+ 	dev_info->rx_desc_dma_addr = (dma_addr_t)0;
++	atomic_set((atomic_t *)&rx_info->busy_rx_desc_cnt, 0);
++	rx_info->rx_idx = rx_info->rx_refill_idx = 0;
+ }
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_cfg_tx.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_cfg_tx.c
+@@ -37,6 +37,11 @@
+ 		return -ENOMEM;
+ 	}
+ 
++	if (!tx_info->locks_initialized) {
++		spin_lock_init(&tx_info->producer_lock);
++		spin_lock_init(&tx_info->ring_lock);
++		tx_info->locks_initialized = true;
++	}
+ 	tx_info->tx_desc = first_desc;
+ 	dev_info->tx_desc_dma_addr = dma_addr;
+ 	netdev_dbg(netdev, "Tx Descriptors in Ring Mode: No. of descriptors = %d base = 0x%px dma = 0x%px\n"
+@@ -47,6 +52,7 @@
+ 	tx_info->tx_comp_idx = 0;
+ 	tx_info->tx_idx = 0;
+ 	tx_info->busy_tx_desc_cnt = 0;
++	tx_info->stopping = false;
+ 
+ 	return NSS_DP_SUCCESS;
+ }
+@@ -77,29 +83,46 @@
+ void syn_dp_cfg_tx_cleanup_rings(struct syn_dp_info *dev_info)
+ {
+ 	struct syn_dp_info_tx *tx_info = &dev_info->dp_info_tx;
+-	uint32_t tx_skb_index;
+-	struct dma_desc_tx *txdesc;
+-	int i;
++	struct sk_buff_head free_list;
++	struct dma_desc_tx *descriptors;
+ 	struct sk_buff *skb;
+-	uint32_t busy_tx_desc_cnt = atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt);
++	dma_addr_t descriptor_dma;
++	uint32_t busy, start, index, i;
+ 
+-	/*
+-	 * Tx Ring cleaning
+-	 */
+-	tx_skb_index = syn_dp_tx_comp_index_get(tx_info);
+-	for (i = 0; i < busy_tx_desc_cnt; i++) {
+-		tx_skb_index = syn_dp_tx_inc_index(tx_skb_index, i);
+-		txdesc = tx_info->tx_desc;
++	if (!READ_ONCE(tx_info->tx_desc))
++		return;
++	__skb_queue_head_init(&free_list);
++	spin_lock_bh(&tx_info->producer_lock);
++	spin_lock(&tx_info->ring_lock);
++	descriptors = tx_info->tx_desc;
++	if (!descriptors) {
++		spin_unlock(&tx_info->ring_lock);
++		spin_unlock_bh(&tx_info->producer_lock);
++		return;
++	}
++	tx_info->stopping = true;
++	descriptor_dma = dev_info->tx_desc_dma_addr;
++	busy = atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt);
++	start = syn_dp_tx_comp_index_get(tx_info);
++	for (i = 0; i < busy; i++) {
++		index = syn_dp_tx_inc_index(start, i);
++		syn_dp_tx_unmap_buffer(tx_info, index);
++		skb = tx_info->tx_buf_pool[index].skb;
++		if (skb)
++			__skb_queue_tail(&free_list, skb);
++		memset(&tx_info->tx_buf_pool[index], 0,
++		       sizeof(tx_info->tx_buf_pool[index]));
++	}
++	tx_info->tx_desc = NULL;
++	dev_info->tx_desc_dma_addr = 0;
++	atomic_set((atomic_t *)&tx_info->busy_tx_desc_cnt, 0);
++	tx_info->tx_idx = tx_info->tx_comp_idx = 0;
++	spin_unlock(&tx_info->ring_lock);
++	spin_unlock_bh(&tx_info->producer_lock);
+ 
+-		dma_unmap_single(tx_info->dev, txdesc->buffer1, txdesc->length, DMA_TO_DEVICE);
+-
+-		skb = tx_info->tx_buf_pool[tx_skb_index].skb;
+-		if (unlikely(skb != NULL)) {
+-			dev_kfree_skb_any(skb);
+-			tx_info->tx_buf_pool[tx_skb_index].skb = NULL;
+-		}
+-	}
+-
+-	dma_free_coherent(tx_info->dev, (sizeof(struct dma_desc_tx) * SYN_DP_TX_DESC_SIZE),
+-				tx_info->tx_desc, dev_info->tx_desc_dma_addr);
++	while ((skb = __skb_dequeue(&free_list)))
++		dev_kfree_skb_any(skb);
++	dma_free_coherent(tx_info->dev,
++			  sizeof(*descriptors) * SYN_DP_TX_DESC_SIZE,
++			  descriptors, descriptor_dma);
+ }
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_rx.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_rx.c
+@@ -26,6 +26,26 @@
+ #include "syn_dma_reg.h"
+ 
+ /*
++ * The descriptor length contains control bits and may split one mapping
++ * between two buffers. Keep DMA ownership in the matching host pool entry.
++ */
++void syn_dp_rx_unmap_buffer(struct syn_dp_info_rx *rx_info, uint32_t index)
++{
++	struct syn_dp_rx_buf *buffer = &rx_info->rx_buf_pool[index];
++
++	if (!buffer->dma_len)
++		return;
++	if (buffer->map_page)
++		dma_unmap_page(rx_info->dev, buffer->dma_addr,
++			       buffer->dma_len, DMA_FROM_DEVICE);
++	else
++		dma_unmap_single(rx_info->dev, buffer->dma_addr,
++				 buffer->dma_len, DMA_FROM_DEVICE);
++	buffer->dma_len = 0;
++	buffer->dma_addr = 0;
++}
++
++/*
+  * syn_dp_rx_reset_one_desc()
+  *	Reset the descriptor after Rx is over.
+  */
+@@ -64,7 +84,8 @@
+ 	}
+ 
+ 	rx_desc->buffer1 = buffer1;
+-	rx_desc->status = DESC_OWN_BY_DMA;
++	dma_wmb();
++	WRITE_ONCE(rx_desc->status, DESC_OWN_BY_DMA);
+ }
+ 
+ /*
+@@ -136,6 +157,9 @@
+ 		syn_dp_rx_refill_one_desc(rx_desc, dma_addr, PAGE_SIZE);
+ 		rx_info->rx_buf_pool[rx_refill_idx].skb = skb;
+ 		rx_info->rx_buf_pool[rx_refill_idx].map_addr_virt = (size_t)(page_addr);
++		rx_info->rx_buf_pool[rx_refill_idx].dma_len = PAGE_SIZE;
++		rx_info->rx_buf_pool[rx_refill_idx].dma_addr = dma_addr;
++		rx_info->rx_buf_pool[rx_refill_idx].map_page = true;
+ 
+ 		rx_info->rx_refill_idx = syn_dp_rx_inc_index(rx_refill_idx, 1);
+ 		atomic_inc((atomic_t *)&rx_info->busy_rx_desc_cnt);
+@@ -193,6 +217,9 @@
+ 		syn_dp_rx_refill_one_desc(rx_desc, dma_addr, inval_len);
+ 		rx_info->rx_buf_pool[rx_refill_idx].skb = skb;
+ 		rx_info->rx_buf_pool[rx_refill_idx].map_addr_virt = (size_t)(skb->data);
++		rx_info->rx_buf_pool[rx_refill_idx].dma_len = inval_len;
++		rx_info->rx_buf_pool[rx_refill_idx].dma_addr = dma_addr;
++		rx_info->rx_buf_pool[rx_refill_idx].map_page = false;
+ 
+ 		rx_info->rx_refill_idx = syn_dp_rx_inc_index(rx_refill_idx, 1);
+ 		atomic_inc((atomic_t *)&rx_info->busy_rx_desc_cnt);
+@@ -412,7 +439,7 @@
+ 	dsb(st);
+ 
+ 	do {
+-		status = rx_desc->status;
++		status = READ_ONCE(rx_desc->status);
+ 		if (unlikely(syn_dp_gmac_is_rx_desc_owned_by_dma(status))) {
+ 
+ 			/*
+@@ -422,6 +449,8 @@
+ 			 */
+ 			break;
+ 		}
++		/* Completion fields are valid only after DMA releases OWN. */
++		dma_rmb();
+ 
+ 		/*
+ 		 * Prefetch a cacheline (64B) packet header data of current SKB.
+@@ -434,12 +463,7 @@
+ 		 * speculative prefetch by CPU may have occurred.
+ 		 */
+ 		frame_length = syn_dp_gmac_get_rx_desc_frame_length(status);
+-		if (likely(!rx_info->page_mode))
+-			dma_unmap_single(rx_info->dev, rx_desc->buffer1,
+-			                 rx_info->alloc_buf_len, DMA_FROM_DEVICE);
+-		else
+-			dma_unmap_page(rx_info->dev, rx_desc->buffer1,
+-			               PAGE_SIZE, DMA_FROM_DEVICE);
++		syn_dp_rx_unmap_buffer(rx_info, rx_idx);
+ 		prefetch((void *)rx_buf->map_addr_virt);
+ 
+ 		rx_next_idx = syn_dp_rx_inc_index(rx_idx, 1);
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_rx.h
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_rx.h
+@@ -39,6 +39,9 @@
+ struct syn_dp_rx_buf {
+ 	struct sk_buff *skb;	/* Buffer pointer populated to Rx/Tx dma desc */
+ 	size_t map_addr_virt;	/* Virtual address of buffer populated to Rx/Tx dma desc */
++	dma_addr_t dma_addr;
++	uint32_t dma_len;	/* Exact length and API used by the live mapping */
++	bool map_page;
+ };
+ 
+ /*
+@@ -66,6 +69,8 @@
+ 	uint32_t prev_len;		/* Stores frame_length of previous descriptor */
+ };
+ 
++void syn_dp_rx_unmap_buffer(struct syn_dp_info_rx *rx_info, uint32_t index);
++
+ /*
+  * syn_dp_rx_inc_index()
+  * 	Increment Rx descriptor index
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_tx.c
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_tx.c
+@@ -39,538 +39,297 @@
+ 	(status & DESC_TX_PAY_CHK_ERROR) ? atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_ip_payload_errors) : 0;
+ }
+ 
++static inline void syn_dp_tx_clear_buf_entry(struct syn_dp_info_tx *tx_info,
++					    uint32_t index)
++{
++	memset(&tx_info->tx_buf_pool[index], 0,
++	       sizeof(tx_info->tx_buf_pool[index]));
++}
++
+ /*
+- * syn_dp_tx_clear_buf_entry()
+- *	Clear the Tx info after Tx is over.
++ * CPU prepares every mapping before publishing the first OWN bit. The
++ * producer lock also covers callers which bypass the netdev queue lock;
++ * ring_lock prevents completion from consuming a half-published packet.
+  */
+-static inline void syn_dp_tx_clear_buf_entry(struct syn_dp_info_tx *tx_info, uint32_t tx_skb_index)
+-{
+-	tx_info->tx_buf_pool[tx_skb_index].len = 0;
+-	tx_info->tx_buf_pool[tx_skb_index].skb = NULL;
+-	tx_info->tx_buf_pool[tx_skb_index].shinfo_addr_virt = 0;
+-}
+-
+-/*
+- * syn_dp_tx_set_desc_sg()
+- *	Populate the tx desc structure with the buffer address for SG packets
+- */
+-static inline struct dma_desc_tx *syn_dp_tx_set_desc_sg(struct syn_dp_info_tx *tx_info,
+-					   uint32_t buffer, unsigned int length, uint32_t status)
+-{
+-	uint32_t tx_idx = tx_info->tx_idx;
+-	struct dma_desc_tx *txdesc = tx_info->tx_desc + tx_idx;
+-
+-#ifdef SYN_DP_DEBUG
+-	BUG_ON(atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt) > SYN_DP_TX_DESC_SIZE);
+-	BUG_ON(txdesc != (tx_info->tx_desc + tx_idx));
+-	BUG_ON(!syn_dp_gmac_is_tx_desc_empty(txdesc));
+-	BUG_ON(syn_dp_gmac_is_tx_desc_owned_by_dma(txdesc));
+-#endif
+-
+-	if (likely(length <= SYN_DP_MAX_DESC_BUFF_LEN)) {
+-		txdesc->length  = ((length << DESC_SIZE1_SHIFT) & DESC_SIZE1_MASK);
+-		txdesc->buffer2 = 0;
++struct syn_dp_tx_prepare {
++	struct syn_dp_info_tx *info;
++	unsigned int start, count, bytes;
++	bool map;
++};
++
++void syn_dp_tx_unmap_buffer(struct syn_dp_info_tx *tx_info, uint32_t index)
++{
++	struct syn_dp_tx_buf *buffer = &tx_info->tx_buf_pool[index];
++
++	if (!buffer->mapped)
++		return;
++	dma_unmap_single(tx_info->dev, buffer->dma_addr,
++			 buffer->dma_len, DMA_TO_DEVICE);
++	buffer->mapped = false;
++	buffer->dma_addr = 0;
++	buffer->dma_len = 0;
++}
++
++static void syn_dp_tx_reset_desc(struct dma_desc_tx *desc)
++{
++	desc->status &= DESC_TX_DESC_END_OF_RING;
++	desc->length = 0;
++	desc->buffer1 = desc->buffer2 = 0;
++}
++
++static int syn_dp_tx_prepare_segment(struct syn_dp_tx_prepare *prepare,
++				    void *data, unsigned int length,
++				    unsigned int packet_len, bool checksum)
++{
++	struct syn_dp_info_tx *tx_info = prepare->info;
++	struct syn_dp_tx_buf *buffer;
++	struct dma_desc_tx *desc;
++	dma_addr_t address;
++	unsigned int index;
++
++	if (!length)
++		return 0;
++	if (length > 2 * SYN_DP_MAX_DESC_BUFF_LEN ||
++	    prepare->count == SYN_DP_TX_DESC_SIZE)
++		return -EMSGSIZE;
++	if (prepare->bytes > packet_len || length > packet_len - prepare->bytes)
++		return -EINVAL;
++	if (!prepare->map)
++		goto counted;
++
++	index = syn_dp_tx_inc_index(prepare->start, prepare->count);
++	buffer = &tx_info->tx_buf_pool[index];
++	if (buffer->mapped || buffer->skb)
++		return -EUCLEAN;
++	address = dma_map_single(tx_info->dev, data, length, DMA_TO_DEVICE);
++	if (dma_mapping_error(tx_info->dev, address))
++		return -EIO;
++	/* Both descriptor addresses and the complete second-buffer range are 32-bit. */
++	if (address > U32_MAX || length - 1 > U32_MAX - address) {
++		dma_unmap_single(tx_info->dev, address, length, DMA_TO_DEVICE);
++		return -EOVERFLOW;
++	}
++
++	buffer->dma_addr = address;
++	buffer->dma_len = length;
++	buffer->mapped = true;
++	desc = tx_info->tx_desc + index;
++	desc->buffer1 = address;
++	if (length <= SYN_DP_MAX_DESC_BUFF_LEN) {
++		desc->length = (length << DESC_SIZE1_SHIFT) & DESC_SIZE1_MASK;
++		desc->buffer2 = 0;
+ 	} else {
+-		txdesc->length  = (SYN_DP_MAX_DESC_BUFF_LEN << DESC_SIZE1_SHIFT) & DESC_SIZE1_MASK;
+-		txdesc->length |= ((length - SYN_DP_MAX_DESC_BUFF_LEN) << DESC_SIZE2_SHIFT) & DESC_SIZE2_MASK;
+-		txdesc->buffer2 = buffer + SYN_DP_MAX_DESC_BUFF_LEN;
+-	}
+-
+-	txdesc->buffer1 = buffer;
+-
+-	txdesc->status = (status | ((tx_idx == (SYN_DP_TX_DESC_SIZE - 1)) ? DESC_TX_DESC_END_OF_RING : 0));
+-
+-	tx_info->tx_idx = syn_dp_tx_inc_index(tx_idx, 1);
+-	return txdesc;
+-}
+-
+-/*
+- * syn_dp_tx_process_nr_frags()
+- *	Process nr frags for the SG packets
+- */
+-static inline struct dma_desc_tx *syn_dp_tx_process_nr_frags(struct syn_dp_info_tx *tx_info,
+-				struct sk_buff *skb, uint32_t *total_length, uint32_t nr_frags)
+-{
+-	struct dma_desc_tx *tx_desc;
+-	dma_addr_t dma_addr;
+-	unsigned int length, i = 0;
++		desc->length = (SYN_DP_MAX_DESC_BUFF_LEN << DESC_SIZE1_SHIFT) &
++			       DESC_SIZE1_MASK;
++		desc->length |= ((length - SYN_DP_MAX_DESC_BUFF_LEN) <<
++				 DESC_SIZE2_SHIFT) & DESC_SIZE2_MASK;
++		desc->buffer2 = address + SYN_DP_MAX_DESC_BUFF_LEN;
++	}
++	desc->status = index == SYN_DP_TX_DESC_MAX_INDEX ?
++			DESC_TX_DESC_END_OF_RING : 0;
++	if (!prepare->count)
++		desc->status |= DESC_TX_FIRST;
++	if (checksum)
++		desc->status |= DESC_TX_CIS_TCP_PSEUDO_CS;
++counted:
++	prepare->count++;
++	prepare->bytes += length;
++	return 0;
++}
++
++static int syn_dp_tx_walk_packet(struct syn_dp_tx_prepare *prepare,
++				struct sk_buff *skb)
++{
++	struct sk_buff *part = skb;
++	unsigned int nodes = 0, i;
++	int ret;
+ 
+ 	do {
+-		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i++];
+-		void *frag_addr = skb_frag_address(frag);
+-		length = skb_frag_size(frag);
+-
+-#ifdef SYN_DP_DEBUG
+-		BUG_ON(!length);
+-#endif
+-
+-		dma_addr = dma_map_single(tx_info->dev, frag_addr, length, DMA_TO_DEVICE);
+-
+-		*total_length += length;
+-		tx_desc = syn_dp_tx_set_desc_sg(tx_info, dma_addr, length, DESC_OWN_BY_DMA);
+-	} while ( i < nr_frags);
+-
+-	return tx_desc;
+-}
+-
+-/*
+- * syn_dp_tx_nr_frags()
+- *	TX routine for Synopsys GMAC SG packets with nr frags
+- */
+-static int syn_dp_tx_nr_frags(struct syn_dp_info_tx *tx_info, struct sk_buff *skb)
+-{
+-	dma_addr_t dma_addr;
+-	unsigned int length = skb_headlen(skb);
+-	struct dma_desc_tx *first_desc, *tx_desc;
+-	unsigned int desc_needed = 0, total_len = 0;
+-	unsigned int nr_frags = skb_shinfo(skb)->nr_frags;
+-	uint32_t last_idx;
+-
+-#ifdef SYN_DP_DEBUG
+-	BUG_ON(nr_frags > MAX_SKB_FRAGS);
+-	BUG_ON(!length);
+-#endif
+-
+-	/*
+-	 * Total descriptor needed will be sum of number of nr_frags and head skb.
+-	 */
+-	desc_needed = 1 + nr_frags;
+-
+-	/*
+-	 * If we don't have enough tx descriptor for this pkt, return busy.
+-	 */
+-	if (unlikely((SYN_DP_TX_DESC_SIZE - atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt)) < desc_needed)) {
++		/* Nested frag_list needs another hardware segmentation level. */
++		if (part->data_len > part->len ||
++		    skb_shinfo(part)->nr_frags > MAX_SKB_FRAGS)
++			return -EINVAL;
++		if (++nodes > SYN_DP_TX_DESC_SIZE ||
++		    (part != skb && skb_has_frag_list(part)))
++			return -EMSGSIZE;
++		ret = syn_dp_tx_prepare_segment(prepare, part->data,
++					       skb_headlen(part), skb->len,
++					       skb->ip_summed == CHECKSUM_PARTIAL);
++		if (ret)
++			return ret;
++		for (i = 0; i < skb_shinfo(part)->nr_frags; i++) {
++			const skb_frag_t *frag = &skb_shinfo(part)->frags[i];
++
++			ret = syn_dp_tx_prepare_segment(prepare, skb_frag_address(frag),
++						       skb_frag_size(frag), skb->len,
++						       skb->ip_summed == CHECKSUM_PARTIAL);
++			if (ret)
++				return ret;
++		}
++		part = part == skb ? skb_shinfo(skb)->frag_list : part->next;
++	} while (part);
++
++	return prepare->count && prepare->bytes == skb->len ? 0 : -EINVAL;
++}
++
++int syn_dp_tx(struct syn_dp_info_tx *tx_info, struct sk_buff *skb)
++{
++	struct syn_dp_tx_prepare prepare = { .info = tx_info };
++	struct syn_dp_tx_buf *last_buffer;
++	struct dma_desc_tx *first;
++	unsigned int needed, index, i;
++	bool frag_list, nr_frags;
++	int ret;
++
++	if (skb_is_gso(skb))
++		return -EOPNOTSUPP;
++	if (!READ_ONCE(tx_info->tx_desc))
++		return -ESHUTDOWN;
++	/* Validate the entire shape before making any mapping or ring change. */
++	ret = syn_dp_tx_walk_packet(&prepare, skb);
++	if (ret == -EMSGSIZE && skb_is_nonlinear(skb) &&
++	    skb->len <= 2 * SYN_DP_MAX_DESC_BUFF_LEN) {
++		/* Preserve valid nested/overscattered frames via the linear path. */
++		ret = skb_linearize(skb);
++		if (ret)
++			return ret;
++		prepare.count = prepare.bytes = 0;
++		ret = syn_dp_tx_walk_packet(&prepare, skb);
++	}
++	if (ret)
++		return ret;
++	needed = prepare.count;
++	frag_list = skb_has_frag_list(skb);
++	nr_frags = skb_shinfo(skb)->nr_frags != 0;
++
++	spin_lock_bh(&tx_info->producer_lock);
++	if (tx_info->stopping || !tx_info->tx_desc) {
++		ret = -ESHUTDOWN;
++		goto unlock_producer;
++	}
++	spin_lock(&tx_info->ring_lock);
++	if (SYN_DP_TX_DESC_SIZE -
++	    atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt) < needed) {
+ 		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_desc_not_avail);
+-		netdev_dbg(tx_info->netdev, "Not enough descriptors available %d", desc_needed);
+-		return NETDEV_TX_BUSY;
+-	}
+-
+-	/*
+-	 * Flush the dma for non-paged skb data
+-	 */
+-	dma_addr = dma_map_single(tx_info->dev, skb->data, length, DMA_TO_DEVICE);
+-
+-	total_len = length;
+-
+-	/*
+-	 * Fill the non paged data (skb->data) in the first descriptor.
+-	 * We defer setting the desc_own_by_dma for first fragment until
+-	 * all the descriptors for this frame are ready.
+-	 */
+-	first_desc = syn_dp_tx_set_desc_sg(tx_info, dma_addr, length, DESC_TX_FIRST);
+-
+-	/*
+-	 * Fill other fragments which are part of nr_frags in the remaining descriptors
+-	 * and returns the last descriptor.
+-	 */
+-	tx_desc = syn_dp_tx_process_nr_frags(tx_info, skb, &total_len, nr_frags);
+-
+-	/*
+-	 * Save the tx index of the last descriptor of the segment
+-	 */
+-	last_idx = ((tx_info->tx_idx - 1) & SYN_DP_TX_DESC_MAX_INDEX);
+-
+-
+-	/*
+-	 * Fill the buffer pool in the last segment of the fragment only
+-	 * instead of filling in all the descriptors for the fragments
+-	 */
+-	tx_info->tx_buf_pool[last_idx].skb = skb;
+-	tx_info->tx_buf_pool[last_idx].len = total_len;
+-	tx_info->tx_buf_pool[last_idx].shinfo_addr_virt = (size_t)skb->end;
+-
+-	/*
+-	 * For the last fragment, Enable the interrupt and set LS bit
+-	 */
+-	tx_desc->status |= (DESC_TX_LAST | DESC_TX_INT_ENABLE);
+-
+-	/*
+-	 * Ensure all write completed before setting own by dma bit so when gmac
+-	 * HW takeover this descriptor, all the fields are filled correctly
+-	 */
+-	wmb();
+-
+-	/*
+-	 * We've now written all of the descriptors in our scatter-gather list
+-	 * and need to write the "OWN" bit of the first one to mark the chain
+-	 * as available to the DMA engine. Also, add checksum calculation bit
+-	 * for the first descriptor if needed
+-	 */
+-	first_desc->status |= (DESC_OWN_BY_DMA | ((skb->ip_summed == CHECKSUM_PARTIAL) ? DESC_TX_CIS_TCP_PSEUDO_CS : 0));
+-
+-	atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_nr_frags_pkts);
+-	atomic_add(desc_needed, (atomic_t *)&tx_info->busy_tx_desc_cnt);
++		ret = -ENOSPC;
++		if (!READ_ONCE(dp_global_ctx.tx_requeue_stop)) {
++			netif_stop_queue(tx_info->netdev);
++			ret = NETDEV_TX_BUSY;
++		}
++		spin_unlock(&tx_info->ring_lock);
++		goto unlock_producer;
++	}
++	spin_unlock(&tx_info->ring_lock);
++
++	prepare.start = tx_info->tx_idx;
++	prepare.count = prepare.bytes = 0;
++	prepare.map = true;
++	ret = syn_dp_tx_walk_packet(&prepare, skb);
++	if (ret)
++		goto rollback;
++
++	index = syn_dp_tx_inc_index(prepare.start, needed - 1);
++	last_buffer = &tx_info->tx_buf_pool[index];
++	last_buffer->skb = skb;
++	last_buffer->len = skb->len;
++	last_buffer->shinfo_addr_virt = (size_t)skb_shinfo(skb);
++	tx_info->tx_desc[index].status |= DESC_TX_LAST | DESC_TX_INT_ENABLE;
++
++	spin_lock(&tx_info->ring_lock);
++	atomic_add(needed, (atomic_t *)&tx_info->busy_tx_desc_cnt);
++	tx_info->tx_idx = syn_dp_tx_inc_index(prepare.start, needed);
++	if (frag_list)
++		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_fraglist_pkts);
++	else if (nr_frags)
++		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_nr_frags_pkts);
++	for (i = 1; i < needed; i++) {
++		struct dma_desc_tx *desc = tx_info->tx_desc +
++					  syn_dp_tx_inc_index(prepare.start, i);
++
++		WRITE_ONCE(desc->status, desc->status | DESC_OWN_BY_DMA);
++	}
++	/* No operation after first OWN publication is allowed to fail. */
++	dma_wmb();
++	first = tx_info->tx_desc + prepare.start;
++	WRITE_ONCE(first->status, first->status | DESC_OWN_BY_DMA);
+ 	syn_resume_dma_tx(tx_info->mac_base);
+-
+-	return 0;
+-}
+-
+-/*
+- * syn_dp_tx_frag_list()
+- *	TX routine for Synopsys GMAC SG packets with frag lists
+- */
+-static int syn_dp_tx_frag_list(struct syn_dp_info_tx *tx_info, struct sk_buff *skb)
+-{
+-	dma_addr_t dma_addr;
+-	struct sk_buff *iter_skb;
+-	struct dma_desc_tx *first_desc, *tx_desc;
+-	unsigned int length = skb_headlen(skb);
+-	unsigned int desc_needed = 1, total_len = 0;
+-	unsigned int nr_frags = skb_shinfo(skb)->nr_frags, fraglist_nr_frags = 0;
+-	uint32_t last_idx;
+-
+-	/*
+-	 * When skb is fragmented, count the number of descriptors needed
+-	 */
+-	if (unlikely(nr_frags)) {
+-#ifdef SYN_DP_DEBUG
+-		BUG_ON(nr_frags > MAX_SKB_FRAGS);
+-		BUG_ON(!length);
+-#endif
+-		desc_needed += nr_frags;
+-	}
+-
+-	/*
+-	 * Walk through fraglist skbs, also making note of nr_frags
+-	 */
+-	skb_walk_frags(skb, iter_skb) {
+-		fraglist_nr_frags = skb_shinfo(iter_skb)->nr_frags;
+-
+-#ifdef SYN_DP_DEBUG
+-		/* It is unlikely below check hits, BUG_ON */
+-		BUG_ON(fraglist_nr_frags > MAX_SKB_FRAGS);
+-#endif
+-		/* One descriptor for skb->data and more for nr_frags */
+-		desc_needed +=  (1 + fraglist_nr_frags);
+-	}
+-
+-	/*
+-	 * If we don't have enough tx descriptor for this pkt, return busy.
+-	 */
+-	if (unlikely((SYN_DP_TX_DESC_SIZE - atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt)) < desc_needed)) {
+-		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_desc_not_avail);
+-		netdev_dbg(tx_info->netdev, "Not enough descriptors available %d", desc_needed);
+-		return NETDEV_TX_BUSY;
+-	}
+-
+-	dma_addr = dma_map_single(tx_info->dev, skb->data, length, DMA_TO_DEVICE);
+-
+-	total_len = length;
+-
+-	/*
+-	 * Fill the first skb of the frag list chain in the first descriptor
+-	 * We defer setting the desc_own_by_dma bit for first fragment until
+-	 * all the descriptors for this frame are ready.
+-	 */
+-	first_desc = syn_dp_tx_set_desc_sg(tx_info, dma_addr, length, DESC_TX_FIRST);
+-
+-	/*
+-	 * Fill other fragments which are part of nr_frags in the remaining descriptors
+-	 * and returns the last descriptor.
+-	 */
+-	if (unlikely(nr_frags)) {
+-		tx_desc = syn_dp_tx_process_nr_frags(tx_info, skb, &total_len, nr_frags);
+-	}
+-
+-	/*
+-	 * Walk through fraglist skbs, also making note of nr_frags and filling it in descriptors
+-	 */
+-	skb_walk_frags(skb, iter_skb) {
+-		length = skb_headlen(iter_skb);
+-
+-#ifdef SYN_DP_DEBUG
+-		BUG_ON(!length);
+-#endif
+-
+-		dma_addr = dma_map_single(tx_info->dev, iter_skb->data, length, DMA_TO_DEVICE);
+-
+-		total_len += length;
+-
+-		/*
+-		 * Fill the non paged data skb->data.
+-		 */
+-		tx_desc = syn_dp_tx_set_desc_sg(tx_info, dma_addr, length, DESC_OWN_BY_DMA);
+-
+-		/*
+-		 * Check if nr_frags is available for the skb. If so, fill the
+-		 * fragments in the descriptors else, continue
+-		 */
+-		fraglist_nr_frags = skb_shinfo(iter_skb)->nr_frags;
+-
+-		/*
+-		 * Fill other fragments which are part of nr_frags in the remaining descriptors
+-		 * and returns the last descriptor.
+-		 */
+-		if (unlikely(fraglist_nr_frags)) {
+-			tx_desc = syn_dp_tx_process_nr_frags(tx_info, iter_skb, &total_len, fraglist_nr_frags);
++	spin_unlock(&tx_info->ring_lock);
++	ret = 0;
++	goto unlock_producer;
++
++rollback:
++	for (i = 0; i < prepare.count; i++) {
++		index = syn_dp_tx_inc_index(prepare.start, i);
++		syn_dp_tx_unmap_buffer(tx_info, index);
++		syn_dp_tx_clear_buf_entry(tx_info, index);
++		syn_dp_tx_reset_desc(tx_info->tx_desc + index);
++	}
++	/* tx_idx and busy never included this unsubmitted packet. */
++unlock_producer:
++	spin_unlock_bh(&tx_info->producer_lock);
++	return ret;
++}
++
++int syn_dp_tx_complete(struct syn_dp_info_tx *tx_info, int budget)
++{
++	unsigned int count, i, index;
++	uint32_t status, packets = 0, bytes = 0;
++	struct netdev_queue *queue;
++	struct syn_dp_tx_buf *buffer;
++	struct dma_desc_tx *desc;
++	int completed = 0;
++	bool another_batch;
++
++	if (budget <= 0)
++		return 0;
++	do {
++		count = 0;
++		spin_lock_bh(&tx_info->ring_lock);
++		while (tx_info->tx_desc &&
++		       atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt) &&
++		       completed < budget && count < SYN_DP_NAPI_BUDGET_TX) {
++			index = tx_info->tx_comp_idx;
++			desc = tx_info->tx_desc + index;
++			status = READ_ONCE(desc->status);
++			if (syn_dp_gmac_is_tx_desc_owned_by_dma(status))
++				break;
++
++			syn_dp_tx_unmap_buffer(tx_info, index);
++			buffer = &tx_info->tx_buf_pool[index];
++			if (status & DESC_TX_LAST) {
++				tx_info->skb_free_list[count] = buffer->skb;
++				tx_info->shinfo_addr_virt[count++] = buffer->shinfo_addr_virt;
++				if (!(status & DESC_TX_ERROR)) {
++					packets++;
++					bytes += buffer->len;
++				}
++			}
++			if (status & DESC_TX_ERROR)
++				syn_dp_tx_error_cnt(tx_info, status);
++			syn_dp_tx_clear_buf_entry(tx_info, index);
++			syn_dp_tx_reset_desc(desc);
++			tx_info->tx_comp_idx = syn_dp_tx_inc_index(index, 1);
++			atomic_dec((atomic_t *)&tx_info->busy_tx_desc_cnt);
++			completed++;
+ 		}
+-	}
+-
+-	/*
+-	 * Save the tx index of the last descriptor of the segment
+-	 */
+-	last_idx = ((tx_info->tx_idx - 1) & SYN_DP_TX_DESC_MAX_INDEX);
+-
+-
+-	/*
+-	 * Fill the buffer pool in the last segment of the fragment only
+-	 * instead of filling in all the descriptors for the fragments
+-	 */
+-	tx_info->tx_buf_pool[last_idx].skb = skb;
+-	tx_info->tx_buf_pool[last_idx].len = total_len;
+-	tx_info->tx_buf_pool[last_idx].shinfo_addr_virt = (size_t)skb->end;
+-
+-	/*
+-	 * For the last fragment, Enable the interrupt and set LS bit
+-	 */
+-	tx_desc->status |= (DESC_TX_LAST | DESC_TX_INT_ENABLE);
+-
+-	/*
+-	 * Ensure all write completed before setting own by dma bit so when gmac
+-	 * HW takeover this descriptor, all the fields are filled correctly
+-	 */
+-	wmb();
+-
+-	/*
+-	 * We've now written all of the descriptors in our scatter-gather list
+-	 * and need to write the "OWN" bit of the first one to mark the chain
+-	 * as available to the DMA engine. Also, add checksum calculation
+-	 * bit in the first descriptor if needed.
+-	 */
+-	first_desc->status |= (DESC_OWN_BY_DMA | ((skb->ip_summed == CHECKSUM_PARTIAL) ? DESC_TX_CIS_TCP_PSEUDO_CS : 0));
+-
+-	atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_fraglist_pkts);
+-	atomic_add(desc_needed, (atomic_t *)&tx_info->busy_tx_desc_cnt);
+-	syn_resume_dma_tx(tx_info->mac_base);
+-
+-	return 0;
+-}
+-
+-/*
+- * syn_dp_tx_set_desc()
+- *	Populate the tx desc structure with the buffer address.
+- */
+-static inline void syn_dp_tx_set_desc(struct syn_dp_info_tx *tx_info,
+-					   uint32_t buffer, struct sk_buff *skb, uint32_t offload_needed,
+-					   uint32_t status)
+-{
+-	uint32_t tx_idx = tx_info->tx_idx;
+-	struct dma_desc_tx *txdesc = tx_info->tx_desc + tx_idx;
+-	unsigned int length = skb->len;
+-
+-#ifdef SYN_DP_DEBUG
+-	BUG_ON(atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt) > SYN_DP_TX_DESC_SIZE);
+-	BUG_ON(txdesc != (tx_info->tx_desc + tx_idx));
+-	BUG_ON(!syn_dp_gmac_is_tx_desc_empty(txdesc));
+-	BUG_ON(syn_dp_gmac_is_tx_desc_owned_by_dma(txdesc));
+-#endif
+-
+-	if (likely(length <= SYN_DP_MAX_DESC_BUFF_LEN)) {
+-		txdesc->length = ((length << DESC_SIZE1_SHIFT) & DESC_SIZE1_MASK);
+-		txdesc->buffer2 = 0;
+-	} else {
+-		txdesc->length = (SYN_DP_MAX_DESC_BUFF_LEN << DESC_SIZE1_SHIFT) & DESC_SIZE1_MASK;
+-		txdesc->length |= ((length - SYN_DP_MAX_DESC_BUFF_LEN) << DESC_SIZE2_SHIFT) & DESC_SIZE2_MASK;
+-		txdesc->buffer2 = buffer + SYN_DP_MAX_DESC_BUFF_LEN;
+-	}
+-
+-	txdesc->buffer1 = buffer;
+-
+-	tx_info->tx_buf_pool[tx_idx].skb = skb;
+-	tx_info->tx_buf_pool[tx_idx].len = length;
+-	tx_info->tx_buf_pool[tx_idx].shinfo_addr_virt = (size_t)skb->end;
+-
+-	/*
+-	 * Ensure all write completed before setting own by dma bit so when gmac
+-	 * HW takeover this descriptor, all the fields are filled correctly
+-	 */
+-	wmb();
+-
+-	txdesc->status = (status | ((offload_needed) ? DESC_TX_CIS_TCP_PSEUDO_CS : 0) | ((tx_idx == (SYN_DP_TX_DESC_SIZE - 1)) ? DESC_TX_DESC_END_OF_RING : 0));
+-
+-	tx_info->tx_idx = syn_dp_tx_inc_index(tx_idx, 1);
+-}
+-
+-/*
+- * syn_dp_tx_complete()
+- *	Xmit complete, clear descriptor and free the skb
+- */
+-int syn_dp_tx_complete(struct syn_dp_info_tx *tx_info, int budget)
+-{
+-	int busy;
+-	uint32_t status;
+-	struct dma_desc_tx *desc = NULL;
+-	struct sk_buff *skb;
+-	uint32_t tx_skb_index, len;
+-	uint32_t tx_packets = 0, total_len = 0;
+-	uint32_t count = 0;
+-	uint32_t free_idx;
+-	struct syn_dp_tx_buf *tx_buf;
+-	struct netdev_queue *nq;
+-
+-	busy = atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt);
+-
+-	if (unlikely(!busy)) {
+-
+-		/*
+-		 * No descriptors are held by GMAC DMA, we are done
+-		 */
+-		netdev_dbg(tx_info->netdev, "No descriptors held by DMA");
+-		return 0;
+-	}
+-
+-	if (likely(busy > budget)) {
+-		busy = budget;
+-	}
+-
+-	tx_skb_index = syn_dp_tx_comp_index_get(tx_info);
+-	do {
+-		desc = syn_dp_tx_comp_desc_get(tx_info);
+-		status = desc->status;
+-		if (unlikely(syn_dp_gmac_is_tx_desc_owned_by_dma(status))) {
+-
+-			/*
+-			 * Descriptor still held by gmac dma, so we are done.
+-			 */
+-			break;
++		another_batch = count == SYN_DP_NAPI_BUDGET_TX && completed < budget;
++		queue = netdev_get_tx_queue(tx_info->netdev, SYN_DP_QUEUE_INDEX);
++		if (tx_info->tx_desc && !tx_info->stopping &&
++		    atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt) < SYN_DP_TX_DESC_SIZE &&
++		    netif_tx_queue_stopped(queue) && netif_carrier_ok(tx_info->netdev))
++			netif_wake_queue(tx_info->netdev);
++		spin_unlock_bh(&tx_info->ring_lock);
++
++		for (i = 0; i < count; i++) {
++			if (i + 1 < count)
++				prefetch((void *)tx_info->shinfo_addr_virt[i + 1]);
++			dev_kfree_skb_any(tx_info->skb_free_list[i]);
++			tx_info->skb_free_list[i] = NULL;
++			tx_info->shinfo_addr_virt[i] = 0;
+ 		}
+-
+-		dma_unmap_single(tx_info->dev, desc->buffer1, desc->length, DMA_TO_DEVICE);
+-
+-		if (likely(status & DESC_TX_LAST)) {
+-			tx_skb_index = syn_dp_tx_comp_index_get(tx_info);
+-			tx_buf = &tx_info->tx_buf_pool[tx_skb_index];
+-			skb = tx_info->skb_free_list[count] = tx_buf->skb;
+-			len = tx_buf->len;
+-
+-#ifdef SYN_DP_DEBUG
+-			BUG_ON(!skb);
+-#endif
+-
+-			tx_info->shinfo_addr_virt[count++] = tx_buf->shinfo_addr_virt;
+-			syn_dp_tx_clear_buf_entry(tx_info, tx_skb_index);
+-
+-			if (likely(!(status & DESC_TX_ERROR))) {
+-
+-				/*
+-				 * No error, record tx pkts/bytes and collision.
+-				 */
+-				tx_packets++;
+-				total_len += len;
+-			}
+-		}
+-
+-		if (unlikely(status & DESC_TX_ERROR)) {
+-			/*
+-			 * Some error happened, collect error statistics.
+-			 */
+-			syn_dp_tx_error_cnt(tx_info, status);
+-		}
+-
+-		tx_info->tx_comp_idx = syn_dp_tx_inc_index(tx_info->tx_comp_idx, 1);
+-
+-		/*
+-		 * Busy is used to count the workdone with assigned budget.
+-		 */
+-		atomic_dec((atomic_t *)&tx_info->busy_tx_desc_cnt);
+-	} while (--busy);
+-
+-	/*
+-	 * Prefetching the shinfo area before releasing to skb recycler gives benefit
+-	 * in performance.
+-	 * All the completed skb's shinfo are prefetched and skb's are freed in batch.
+-	 */
+-	for (free_idx = 0; free_idx < count; free_idx++) {
+-		if (likely((free_idx + 1) < count)) {
+-			prefetch((void *)tx_info->shinfo_addr_virt[free_idx+1]);
+-		}
+-		dev_kfree_skb_any(tx_info->skb_free_list[free_idx]);
+-		tx_info->skb_free_list[free_idx] = NULL;
+-		tx_info->shinfo_addr_virt[free_idx] = 0;
+-	}
+-
+-	atomic64_add(tx_packets, (atomic64_t *)&tx_info->tx_stats.tx_packets);
+-	atomic64_add(total_len, (atomic64_t *)&tx_info->tx_stats.tx_bytes);
+-
+-	nq = netdev_get_tx_queue(tx_info->netdev, SYN_DP_QUEUE_INDEX);
+-
+-	/*
+-	 * Wake up queue if stopped earlier due to lack of descriptors
+-	 */
+-	if (unlikely(netif_tx_queue_stopped(nq)) && netif_carrier_ok(tx_info->netdev)) {
+-		netif_wake_queue(tx_info->netdev);
+-	}
+-
+-	return budget - busy;
+-}
+-
+-/*
+- * syn_dp_tx_sg()
+- *	Tx routine for Synopsys GMAC scatter gather packets
+- */
+-static int syn_dp_tx_sg(struct syn_dp_info_tx *tx_info, struct sk_buff *skb)
+-{
+-	struct net_device *netdev = tx_info->netdev;
+-	bool has_frag_list;
+-	unsigned int nr_frags;
+-
+-	has_frag_list = skb_has_frag_list(skb);
+-	nr_frags = skb_shinfo(skb)->nr_frags;
+-
+-	/*
+-	 * Handle SG for below skb types.
+-	 * 1. skb has fraglist
+-	 * 2. skb has fraglist and any of the fragments can have nr_frags
+-	 */
+-	if (has_frag_list) {
+-		return syn_dp_tx_frag_list(tx_info, skb);
+-	}
+-
+-	/*
+-	 * Handle SG for nr_frags
+-	 */
+-	if (nr_frags) {
+-		return syn_dp_tx_nr_frags(tx_info, skb);
+-	}
+-
+-	netdev_dbg(netdev, "Not a valid non-linear packet");
+-	return -1;
+-}
+-
+-/*
+- * syn_dp_tx()
+- *	TX routine for Synopsys GMAC
+- */
+-int syn_dp_tx(struct syn_dp_info_tx *tx_info, struct sk_buff *skb)
+-{
+-	struct net_device *netdev = tx_info->netdev;
+-	dma_addr_t dma_addr;
+-
+-	/*
+-	 * Check if it's a Scatter Gather packet
+-	 */
+-	if (unlikely(skb_is_nonlinear(skb))) {
+-		return syn_dp_tx_sg(tx_info, skb);
+-	}
+-
+-	/*
+-	 * Linear skb processing
+-	 */
+-	if (unlikely((SYN_DP_TX_DESC_SIZE - atomic_read((atomic_t *)&tx_info->busy_tx_desc_cnt)) < 1)) {
+-		atomic64_inc((atomic64_t *)&tx_info->tx_stats.tx_desc_not_avail);
+-		netdev_dbg(netdev, "Not enough descriptors available");
+-		return NETDEV_TX_BUSY;
+-	}
+-
+-	dma_addr = dma_map_single(tx_info->dev, skb->data, skb->len, DMA_TO_DEVICE);
+-
+-	/*
+-	 * Queue packet to the GMAC rings
+-	 */
+-	syn_dp_tx_set_desc(tx_info, dma_addr, skb, (skb->ip_summed == CHECKSUM_PARTIAL),
+-			(DESC_TX_LAST | DESC_TX_FIRST | DESC_TX_INT_ENABLE | DESC_OWN_BY_DMA));
+-
+-	syn_resume_dma_tx(tx_info->mac_base);
+-	atomic_inc((atomic_t *)&tx_info->busy_tx_desc_cnt);
+-	return 0;
+-}
++	} while (another_batch);
++
++	atomic64_add(packets, (atomic64_t *)&tx_info->tx_stats.tx_packets);
++	atomic64_add(bytes, (atomic64_t *)&tx_info->tx_stats.tx_bytes);
++	return completed;
++}
+--- a/hal/dp_ops/syn_gmac_dp/syn_dp_tx.h
++++ b/hal/dp_ops/syn_gmac_dp/syn_dp_tx.h
+@@ -30,7 +30,10 @@
+ 	struct sk_buff *skb;	/* Buffer pointer populated to Tx dma desc */
+ 	uint32_t len;		/* Length of the buffer provided to descriptor */
+ 	size_t shinfo_addr_virt;	/* Buffer address to prefetch the shinfo
+-						during Tx complete*/
++							during Tx complete*/
++	dma_addr_t dma_addr;
++	uint32_t dma_len;
++	bool mapped;
+ };
+ 
+ /*
+@@ -45,6 +48,10 @@
+ 						DMA at any given time */
+ 	uint32_t tx_comp_idx;		/* index of the tx descriptor owned by DMA */
+ 	uint32_t tx_idx;		/* index of the tx descriptor next available with driver */
++	spinlock_t producer_lock;
++	spinlock_t ring_lock;
++	bool locks_initialized;
++	bool stopping;
+ 	struct syn_dp_tx_buf tx_buf_pool[SYN_DP_TX_DESC_SIZE];
+ 					/* Tx skb pool helping TX DMA descriptors */
+ 	struct nss_dp_hal_gmac_stats_tx tx_stats;
+@@ -62,6 +69,8 @@
+  * syn_dp_tx_inc_index()
+  * 	Increment Tx descriptor index
+  */
++void syn_dp_tx_unmap_buffer(struct syn_dp_info_tx *tx_info, uint32_t index);
++
+ static inline uint32_t syn_dp_tx_inc_index(uint32_t index, uint32_t inc)
+ {
+ 	return ((index + inc) & SYN_DP_TX_DESC_MAX_INDEX);
+--- a/nss_dp_attach.c
++++ b/nss_dp_attach.c
+@@ -98,6 +98,9 @@
+     if (dp_dev->drv_flags & NSS_DP_PRIV_FLAG(INIT_OVERRIDE))
+         return -EBUSY;
+ 
++    if (was_up && nss_dp_hal_get_data_plane_ops()->prepare_override_open &&
++        !netif_carrier_ok(netdev))
++        return -EAGAIN;
+     netif_tx_disable(netdev);
+     if (was_up) {
+         struct nss_dp_data_plane_ops *host = nss_dp_hal_get_data_plane_ops();
+@@ -106,8 +109,6 @@
+             /* MP must see a live GMAC/PHY on its first OPEN. Close only the
+              * host DMA/NAPI path; the PHY and carrier remain operational.
+              */
+-            if (!netif_carrier_ok(netdev))
+-                return -EAGAIN;
+             ret = dp_dev->data_plane_ops->close(dp_dev->dpc);
+             if (!ret) {
+                 clear_bit(__NSS_DP_UP, &dp_dev->flags);
+--- a/nss_dp_ethtools.c
++++ b/nss_dp_ethtools.c
+@@ -256,7 +256,7 @@
+ {
+ 	struct nss_dp_dev *dp_priv = (struct nss_dp_dev *)netdev_priv(netdev);
+ 	fal_port_eee_cfg_t port_eee_cfg;
+-	uint32_t port_id, supported, advertised, lp_advertised;
++	uint32_t port_id, supported = 0, advertised = 0, lp_advertised = 0;
+ 	sw_error_t ret;
+ 
+ 	memset(&port_eee_cfg, 0, sizeof(fal_port_eee_cfg_t));
