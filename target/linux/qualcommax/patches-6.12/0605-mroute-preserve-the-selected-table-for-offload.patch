@@ -1,5 +1,3 @@
-diff --git a/include/net/ip.h b/include/net/ip.h
-index 39c6a40..c548b1d 100644
 --- a/include/net/ip.h
 +++ b/include/net/ip.h
 @@ -59,6 +59,7 @@ struct inet_skb_parm {
@@ -10,11 +8,9 @@ index 39c6a40..c548b1d 100644
  
  	u16			frag_max_size;
  };
-diff --git a/include/linux/ipv6.h b/include/linux/ipv6.h
-index 5aeeed2..731012f 100644
 --- a/include/linux/ipv6.h
 +++ b/include/linux/ipv6.h
-@@ -156,6 +156,7 @@ struct inet6_skb_parm {
+@@ -178,6 +178,7 @@ struct inet6_skb_parm {
  #define IP6SKB_SEG6	      256
  #define IP6SKB_FAKEJUMBO      512
  #define IP6SKB_MULTIPATH      1024
@@ -22,11 +18,9 @@ index 5aeeed2..731012f 100644
  };
  
  #if defined(CONFIG_NET_L3_MASTER_DEV)
-diff --git a/include/linux/mroute.h b/include/linux/mroute.h
-index fc1f6f1..3c5fa19 100644
 --- a/include/linux/mroute.h
 +++ b/include/linux/mroute.h
-@@ -35,6 +35,9 @@ typedef void (*ipmr_mfc_event_offload_callback_t)(__be32 group, __be32 origin,
+@@ -35,6 +35,9 @@ typedef void (*ipmr_mfc_event_offload_ca
  					       u32 count, u32 ifindexes[], u8 op);
  bool ipmr_register_mfc_event_offload_callback(ipmr_mfc_event_offload_callback_t cb);
  void ipmr_unregister_mfc_event_offload_callback(void);
@@ -36,11 +30,9 @@ index fc1f6f1..3c5fa19 100644
  int ipmr_find_mfc_entry(struct net *net, __be32 origin, __be32 group,
  		       u32 capacity, u32 ifindexes[], u64 *cookie);
  int ipmr_mfc_stats_update(struct net *net, __be32 origin, __be32 group,
-diff --git a/include/linux/mroute6.h b/include/linux/mroute6.h
-index bfc36a3..235ca85 100644
 --- a/include/linux/mroute6.h
 +++ b/include/linux/mroute6.h
-@@ -43,6 +43,9 @@ typedef void (*ip6mr_mfc_event_offload_callback_t)(struct in6_addr *group,
+@@ -43,6 +43,9 @@ typedef void (*ip6mr_mfc_event_offload_c
  						u32 count, u32 ifindexes[], u8 op);
  bool ip6mr_register_mfc_event_offload_callback(ip6mr_mfc_event_offload_callback_t cb);
  void ip6mr_unregister_mfc_event_offload_callback(void);
@@ -50,11 +42,9 @@ index bfc36a3..235ca85 100644
  int ip6mr_find_mfc_entry(struct net *net, const struct in6_addr *origin,
  			const struct in6_addr *group, u32 capacity, u32 ifindexes[],
  			u64 *cookie);
-diff --git a/net/ipv4/ipmr.c b/net/ipv4/ipmr.c
-index f53971f..21087cd 100644
 --- a/net/ipv4/ipmr.c
 +++ b/net/ipv4/ipmr.c
-@@ -2360,6 +2360,25 @@ static struct mr_table *ipmr_rt_fib_lookup(struct net *net, struct sk_buff *skb)
+@@ -2360,6 +2360,25 @@ static struct mr_table *ipmr_rt_fib_look
  /* Multicast packets for forwarding arrive here
   * Called with rcu_read_lock();
   */
@@ -88,7 +78,7 @@ index f53971f..21087cd 100644
  	/* skb->dev passed in is the loX master dev for vrfs.
  	 * As there are no vifs associated with loopback devices,
  	 * get the proper interface that does have a vif associated with it.
-@@ -2392,6 +2412,7 @@ int ip_mr_input(struct sk_buff *skb)
+@@ -2395,6 +2415,7 @@ int ip_mr_input(struct sk_buff *skb)
  		kfree_skb(skb);
  		return PTR_ERR(mrt);
  	}
@@ -96,11 +86,9 @@ index f53971f..21087cd 100644
  	if (!local) {
  		if (IPCB(skb)->opt.router_alert) {
  			if (ip_call_ra_chain(skb))
-diff --git a/net/ipv6/ip6mr.c b/net/ipv6/ip6mr.c
-index fe41eff..68e9426 100644
 --- a/net/ipv6/ip6mr.c
 +++ b/net/ipv6/ip6mr.c
-@@ -2466,6 +2466,22 @@ dont_forward:
+@@ -2467,6 +2467,22 @@ dont_forward:
   *	Multicast packets for forwarding arrive here
   */
  
@@ -122,10 +110,10 @@ index fe41eff..68e9426 100644
 +
  int ip6_mr_input(struct sk_buff *skb)
  {
- 	struct mfc6_cache *cache;
-@@ -2478,6 +2494,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 	struct net_device *dev = skb->dev;
+@@ -2479,6 +2495,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 	};
  	int err;
- 	struct net_device *dev;
  
 +	IP6CB(skb)->flags &= ~IP6SKB_MROUTE_OFFLOAD_DEFAULT;
  	/* skb->dev passed in is the master dev for vrfs.

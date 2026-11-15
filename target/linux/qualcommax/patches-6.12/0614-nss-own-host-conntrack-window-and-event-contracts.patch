@@ -2,7 +2,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
 
 --- a/include/linux/netfilter/nf_conntrack_tcp.h
 +++ b/include/linux/netfilter/nf_conntrack_tcp.h
-@@ -28,6 +28,9 @@
+@@ -28,6 +28,9 @@ struct ip_ct_tcp {
  	/* For SYN packets while we may be out-of-sync */
  	u_int8_t	last_wscale;	/* Last window scaling factor seen */
  	u_int8_t	last_flags;	/* Last flags set */
@@ -14,7 +14,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
  #endif /* _NF_CONNTRACK_TCP_H */
 --- a/include/linux/thread_info.h
 +++ b/include/linux/thread_info.h
-@@ -205,6 +205,10 @@
+@@ -205,6 +205,10 @@ static inline int arch_within_stack_fram
  #endif
  
  #ifdef CONFIG_HARDENED_USERCOPY
@@ -27,7 +27,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
  
 --- a/net/bridge/br_mdb.c
 +++ b/net/bridge/br_mdb.c
-@@ -2198,6 +2198,11 @@
+@@ -2200,6 +2200,11 @@ static int br_mcast_offload_ports(struct
  		}
  		if ((!listener && !router) || port->state != BR_STATE_FORWARDING)
  			continue;
@@ -41,7 +41,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
  			return -EAGAIN;
 --- a/net/core/neighbour.c
 +++ b/net/core/neighbour.c
-@@ -1321,7 +1321,7 @@
+@@ -1321,7 +1321,7 @@ static int __neigh_update(struct neighbo
  			  u8 new, u32 flags, u32 nlmsg_pid,
  			  struct netlink_ext_ack *extack)
  {
@@ -50,7 +50,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
  	int update_isrouter = 0;
  	struct net_device *dev;
  	int err, notify = 0;
-@@ -1381,11 +1381,6 @@
+@@ -1381,11 +1381,6 @@ static int __neigh_update(struct neighbo
  		   - compare new & old
  		   - if they are different, check override flag
  		 */
@@ -62,7 +62,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
         if ((old & NUD_VALID) &&
  		    !memcmp(lladdr, neigh->ha, dev->addr_len))
  			lladdr = neigh->ha;
-@@ -1449,6 +1444,9 @@
+@@ -1449,6 +1444,9 @@ static int __neigh_update(struct neighbo
  	}
  
  	if (lladdr != neigh->ha) {
@@ -72,7 +72,7 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
  		write_seqlock(&neigh->ha_lock);
  		memcpy(&neigh->ha, lladdr, dev->addr_len);
  		write_sequnlock(&neigh->ha_lock);
-@@ -1510,6 +1508,8 @@
+@@ -1510,6 +1508,8 @@ out:
  		neigh_update_managed_list(neigh);
  	if (notify) {
  		neigh_update_notify(neigh, nlmsg_pid);
@@ -83,11 +83,10 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
      }
 --- a/net/netfilter/Kconfig
 +++ b/net/netfilter/Kconfig
-@@ -171,6 +171,14 @@
- 	  Allow connection acceleration managers to observe connection events
+@@ -180,6 +180,14 @@ config NF_CONNTRACK_EVENTS_OBSERVER
  	  without replacing ctnetlink's primary notifier or its delivery result.
  	  If unsure, say N.
-+
+ 
 +config NF_CONNTRACK_ECM_HOST_LIBERAL
 +	bool "Separate host TCP window tracking for ECM offload"
 +	depends on NF_CONNTRACK_EVENTS_OBSERVER
@@ -95,12 +94,13 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
 +	  Keep the host's offload window policy separate from BE_LIBERAL.
 +	  ECM requires this private conntrack state when NSS forwards packets
 +	  without updating the host TCP window on every packet.
- 
++
  config NF_CONNTRACK_TIMEOUT
  	bool  'Connection tracking timeout'
+ 	depends on NETFILTER_ADVANCED
 --- a/net/netfilter/nf_conntrack_ecache.c
 +++ b/net/netfilter/nf_conntrack_ecache.c
-@@ -156,10 +156,16 @@
+@@ -158,17 +158,24 @@ static int __nf_conntrack_eventmask_repo
  	u32 old, want;
  	int ret;
  
@@ -114,23 +114,31 @@ Subject: [PATCH] net: preserve NSS conntrack events and usercopy compiler contra
 +	if (!((events | missed) & e->ctmask)) {
 +		rcu_read_unlock();
  		return 0;
--
--	rcu_read_lock();
 +	}
  
+ #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
+ 	item->ret = 0;
+ 	atomic_notifier_call_chain(&net->ct.nf_conntrack_chain,
+ 				   events | missed, item);
+ 	ret = item->ret;
++	rcu_read_unlock();
+ #else
+-	rcu_read_lock();
+-
  	notify = rcu_dereference(net->ct.nf_conntrack_event_cb);
  	if (!notify && !nf_conntrack_has_event_observers(net)) {
-@@ -168,7 +174,6 @@
+ 		rcu_read_unlock();
+@@ -176,7 +183,6 @@ static int __nf_conntrack_eventmask_repo
  	}
  
  	ret = notify ? notify->ct_event(events | missed, item) : 0;
 -	nf_conntrack_notify_observers(net, events | missed, item);
  	rcu_read_unlock();
+ #endif
  
- 	if (likely(ret >= 0 && missed == 0))
 --- a/net/netfilter/nf_conntrack_proto_tcp.c
 +++ b/net/netfilter/nf_conntrack_proto_tcp.c
-@@ -506,6 +506,9 @@
+@@ -506,6 +506,9 @@ nf_tcp_store_invalid(const struct nf_con
  	bool be_liberal;
  
  	be_liberal = sender->flags & IP_CT_TCP_FLAG_BE_LIBERAL || tn->tcp_be_liberal;

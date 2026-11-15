@@ -4,13 +4,11 @@ Keep ctnetlink's primary notifier and delivery result when ECM observes
 connection teardown. Synchronize RCU at unregister. A separate Kconfig
 option also keeps the changed netns layout in the kernel module ABI hash.
 
-diff --git a/include/net/netfilter/nf_conntrack_ecache.h b/include/net/netfilter/nf_conntrack_ecache.h
-index 0c1dac318e..06dfac1bcd 100644
 --- a/include/net/netfilter/nf_conntrack_ecache.h
 +++ b/include/net/netfilter/nf_conntrack_ecache.h
-@@ -69,6 +69,27 @@ void nf_conntrack_register_notifier(struct net *net,
- 				   const struct nf_ct_event_notifier *nb);
+@@ -84,6 +84,27 @@ void nf_conntrack_register_notifier(stru
  void nf_conntrack_unregister_notifier(struct net *net);
+ #endif
  
 +#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
 +/* Passive connection observers coexist with the primary ctnetlink notifier.
@@ -36,21 +34,19 @@ index 0c1dac318e..06dfac1bcd 100644
  void nf_ct_deliver_cached_events(struct nf_conn *ct);
  int nf_conntrack_eventmask_report(unsigned int eventmask, struct nf_conn *ct,
  				  u32 portid, int report);
-@@ -101,7 +122,8 @@ nf_conntrack_event_cache(enum ip_conntrack_events event, struct nf_conn *ct)
- 	struct net *net = nf_ct_net(ct);
- 	struct nf_conntrack_ecache *e;
- 
+@@ -119,7 +140,8 @@ nf_conntrack_event_cache(enum ip_conntra
+ #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
+ 	if (!rcu_access_pointer(net->ct.nf_conntrack_chain.head))
+ #else
 -	if (!rcu_access_pointer(net->ct.nf_conntrack_event_cb))
 +	if (!rcu_access_pointer(net->ct.nf_conntrack_event_cb) &&
 +	    !nf_conntrack_has_event_observers(net))
+ #endif
  		return;
  
- 	e = nf_ct_ecache_find(ct);
-diff --git a/include/net/netns/conntrack.h b/include/net/netns/conntrack.h
-index bae914815a..06d3ff2777 100644
 --- a/include/net/netns/conntrack.h
 +++ b/include/net/netns/conntrack.h
-@@ -96,6 +96,9 @@ struct nf_ip_net {
+@@ -98,6 +98,9 @@ struct nf_ip_net {
  struct netns_ct {
  #ifdef CONFIG_NF_CONNTRACK_EVENTS
  	bool ecache_dwork_pending;
@@ -60,11 +56,9 @@ index bae914815a..06d3ff2777 100644
  #endif
  	u8			sysctl_log_invalid; /* Log invalid packets */
  	u8			sysctl_events;
-diff --git a/net/netfilter/Kconfig b/net/netfilter/Kconfig
-index e10e3b8791..490a0e4741 100644
 --- a/net/netfilter/Kconfig
 +++ b/net/netfilter/Kconfig
-@@ -164,6 +164,14 @@ config NF_CONNTRACK_EVENTS
+@@ -172,6 +172,14 @@ config NF_CONNTRACK_CHAIN_EVENTS
  
  	  If unsure, say `N'.
  
@@ -79,8 +73,6 @@ index e10e3b8791..490a0e4741 100644
  config NF_CONNTRACK_TIMEOUT
  	bool  'Connection tracking timeout'
  	depends on NETFILTER_ADVANCED
-diff --git a/net/netfilter/nf_conntrack_ecache.c b/net/netfilter/nf_conntrack_ecache.c
-index efabee2063..2e7f10c926 100644
 --- a/net/netfilter/nf_conntrack_ecache.c
 +++ b/net/netfilter/nf_conntrack_ecache.c
 @@ -20,6 +20,7 @@
@@ -119,7 +111,7 @@ index efabee2063..2e7f10c926 100644
  #define DYING_NULLS_VAL			((1 << 30) + 1)
  #define ECACHE_MAX_JIFFIES		msecs_to_jiffies(10)
  #define ECACHE_RETRY_JIFFIES		msecs_to_jiffies(10)
-@@ -140,12 +162,13 @@ static int __nf_conntrack_eventmask_report(struct nf_conntrack_ecache *e,
+@@ -148,12 +170,13 @@ static int __nf_conntrack_eventmask_repo
  	rcu_read_lock();
  
  	notify = rcu_dereference(net->ct.nf_conntrack_event_cb);
@@ -133,11 +125,11 @@ index efabee2063..2e7f10c926 100644
 +	ret = notify ? notify->ct_event(events | missed, item) : 0;
 +	nf_conntrack_notify_observers(net, events | missed, item);
  	rcu_read_unlock();
+ #endif
  
- 	if (likely(ret >= 0 && missed == 0))
-@@ -283,6 +306,54 @@ void nf_conntrack_unregister_notifier(struct net *net)
- }
+@@ -323,6 +346,54 @@ EXPORT_SYMBOL_GPL(nf_ct_expect_unregiste
  EXPORT_SYMBOL_GPL(nf_conntrack_unregister_notifier);
+ #endif
  
 +#ifdef CONFIG_NF_CONNTRACK_EVENTS_OBSERVER
 +int nf_conntrack_register_event_observer(struct net *net,
@@ -190,7 +182,7 @@ index efabee2063..2e7f10c926 100644
  void nf_conntrack_ecache_work(struct net *net, enum nf_ct_ecache_state state)
  {
  	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
-@@ -344,6 +415,9 @@ void nf_conntrack_ecache_pernet_init(struct net *net)
+@@ -388,6 +459,9 @@ void nf_conntrack_ecache_pernet_init(str
  	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
  
  	net->ct.sysctl_events = nf_ct_events;

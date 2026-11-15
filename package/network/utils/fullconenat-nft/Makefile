@@ -31,8 +31,7 @@ define KernelPackage/nft-fullcone
   TITLE:=nftables fullcone expression support
   FILES:= $(PKG_BUILD_DIR)/src/nft_fullcone.ko
   KCONFIG:= \
-    CONFIG_NF_CONNTRACK_EVENTS=y \
-    CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y
+    CONFIG_NF_CONNTRACK_EVENTS=y
   AUTOLOAD:=$(call AutoProbe,nft_fullcone)
 endef
 

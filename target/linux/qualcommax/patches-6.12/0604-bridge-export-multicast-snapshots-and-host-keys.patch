@@ -1,11 +1,9 @@
 --- a/include/linux/if_bridge.h
 +++ b/include/linux/if_bridge.h
-@@ -34,6 +34,57 @@
- struct br_ip_list {
- 	struct list_head list;
+@@ -36,6 +36,57 @@ struct br_ip_list {
  	struct br_ip addr;
-+};
-+
+ };
+ 
 +/* A dirty-key notification. dev is the bridge, borrowed only for the atomic
 + * callback. Callbacks must not re-enter the multicast lock or retain pg/src
 + * pointers; defer snapshots and hold dev if scheduling asynchronous work.
@@ -55,10 +53,12 @@
 +	bool router_ipv4;
 +	bool router_ipv6;
 +	bool vlan_snooping;
- };
- 
++};
++
  #define BR_HAIRPIN_MODE		BIT(0)
-@@ -81,6 +132,16 @@
+ #define BR_BPDU_GUARD		BIT(1)
+ #define BR_ROOT_BLOCK		BIT(2)
+@@ -81,6 +132,16 @@ bool br_multicast_has_querier_adjacent(s
  bool br_multicast_has_router_adjacent(struct net_device *dev, int proto);
  bool br_multicast_enabled(const struct net_device *dev);
  bool br_multicast_router(const struct net_device *dev);
@@ -77,7 +77,7 @@
  					     struct list_head *br_ip_list)
 --- a/net/bridge/br_private.h
 +++ b/net/bridge/br_private.h
-@@ -344,6 +344,7 @@
+@@ -344,6 +344,7 @@ struct net_bridge_group_src {
  struct net_bridge_port_group_sg_key {
  	struct net_bridge_port		*port;
  	struct br_ip			addr;
@@ -85,7 +85,7 @@
  };
  
  struct net_bridge_port_group {
-@@ -354,6 +355,7 @@
+@@ -354,6 +355,7 @@ struct net_bridge_port_group {
  	unsigned char			filter_mode;
  	unsigned char			grp_query_rexmit_cnt;
  	unsigned char			rt_protocol;
@@ -93,7 +93,7 @@
  
  	struct hlist_head		src_list;
  	unsigned int			src_ents;
-@@ -419,6 +421,7 @@
+@@ -419,6 +421,7 @@ struct net_bridge_port {
  
  #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
  	struct bridge_mcast_stats	__percpu *mcast_stats;
@@ -101,7 +101,7 @@
  
  	u32				multicast_eht_hosts_limit;
  	u32				multicast_eht_hosts_cnt;
-@@ -545,6 +548,7 @@
+@@ -546,6 +549,7 @@ struct net_bridge {
  	u32				hash_max;
  
  	spinlock_t			multicast_lock;
@@ -109,7 +109,7 @@
  
  	struct rhashtable		mdb_hash_tbl;
  	struct rhashtable		sg_port_tbl;
-@@ -999,13 +1003,14 @@
+@@ -990,13 +994,14 @@ br_multicast_new_port_group(struct net_b
  			    const struct br_ip *group,
  			    struct net_bridge_port_group __rcu *next,
  			    unsigned char flags, const unsigned char *src,
@@ -125,7 +125,7 @@
  void br_rtr_notify(struct net_device *dev, struct net_bridge_mcast_port *pmctx,
  		   int type);
  void br_multicast_del_pg(struct net_bridge_mdb_entry *mp,
-@@ -1081,6 +1086,64 @@
+@@ -1072,6 +1077,64 @@ static inline bool br_group_is_l2(const
  #define mlock_dereference(X, br) \
  	rcu_dereference_protected(X, lockdep_is_held(&br->multicast_lock))
  
@@ -200,11 +200,10 @@
  #include <net/ip.h>
  #include <net/netlink.h>
  #include <net/switchdev.h>
-@@ -15,6 +16,61 @@
- #endif
+@@ -16,6 +17,61 @@
  
  #include "br_private.h"
-+
+ 
 +static ATOMIC_NOTIFIER_HEAD(br_mcast_offload_chain);
 +
 +int br_mcast_offload_mdb_register_notify(struct notifier_block *nb)
@@ -259,10 +258,11 @@
 +{
 +	br_mcast_offload_notify(br->dev, NULL, NULL, 0, RTM_NEWMDB);
 +}
- 
++
  static bool
  br_ip4_rports_get_timer(struct net_bridge_mcast_port *pmctx,
-@@ -527,6 +583,8 @@
+ 			unsigned long *timer)
+@@ -527,6 +583,8 @@ void br_mdb_notify(struct net_device *de
  	int err = -ENOBUFS;
  
  	br_switchdev_mdb_notify(dev, mp, pg, type);
@@ -271,7 +271,7 @@
  
  	skb = nlmsg_new(rtnl_mdb_nlmsg_size(pg), GFP_ATOMIC);
  	if (!skb)
-@@ -608,6 +666,8 @@
+@@ -608,6 +666,8 @@ void br_rtr_notify(struct net_device *de
  	ifindex = pmctx ? pmctx->port->dev->ifindex : 0;
  	vid = pmctx && br_multicast_port_ctx_is_vlan(pmctx) ? pmctx->vlan->vid :
  							      0;
@@ -280,7 +280,7 @@
  	skb = nlmsg_new(rtnl_rtr_nlmsg_size(), GFP_ATOMIC);
  	if (!skb)
  		goto errout;
-@@ -752,7 +812,7 @@
+@@ -752,7 +812,7 @@ static int br_mdb_add_group_sg(const str
  	for (pp = &mp->ports;
  	     (p = mlock_dereference(*pp, cfg->br)) != NULL;
  	     pp = &p->next) {
@@ -289,7 +289,7 @@
  			if (!(cfg->nlflags & NLM_F_REPLACE)) {
  				NL_SET_ERR_MSG_MOD(extack, "(S, G) group is already joined by port");
  				return -EEXIST;
-@@ -765,7 +825,7 @@
+@@ -765,7 +825,7 @@ static int br_mdb_add_group_sg(const str
  	}
  
  	p = br_multicast_new_port_group(cfg->p, &cfg->group, *pp, flags, NULL,
@@ -298,7 +298,7 @@
  	if (unlikely(!p))
  		return -ENOMEM;
  
-@@ -977,7 +1037,7 @@
+@@ -977,7 +1037,7 @@ static int br_mdb_add_group_star_g(const
  	for (pp = &mp->ports;
  	     (p = mlock_dereference(*pp, cfg->br)) != NULL;
  	     pp = &p->next) {
@@ -307,7 +307,7 @@
  			if (!(cfg->nlflags & NLM_F_REPLACE)) {
  				NL_SET_ERR_MSG_MOD(extack, "(*, G) group is already joined by port");
  				return -EEXIST;
-@@ -991,7 +1051,7 @@
+@@ -991,7 +1051,7 @@ static int br_mdb_add_group_star_g(const
  
  	p = br_multicast_new_port_group(cfg->p, &cfg->group, *pp, flags, NULL,
  					cfg->filter_mode, cfg->rt_protocol,
@@ -316,7 +316,7 @@
  	if (unlikely(!p))
  		return -ENOMEM;
  
-@@ -1341,6 +1401,7 @@
+@@ -1341,6 +1401,7 @@ static int __br_mdb_del(const struct br_
  {
  	struct br_mdb_entry *entry = cfg->entry;
  	struct net_bridge *br = cfg->br;
@@ -324,7 +324,7 @@
  	struct net_bridge_mdb_entry *mp;
  	struct net_bridge_port_group *p;
  	struct net_bridge_port_group __rcu **pp;
-@@ -1362,15 +1423,28 @@
+@@ -1362,15 +1423,28 @@ static int __br_mdb_del(const struct br_
  		goto unlock;
  	}
  
@@ -360,7 +360,7 @@
  	}
  
  unlock:
-@@ -1654,6 +1728,291 @@
+@@ -1656,6 +1730,291 @@ cancel:
  	return err;
  }
  
@@ -654,7 +654,7 @@
  {
 --- a/net/bridge/br_multicast.c
 +++ b/net/bridge/br_multicast.c
-@@ -78,7 +78,7 @@
+@@ -78,7 +78,7 @@ __br_multicast_add_group(struct net_brid
  			 const unsigned char *src,
  			 u8 filter_mode,
  			 bool igmpv2_mldv1,
@@ -662,8 +662,8 @@
 +			 bool blocked, bool host_specific);
  static void br_multicast_find_del_pg(struct net_bridge *br,
  				     struct net_bridge_port_group *pg);
- static void __br_multicast_stop(struct net_bridge_mcast *brmctx);
-@@ -276,15 +276,29 @@
+ static void __br_multicast_del_pg(struct net_bridge_mdb_entry *mp,
+@@ -280,17 +280,31 @@ br_multicast_ctx_should_use(const struct
  
  static bool br_port_group_equal(struct net_bridge_port_group *p,
  				struct net_bridge_port *port,
@@ -680,8 +680,8 @@
  		return true;
  
  	return ether_addr_equal(src, p->eth_addr);
-+}
-+
+ }
+ 
 +static void br_multicast_sg_key_init(struct net_bridge_port_group_sg_key *key,
 +		struct net_bridge_port *port, const struct br_ip *group,
 +		const u8 *host_mac, bool host_specific)
@@ -692,10 +692,12 @@
 +	if (host_specific && host_mac &&
 +	    is_valid_ether_addr(host_mac))
 +		ether_addr_copy(key->host_mac, host_mac);
- }
- 
++}
++
  static void __fwd_add_star_excl(struct net_bridge_mcast_port *pmctx,
-@@ -295,16 +309,16 @@
+ 				struct net_bridge_port_group *pg,
+ 				struct br_ip *sg_ip)
+@@ -299,16 +313,16 @@ static void __fwd_add_star_excl(struct n
  	struct net_bridge_port_group *src_pg;
  	struct net_bridge_mcast *brmctx;
  
@@ -716,7 +718,7 @@
  	if (IS_ERR_OR_NULL(src_pg) ||
  	    src_pg->rt_protocol != RTPROT_KERNEL)
  		return;
-@@ -319,9 +333,8 @@
+@@ -323,9 +337,8 @@ static void __fwd_del_star_excl(struct n
  	struct net_bridge *br = pg->key.port->br;
  	struct net_bridge_port_group *src_pg;
  
@@ -728,7 +730,7 @@
  	src_pg = br_sg_port_find(br, &sg_key);
  	if (!src_pg || !(src_pg->flags & MDB_PG_FLAGS_STAR_EXCL) ||
  	    src_pg->rt_protocol != RTPROT_KERNEL)
-@@ -479,8 +492,6 @@
+@@ -483,8 +496,6 @@ void br_multicast_sg_add_exclude_ports(s
  		return;
  
  	br_multicast_sg_host_state(star_mp, sg);
@@ -737,7 +739,7 @@
  	/* we need to add all exclude ports to the S,G */
  	for (pg = mlock_dereference(star_mp->ports, br);
  	     pg;
-@@ -490,7 +501,9 @@
+@@ -494,7 +505,9 @@ void br_multicast_sg_add_exclude_ports(s
  		if (pg == sg || pg->filter_mode == MCAST_INCLUDE)
  			continue;
  
@@ -748,7 +750,7 @@
  		if (br_sg_port_find(br, &sg_key))
  			continue;
  
-@@ -501,8 +514,9 @@
+@@ -505,8 +518,9 @@ void br_multicast_sg_add_exclude_ports(s
  
  		src_pg = __br_multicast_add_group(brmctx, pmctx,
  						  &sg->key.addr,
@@ -760,7 +762,7 @@
  		if (IS_ERR_OR_NULL(src_pg) ||
  		    src_pg->rt_protocol != RTPROT_KERNEL)
  			continue;
-@@ -531,7 +545,8 @@
+@@ -535,7 +549,8 @@ static void br_multicast_fwd_src_add(str
  
  	sg = __br_multicast_add_group(brmctx, pmctx, &sg_ip,
  				      src->pg->eth_addr, MCAST_INCLUDE, false,
@@ -770,7 +772,7 @@
  	if (IS_ERR_OR_NULL(sg))
  		return;
  	src->flags |= BR_SGRP_F_INSTALLED;
-@@ -570,7 +585,8 @@
+@@ -574,7 +589,8 @@ static void br_multicast_fwd_src_remove(
  	for (pp = &mp->ports;
  	     (p = mlock_dereference(*pp, src->br)) != NULL;
  	     pp = &p->next) {
@@ -780,7 +782,7 @@
  			continue;
  
  		if (p->rt_protocol != RTPROT_KERNEL &&
-@@ -595,10 +611,10 @@
+@@ -599,10 +615,10 @@ static void br_multicast_fwd_src_handle(
  
  	br_multicast_fwd_src_add(src);
  
@@ -794,7 +796,7 @@
  
  	sg = br_sg_port_find(src->br, &sg_key);
  	if (!sg || (sg->flags & MDB_PG_FLAGS_PERMANENT))
-@@ -1405,6 +1421,7 @@
+@@ -1429,6 +1445,7 @@ struct net_bridge_port_group *br_multica
  			const unsigned char *src,
  			u8 filter_mode,
  			u8 rt_protocol,
@@ -802,7 +804,7 @@
  			struct netlink_ext_ack *extack)
  {
  	struct net_bridge_port_group *p;
-@@ -1420,8 +1437,8 @@
+@@ -1444,8 +1461,8 @@ struct net_bridge_port_group *br_multica
  		goto dec_out;
  	}
  
@@ -813,7 +815,7 @@
  	p->flags = flags;
  	p->filter_mode = filter_mode;
  	p->rt_protocol = rt_protocol;
-@@ -1505,7 +1522,7 @@
+@@ -1530,7 +1547,7 @@ __br_multicast_add_group(struct net_brid
  			 const unsigned char *src,
  			 u8 filter_mode,
  			 bool igmpv2_mldv1,
@@ -822,7 +824,7 @@
  {
  	struct net_bridge_port_group __rcu **pp;
  	struct net_bridge_port_group *p = NULL;
-@@ -1527,14 +1544,15 @@
+@@ -1552,14 +1569,15 @@ __br_multicast_add_group(struct net_brid
  	for (pp = &mp->ports;
  	     (p = mlock_dereference(*pp, brmctx->br)) != NULL;
  	     pp = &p->next) {
@@ -840,7 +842,7 @@
  	if (unlikely(!p)) {
  		p = ERR_PTR(-ENOMEM);
  		goto out;
-@@ -1565,7 +1583,8 @@
+@@ -1590,7 +1608,8 @@ static int br_multicast_add_group(struct
  
  	spin_lock(&brmctx->br->multicast_lock);
  	pg = __br_multicast_add_group(brmctx, pmctx, group, src, filter_mode,
@@ -850,7 +852,7 @@
  	/* NULL is considered valid for host joined groups */
  	err = PTR_ERR_OR_ZERO(pg);
  	spin_unlock(&brmctx->br->multicast_lock);
-@@ -1691,6 +1710,7 @@
+@@ -1716,6 +1735,7 @@ static void br_mc_router_state_change(st
  		.u.mrouter = is_mc_router,
  	};
  
@@ -858,7 +860,7 @@
  	switchdev_port_attr_set(p->dev, &attr, NULL);
  }
  
-@@ -1731,6 +1751,7 @@
+@@ -1756,6 +1776,7 @@ static void br_multicast_querier_expired
  					 struct bridge_mcast_own_query *query)
  {
  	spin_lock(&brmctx->br->multicast_lock);
@@ -866,7 +868,7 @@
  	if (!netif_running(brmctx->br->dev) ||
  	    br_multicast_ctx_vlan_global_disabled(brmctx) ||
  	    !br_opt_get(brmctx->br, BROPT_MULTICAST_ENABLED))
-@@ -2833,7 +2854,8 @@
+@@ -2858,7 +2879,8 @@ br_multicast_find_port(struct net_bridge
  	for (pg = mlock_dereference(mp->ports, br);
  	     pg;
  	     pg = mlock_dereference(pg->next, br))
@@ -876,7 +878,7 @@
  			return pg;
  
  	return NULL;
-@@ -3260,8 +3282,10 @@
+@@ -3285,8 +3307,10 @@ br_multicast_update_query_timer(struct n
  				struct bridge_mcast_other_query *query,
  				unsigned long max_delay)
  {
@@ -888,7 +890,7 @@
  
  	mod_timer(&query->timer, jiffies + brmctx->multicast_querier_interval);
  }
-@@ -3677,7 +3701,8 @@
+@@ -3702,7 +3726,8 @@ br_multicast_leave_group(struct net_brid
  		for (pp = &mp->ports;
  		     (p = mlock_dereference(*pp, brmctx->br)) != NULL;
  		     pp = &p->next) {
@@ -898,7 +900,7 @@
  				continue;
  
  			if (p->flags & MDB_PG_FLAGS_PERMANENT)
-@@ -3705,7 +3730,8 @@
+@@ -3730,7 +3755,8 @@ br_multicast_leave_group(struct net_brid
  		for (p = mlock_dereference(mp->ports, brmctx->br);
  		     p != NULL && pmctx != NULL;
  		     p = mlock_dereference(p->next, brmctx->br)) {
@@ -908,7 +910,7 @@
  				continue;
  
  			if (!hlist_unhashed(&p->mglist) &&
-@@ -4682,6 +4708,7 @@
+@@ -4705,6 +4731,7 @@ int br_multicast_toggle(struct net_bridg
  		goto unlock;
  
  	br_opt_toggle(br, BROPT_MULTICAST_ENABLED, !!val);
@@ -916,7 +918,7 @@
  	if (!br_opt_get(br, BROPT_MULTICAST_ENABLED)) {
  		change_snoopers = true;
  		br_multicast_disable_all_ports(br);
-@@ -4752,6 +4779,7 @@
+@@ -4775,6 +4802,7 @@ int br_multicast_set_querier(struct net_
  		goto unlock;
  
  	WRITE_ONCE(brmctx->multicast_querier, val);
@@ -924,7 +926,7 @@
  	if (!val)
  		goto unlock;
  
-@@ -4790,7 +4818,10 @@
+@@ -4813,7 +4841,10 @@ int br_multicast_set_igmp_version(struct
  	}
  
  	spin_lock_bh(&brmctx->br->multicast_lock);
@@ -936,7 +938,7 @@
  	spin_unlock_bh(&brmctx->br->multicast_lock);
  
  	return 0;
-@@ -4810,7 +4841,10 @@
+@@ -4833,7 +4864,10 @@ int br_multicast_set_mld_version(struct
  	}
  
  	spin_lock_bh(&brmctx->br->multicast_lock);
@@ -950,7 +952,7 @@
  	return 0;
 --- a/net/bridge/br_forward.c
 +++ b/net/bridge/br_forward.c
-@@ -314,32 +314,53 @@
+@@ -314,32 +314,53 @@ void br_multicast_flood(struct net_bridg
  
  	while (p || rp) {
  		struct net_bridge_port *port, *lport, *rport;
@@ -960,35 +962,34 @@
  		rport = br_multicast_rport_from_node_skb(rp, skb);
  
  		if ((unsigned long)lport > (unsigned long)rport) {
+-			port = lport;
 +			struct net_bridge_port_group *override;
-+
- 			port = lport;
--
+ 
 -			if (port->flags & BR_MULTICAST_TO_UNICAST) {
+-				maybe_deliver_addr(lport, skb, p->eth_addr,
+-						   local_orig);
+-				goto delivered;
++			port = lport;
 +			if (br_multicast_port_has_aggregate(mdst, lport)) {
 +				consume_port = true;
 +				if (!br_multicast_port_allowed(mdst, lport, allow_mode_include))
 +					goto delivered;
 +				goto ordinary;
-+			}
+ 			}
 +			override = br_multicast_port_static_override(mdst, lport);
 +			if (override && p != override)
 +				goto delivered;
 +
-+			if ((!allow_mode_include &&
-+			     p->filter_mode == MCAST_INCLUDE) ||
-+			    (p->flags & MDB_PG_FLAGS_BLOCKED))
-+				goto delivered;
+ 			if ((!allow_mode_include &&
+ 			     p->filter_mode == MCAST_INCLUDE) ||
+ 			    (p->flags & MDB_PG_FLAGS_BLOCKED))
+ 				goto delivered;
 +			if ((port->flags & BR_MULTICAST_TO_UNICAST) &&
 +			    !READ_ONCE(port->mcast_hw_to_unicast)) {
- 				maybe_deliver_addr(lport, skb, p->eth_addr,
- 						   local_orig);
- 				goto delivered;
- 			}
--			if ((!allow_mode_include &&
--			     p->filter_mode == MCAST_INCLUDE) ||
--			    (p->flags & MDB_PG_FLAGS_BLOCKED))
--				goto delivered;
++				maybe_deliver_addr(lport, skb, p->eth_addr,
++						   local_orig);
++				goto delivered;
++			}
  		} else {
  			port = rport;
  		}
@@ -1013,7 +1014,7 @@
  	}
 --- a/net/bridge/br_if.c
 +++ b/net/bridge/br_if.c
-@@ -776,6 +776,14 @@
+@@ -776,6 +776,14 @@ void br_port_flags_change(struct net_bri
  
  	if (mask & (BR_NEIGH_SUPPRESS | BR_NEIGH_VLAN_SUPPRESS))
  		br_recalculate_neigh_suppress_enabled(br);
